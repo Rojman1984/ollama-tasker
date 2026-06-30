@@ -208,7 +208,7 @@ Update this section as phases complete.
 | 4 | Providers (Ollama, Anthropic, OpenAI, Fugu) + ToolNormalizer | ✅ COMPLETE |
 | 5 | Modes + CLI Shell | ✅ COMPLETE |
 | 6 | Higher Orchestrator Tiers (2, 3, 4) | ✅ COMPLETE |
-| 7 | Hardening (Notifiers, MindSeed, OpenAI API server) | ⬜ NOT STARTED |
+| 7 | Hardening (Notifiers, MindSeed, OpenAI API server) | ✅ COMPLETE |
 
 ---
 
@@ -290,8 +290,8 @@ python -m unittest tests.unit.test_orchestrator_nano -v
 
 *(Update this section at the end of every Cowork or Code session)*
 
-**Last worked on:** Phase 6 — Higher Orchestrator Tiers (_parse.py shared module, DualLLMOrchestrator Tier 2, ReasoningOrchestrator Tier 3, CloudOrchestrator Tier 4)  
-**Last file modified:** `tasker/orchestrator/tier4_cloud.py`, `tests/unit/test_orchestrator_tier4.py`  
-**Next task:** Begin Phase 7 — Hardening (DesktopNotifier + WebhookNotifier verification, OpenAI-compat API server, hardware profile auto-detection, MindSeed episodic memory bridge for COWORK mode)  
+**Last worked on:** Phase 7 — Hardening (notifier tests, OpenAI-compat API server, hardware auto-detection, episodic memory bridge + CoworkRunner wiring)  
+**Last file modified:** `tests/unit/test_episodic_bridge.py`, `tasker/session/episodic.py`, `tasker/modes/cowork.py`  
+**Next task:** Core roadmap complete. Future work: live integration testing against real Ollama Cloud account, real Anthropic/OpenAI/Fugu API keys, and first real multi-step COWORK task end-to-end on TASKER-P1 hardware.  
 **Blockers:** None  
 **Open decisions:** None — all captured in SDD v0.1.0-draft

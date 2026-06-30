@@ -12,6 +12,7 @@ from __future__ import annotations
 from tasker.modes.base import TaskerMode
 from tasker.session.budget import OllamaSessionBudget
 from tasker.session.checkpoint import Checkpoint, CheckpointStore
+from tasker.session.episodic import EpisodicMemoryBridge, NullEpisodicMemoryBridge
 from tasker.session.manager import SessionManager
 from tasker.tools.bundles import COWORK_BUNDLE
 from tasker.workers.base import (
@@ -71,12 +72,14 @@ class CoworkRunner:
         store: CheckpointStore,
         hardware_profile: str = "unknown",
         *,
+        episodic_bridge: EpisodicMemoryBridge | None = None,
         _step_fn=None,
     ) -> None:
         self._mode    = mode
         self._mgr     = session_mgr
         self._store   = store
         self._profile = hardware_profile
+        self._bridge  = episodic_bridge or NullEpisodicMemoryBridge()
         self._step_fn = _step_fn
 
     async def run(self, task: str, plan: ExecutionPlan) -> str | None:
@@ -90,12 +93,15 @@ class CoworkRunner:
         """
         outputs: list[str] = []
         completed: list[dict] = []
+        episodic_pos: int = 0
 
         for step in plan.steps:
             directive = self._mgr.tick()
 
             if directive in (SessionDirective.PAUSE, SessionDirective.HOLD):
-                await self._checkpoint_and_pause(task, plan, step.index, completed)
+                await self._checkpoint_and_pause(
+                    task, plan, step.index, completed, episodic_pos
+                )
                 return None
 
             step.status = StepStatus.ACTIVE
@@ -107,7 +113,14 @@ class CoworkRunner:
 
             step.status = StepStatus.COMPLETED
             outputs.append(output)
-            completed.append({"step_index": step.index, "output": output})
+            record = {"step_index": step.index, "output": output}
+            completed.append(record)
+
+            # Record step completion in episodic memory; update position
+            episodic_pos = self._bridge.record_event(
+                self._mgr.session_id,
+                {"kind": "step_completed", **record},
+            )
 
         return "\n".join(outputs)
 
@@ -117,6 +130,7 @@ class CoworkRunner:
         plan: ExecutionPlan,
         current_index: int,
         completed: list[dict],
+        episodic_log_position: int = 0,
     ) -> None:
         cp = Checkpoint.new(
             mode=self._mode.name,
@@ -126,5 +140,6 @@ class CoworkRunner:
             plan=plan,
             current_step_index=current_index,
             completed_steps=completed,
+            episodic_log_position=episodic_log_position,
         )
         await self._mgr.pause(cp)

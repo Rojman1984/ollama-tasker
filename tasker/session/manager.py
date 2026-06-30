@@ -10,6 +10,7 @@ See SDD Sections 5.8 and 9.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import datetime
 
 from tasker.session.budget import OllamaSessionBudget
@@ -40,6 +41,7 @@ class SessionManager:
         self._notifier = notifier
         self._auto_resume = auto_resume
         self._state = SessionState.RUNNING
+        self._session_id = str(uuid.uuid4())
         self._pause_event = asyncio.Event()
         self._pause_event.set()   # un-blocked at start; clear() when paused
         self._resume_timer: asyncio.TimerHandle | None = None
@@ -55,6 +57,10 @@ class SessionManager:
     @property
     def budget(self) -> OllamaSessionBudget:
         return self._budget
+
+    @property
+    def session_id(self) -> str:
+        return self._session_id
 
     # ------------------------------------------------------------------ #
     # Core tick (SDD 9.1)

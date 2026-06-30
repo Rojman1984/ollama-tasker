@@ -78,7 +78,14 @@ command in TESTING_GUIDE.md.
 - [x] CheckpointStore: _save_ns + _save_seq tiebreaker (fixes Windows clock resolution flake)
 
 ## Phase 7 -- Hardening
-- [ ] DesktopNotifier + WebhookNotifier verified
-- [ ] OpenAI-compat API server
-- [ ] Hardware profile auto-detection
-- [ ] MindSeed episodic memory bridge (COWORK mode)
+- [x] DesktopNotifier + WebhookNotifier verified (plyer fallback + exception swallow confirmed)
+- [x] tests/unit/test_notifier.py passing (23 tests — all 5 notifiers + SessionEvent factories)
+- [x] tasker/api/server.py — POST /v1/chat/completions, GET /v1/models, GET /v1/workers (aiohttp.web)
+- [x] tests/integration/test_api_server.py passing (15 tests — request routing, error responses, shape)
+- [x] tasker/config/detect.py — hardware auto-detection (psutil + nvidia-smi), suggest_profile()
+- [x] psutil>=5.9 added to pyproject.toml dependencies
+- [x] tests/unit/test_hardware_detect.py passing (16 tests — mocked detection, threshold coverage)
+- [x] tasker/session/episodic.py — EpisodicMemoryBridge ABC, NullEpisodicMemoryBridge, JsonlEpisodicMemoryBridge
+- [x] SessionManager.session_id property added (uuid4, stable per session)
+- [x] CoworkRunner wired to episodic_bridge — records step_completed events, saves episodic_log_position to Checkpoint
+- [x] tests/unit/test_episodic_bridge.py passing (15 tests — Null/Jsonl bridges + CoworkRunner wiring)
