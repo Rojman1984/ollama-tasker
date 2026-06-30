@@ -100,7 +100,7 @@ async def _run_task(
     try:
         plan = await orchestrator.plan(task, classifier_output, all_workers)
     except Exception as exc:
-        print(f"Planning failed: {exc}")
+        print(f"Planning failed: {type(exc).__name__}: {exc}")
         return
 
     print(f"  {len(plan.steps)} step(s)")
