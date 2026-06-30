@@ -61,6 +61,7 @@ async def _run_task(
     """Dispatch a task through the orchestrator → provider pipeline."""
     from tasker.modes.base import ModeConfigurator
     from tasker.orchestrator.factory import build_orchestrator
+    from tasker.tools.bundles import get_definitions
     from tasker.workers.base import (
         AgentRole,
         Capability,
@@ -83,6 +84,11 @@ async def _run_task(
         return
 
     config = configurator.resolve(profile, mode_cfg)
+    # config.mode.tool_bundle is already the correct per-mode set -- SECURE's
+    # bundle is pre-stripped of network tools at the YAML/TaskerMode level
+    # (see tasker/tools/bundles.py secure_bundle()/SECURE_BUNDLE), so no
+    # extra stripping is needed here.
+    tool_defs = get_definitions(config.mode.tool_bundle)
     ollama_provider = OllamaProvider(profile.ollama_base_url)
     provider_map = {ProviderType.OLLAMA: ollama_provider}
     orchestrator = build_orchestrator(config, provider_map)
@@ -125,7 +131,7 @@ async def _run_task(
             step_index=step.index,
             role=step.role,
             instruction=step.description,
-            tools=[],
+            tools=tool_defs,
             context={},
             routing_policy=config.mode.routing_policy,
             privacy_tier=config.mode.privacy_tier,

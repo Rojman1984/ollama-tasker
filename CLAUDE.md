@@ -370,28 +370,73 @@ tool_results` is produced but nothing re-invokes a worker with results
 appended), so this field has no live test to run yet. Default `"tool"` is
 untested in practice; flagged in SDD_ADDENDUM_7.5.md A.2b as a follow-up.
 
-**Gap found, not fixed this session:** `cli/shell.py`'s `_run_task()` hardcodes
-`tools=[]` on every `WorkerTask` (line ~128) — no mode's tool bundle
-(`tasker/tools/bundles.py`) is wired into the live CLI dispatch for *any*
-mode, not just LFM25 workers. `tasker --mode code "what is the weather in
-McAllen TX"` therefore answered from the model's own knowledge instead of
-invoking anything — there was nothing in `task.tools` to invoke. The LFM25
-protocol itself is validated end-to-end directly against the Ollama API
-(see above); the "first real tool call through the harness" CLI-level
-criterion is blocked by this separate, pre-existing gap, not by anything in
-this session's change.
+**Git history reconciled (this session):** `origin/master` turned out to have
+a complete, unrelated git history (initial scaffold → Phases 1–7 →
+orchestrator factory → a Phase 7.5 SDD addendum commit) — this working copy
+had been `git init`'d fresh in the 7.5.1 session without realizing the GitHub
+repo already had history, so the two diverged with zero common ancestor.
+File content was almost entirely identical (most files showed 0 diff); real
+differences were this session's actual new work layered on top of what was
+already on origin. Merged with `--allow-unrelated-histories`; restored two
+files that existed only on origin (`.claude/settings.json`, root-level
+`OLLAMA_TASKER_SDD.md`). The bulk of the apparent conflict set (103 files)
+was a spurious executable-bit difference with byte-identical content, not a
+real disagreement. 356/356 tests passing post-merge. **Push still blocked** —
+no GitHub credentials configured in this environment (no credential helper,
+no `gh` CLI). Needs a PAT via `gh auth login` or an SSH remote from the user.
 
-**Last file modified:** `tasker/workers/base.py`, `tasker/tools/normalizer.py`,
-`tasker/workers/providers/ollama.py`, `config/workers/worker_registry.yaml`,
-`docs/SDD_ADDENDUM_7.5.md`, `docs/TASKER_CHECKLIST.md`,
-`tests/unit/test_tool_normalizer.py`, `tests/unit/test_provider_ollama.py`,
-`tests/unit/test_worker_manifest.py`  
-**Next task:** Wire `tasker/tools/bundles.py` mode bundles into
-`cli/shell.py`'s `_run_task()` so `task.tools` is actually populated per
-mode — prerequisite for any real CLI-level agentic tool-call smoke test
-(LFM25 or otherwise). Then Phase 7.5.2 — `GPUBackend` ABC, `GPUInfo`
-dataclass, `NoGpuBackend`, `tasker-hardware` applet scaffold.  
-**Blockers:** None  
+**`cli/shell.py` tools=[] gap fixed:** `_run_task()` previously hardcoded
+`tools=[]` on every `WorkerTask`, for every mode — no mode's tool bundle
+(`tasker/tools/bundles.py`) ever reached a live model call. Fixed: resolves
+`config.mode.tool_bundle` via `get_definitions()` and passes the real
+`list[ToolDefinition]` into `WorkerTask`. SECURE's network-tool stripping
+was already baked into its bundle at the data level (`tasker/modes/secure.py`
+already assigns `SECURE_BUNDLE`, and `secure.yaml`'s `tool_bundle` already
+lists only the stripped set) — no extra code needed there, just reaching it.
+Confirmed live: CODE mode's `task.tools` had 7 entries (bash, code_search,
+file_read, file_write, git, linter, test_runner), correctly reaching
+`OllamaProvider`.
+
+**Bigger, separate, pre-existing bug found while live-testing the fix:**
+`SingleLLMOrchestrator.plan()` asks `lfm2.5-thinking:latest` for a JSON plan,
+then falls back to `NanoOrchestrator`'s hardcoded single-step "Answer the
+task" template whenever `parse_plan()` fails to parse the response.
+`lfm2.5-thinking:latest` sometimes returns a `capabilities` value outside the
+`Capability` enum (observed: `"bash"` instead of `"tool_use"`), which makes
+`Capability(c)` raise inside `parse_plan()`, silently triggering the
+fallback — **the worker never sees the real task text when this happens**.
+Reproduced directly by hand-sending the planning prompt to the model.
+`python -m cli.shell --mode code "Use the bash tool to list the files in the
+current directory"` hit this fallback in **4/4** runs — never fired a real
+tool call through the literal requested command. When the planning step
+*does* succeed (confirmed once via a direct orchestrator→provider script,
+same pipeline, no CLI print wrapper), the real task reached the worker and
+LFM25 fired a genuine, correctly-parsed tool call end-to-end (wrong tool
+picked — `test_runner` instead of `bash` — but `inject_tools` → JSON
+response → `extract_tool_calls` → `WorkerResult.tool_results` all worked).
+So: **LFM25 itself is validated working; the harness-level "first real tool
+call" milestone is blocked on `parse_plan()` silently discarding the task on
+a capability mismatch, not on anything in this session's changes.** See
+`docs/TASKER_CHECKLIST.md` LFM25 section for full detail.
+
+**`tool_result_role` still unconfirmed:** fixing the `tools=[]` gap does
+**not** unblock this — a single-turn tool call never produces a "next turn,"
+so the field still has nothing to exercise it against. Needs the multi-turn
+loop itself built first (explicitly out of scope this session).
+
+**Last file modified:** `cli/shell.py`, `.gitignore`, `.gitattributes`,
+`docs/TASKER_CHECKLIST.md`, `CLAUDE.md` — plus the merge commit touching the
+full tree (file-mode normalization + restoring origin-only files).  
+**Next task:** Harden `tasker/orchestrator/_parse.py`'s `parse_plan()` (or
+the `PLAN_SYSTEM` prompt) so an invalid/unknown capability string doesn't
+discard the entire plan — e.g. skip the unrecognized capability instead of
+raising, or validate against the enum's value set explicitly in the prompt.
+That's the real prerequisite for a CLI-level "first real tool call" smoke
+test (LFM25 or otherwise), not the `tools=[]` wiring (already fixed). Then
+build the multi-turn tool-result loop to finally unblock `tool_result_role`.
+Then Phase 7.5.2 — `GPUBackend` ABC, `GPUInfo` dataclass, `NoGpuBackend`,
+`tasker-hardware` applet scaffold.  
+**Blockers:** GitHub push needs credentials (see above).  
 **Open decisions:** `tool_result_role` default (`"tool"`) is unvalidated —
 test "tool" vs "user" once a multi-turn loop exists.  
 

@@ -150,12 +150,42 @@ command in TESTING_GUIDE.md.
       instruction alone produced empty content; model also varied between
       array/bare-object/markdown-fenced JSON across runs. See CLAUDE.md
       "Live test result" and SDD_ADDENDUM_7.5.md A.2b for what changed.
-- [ ] tool_result_role confirmed working ("tool"/"user") -- blocked: no
+- [ ] tool_result_role confirmed working ("tool"/"user") -- still blocked: no
       multi-turn tool-execution loop exists anywhere in the codebase yet to
-      test it against (see CLAUDE.md "Open decisions")
-- [ ] First real tool call through harness confirmed end-to-end -- blocked:
-      cli/shell.py's _run_task() hardcodes tools=[] for every WorkerTask, for
-      every mode, not just LFM25 -- pre-existing gap, not introduced or
-      closed by this session. LFM25 parsing/injection itself is validated
-      directly against the live Ollama API instead (3/3 clean runs after
-      hardening).
+      test it against (see CLAUDE.md "Open decisions"). The tools=[] wiring
+      gap below being fixed does NOT unblock this -- a single-turn tool call
+      never produces a "next turn", so tool_result_role still has nothing to
+      exercise it. Unblocking requires building the multi-turn loop itself
+      (re-invoke worker with tool result appended), which is out of scope
+      for this session.
+- [x] cli/shell.py tools=[] wiring gap fixed -- _run_task() now resolves
+      config.mode.tool_bundle via get_definitions() and passes real
+      ToolDefinitions into WorkerTask, for every mode (not just LFM25).
+      Confirmed live: task.tools had 7 entries (bash, code_search, file_read,
+      file_write, git, linter, test_runner) for CODE mode, reaching
+      OllamaProvider correctly.
+- [ ] First real tool call through harness confirmed end-to-end -- NOT
+      checked: `python -m cli.shell --mode code "Use the bash tool to list
+      the files in the current directory"` fell back to a generic "Answer
+      the task" plan step in 4/4 runs, never reaching the real instruction.
+      Root cause (separate, pre-existing bug, not LFM25/this session's
+      wiring fix): SingleLLMOrchestrator.plan() asks the model for a JSON
+      plan; lfm2.5-thinking:latest sometimes returns a capability string
+      outside the Capability enum (observed: "bash" instead of "tool_use"),
+      which makes tasker/orchestrator/_parse.py's parse_plan() fail and
+      silently fall back to NanoOrchestrator's hardcoded single-step
+      "Answer the task" template -- the worker never sees the real task text
+      when this happens. Confirmed directly: calling the orchestrator's
+      planning prompt against the real model reproduced the exact invalid
+      "bash" capability string and the exact fallback description. When the
+      planning step *does* succeed (confirmed once via a direct
+      orchestrator->provider script, bypassing cli/shell.py's print
+      wrapper but using the identical pipeline), the real task reached the
+      worker and LFM25 fired a real, correctly-parsed tool call end-to-end
+      (picked the wrong tool, test_runner instead of bash, but the
+      protocol mechanics -- inject_tools, JSON response, extract_tool_calls,
+      WorkerResult.tool_results -- all worked correctly). So: LFM25 itself
+      is validated working; the harness-level "first real tool call"
+      milestone is blocked on hardening parse_plan()/the planning prompt to
+      stop silently discarding the user's task on a capability-string
+      mismatch, not on anything in this session's changes.
