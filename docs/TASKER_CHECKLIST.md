@@ -89,3 +89,23 @@ command in TESTING_GUIDE.md.
 - [x] SessionManager.session_id property added (uuid4, stable per session)
 - [x] CoworkRunner wired to episodic_bridge — records step_completed events, saves episodic_log_position to Checkpoint
 - [x] tests/unit/test_episodic_bridge.py passing (15 tests — Null/Jsonl bridges + CoworkRunner wiring)
+
+## Phase 8 -- Orchestrator Factory + Live CLI Wiring
+- [x] HardwareProfile.orchestrator_model field added (parses orchestrator.model from YAML)
+- [x] WorkerRegistry.load_from_yaml classmethod (injects available/vram_mb defaults)
+- [x] worker_registry.yaml: compute_location fixed to "local" (was "local_hardware"); lfm2.5:latest → lfm2.5-thinking:latest
+- [x] tasker/orchestrator/factory.py — build_orchestrator(config, provider_registry) → OrchestratorBase
+  - Tier 0: NanoOrchestrator (no provider needed)
+  - Tier 1: SingleLLMOrchestrator wired to OllamaProvider.execute()
+  - Tier 2: DualLLMOrchestrator (same local model for planner + synthesizer)
+  - Tier 3+: ReasoningOrchestrator
+  - Graceful fallback to NanoOrchestrator when no OLLAMA provider registered
+- [x] cli/shell.py: REPL and non-interactive paths replaced stubs with real _run_task() dispatch
+  - Loads WorkerRegistry from YAML; builds OllamaProvider from profile.ollama_base_url
+  - Uses factory to build orchestrator; runs plan → execute steps → synthesize pipeline
+  - Argparse restructured: _first_positional() peek avoids subparser clash with free-form task strings
+- [x] tests/unit/test_orchestrator_factory.py passing (12 tests — tier selection, call_model wiring)
+- [x] Smoke tests passing against local Ollama (lfm2.5-thinking:latest):
+  - CHAT: "say hello in exactly five words" → SingleLLMOrchestrator → local worker → synthesis ok
+  - CODE: "list the files in the current directory" → local worker → synthesis ok
+  - COWORK: "write a haiku about running code" → local worker → synthesis ok

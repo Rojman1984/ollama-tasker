@@ -7,7 +7,7 @@ description: "TASKER-P1 -- Ryzen 5 3500U, 32GB RAM, CPU-only"
 orchestrator:
   tier_max: 1
   provider: single_llm
-  model: qwen3:1.7b
+  model: lfm2.5-thinking:latest
   load_strategy: sequential
   context_limit: 4096
 

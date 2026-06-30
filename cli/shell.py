@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
+import uuid
 from pathlib import Path
 
 from tasker.session.checkpoint import CheckpointStore
@@ -34,6 +36,7 @@ from tasker.workers.registry import WorkerRegistry
 # --------------------------------------------------------------------------- #
 
 _DEFAULT_STORE_DIR = Path(".tasker") / "checkpoints"
+_REGISTRY_YAML = Path(__file__).parent.parent / "config" / "workers" / "worker_registry.yaml"
 
 _POLICY_ALIASES: dict[str, str] = {
     "local":      "private",
@@ -43,6 +46,112 @@ _POLICY_ALIASES: dict[str, str] = {
     "hybrid":     "hybrid",
     "private":    "private",
 }
+
+
+# --------------------------------------------------------------------------- #
+# Task execution
+# --------------------------------------------------------------------------- #
+
+async def _run_task(
+    task: str,
+    mode_name: str,
+    registry: WorkerRegistry,
+    store: CheckpointStore,
+) -> None:
+    """Dispatch a task through the orchestrator → provider pipeline."""
+    from tasker.modes.base import ModeConfigurator
+    from tasker.orchestrator.factory import build_orchestrator
+    from tasker.workers.base import (
+        AgentRole,
+        Capability,
+        ClassifierResult,
+        ProviderType,
+        TaskType,
+        WorkerStatus,
+        WorkerTask,
+    )
+    from tasker.workers.providers.ollama import OllamaProvider
+    from tasker.workers.registry import WorkerSelector
+
+    profile_name = os.environ.get("TASKER_PROFILE", "tier1_tasker")
+    configurator = ModeConfigurator()
+    try:
+        profile = configurator.load_profile(profile_name)
+        mode_cfg = configurator.load_mode(mode_name)
+    except Exception as exc:
+        print(f"Config error: {exc}")
+        return
+
+    config = configurator.resolve(profile, mode_cfg)
+    ollama_provider = OllamaProvider(profile.ollama_base_url)
+    provider_map = {ProviderType.OLLAMA: ollama_provider}
+    orchestrator = build_orchestrator(config, provider_map)
+
+    all_workers = registry.list_all()
+    classifier_output = ClassifierResult(
+        task_type=TaskType.CONVERSATIONAL,
+        complexity_score=0.3,
+        required_capabilities={Capability.TOOL_USE},
+        suggested_workers=[],
+        estimated_duration_s=15.0,
+    )
+
+    print(f"[{mode_name}] Planning with {type(orchestrator).__name__}...")
+    try:
+        plan = await orchestrator.plan(task, classifier_output, all_workers)
+    except Exception as exc:
+        print(f"Planning failed: {exc}")
+        return
+
+    print(f"  {len(plan.steps)} step(s)")
+    results = []
+    for step in plan.steps:
+        print(f"  Step {step.index}: {step.description[:70]}...")
+        try:
+            worker = WorkerSelector.select(
+                all_workers,
+                step.required_capabilities,
+                config.mode.routing_policy,
+                config.mode.privacy_tier,
+                slots_available=1,
+                should_throttle=False,
+            )
+        except Exception as exc:
+            print(f"  Worker selection failed: {exc}")
+            continue
+
+        wt = WorkerTask(
+            task_id=str(uuid.uuid4()),
+            step_index=step.index,
+            role=step.role,
+            instruction=step.description,
+            tools=[],
+            context={},
+            routing_policy=config.mode.routing_policy,
+            privacy_tier=config.mode.privacy_tier,
+        )
+        provider = provider_map.get(worker.provider)
+        if provider is None:
+            print(f"  No provider for {worker.provider.value}")
+            continue
+        try:
+            result = await provider.execute(wt, worker)
+            status_str = "ok" if result.status == WorkerStatus.SUCCESS else result.status.value
+            print(f"  [{status_str}] {worker.model_id} ({result.duration_ms}ms)")
+            results.append(result)
+        except Exception as exc:
+            print(f"  Execution error: {exc}")
+
+    if not results:
+        print("No results to synthesize.")
+        return
+
+    print("\nSynthesizing...")
+    try:
+        output = await orchestrator.synthesize(task, results)
+        print(f"\n{output}")
+    except Exception as exc:
+        print(f"Synthesis error: {exc}")
 
 
 # --------------------------------------------------------------------------- #
@@ -158,13 +267,15 @@ def _repl(
 
         else:
             # Non-slash input: treat as a task in the current mode
-            print(f"[{mode}] Task execution requires an active worker session (Phase 6).")
-            print(f"  Task: {line!r}")
+            asyncio.run(_run_task(line, mode, registry, store))
 
 
 # --------------------------------------------------------------------------- #
 # Non-interactive CLI surface
 # --------------------------------------------------------------------------- #
+
+_SUBCOMMANDS = frozenset({"shell", "workers", "checkpoints", "resume"})
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -228,7 +339,10 @@ def _cmd_checkpoints(store: CheckpointStore) -> None:
         print(f"{cp.id:<38}  {cp.mode:<10}  {ts:<18}  {cp.original_task[:30]}")
 
 
-def _cmd_resume(store: CheckpointStore, checkpoint_id: str | None, use_last: bool) -> None:
+def _cmd_resume(store: CheckpointStore, rest: list[str]) -> None:
+    use_last = "--last" in rest
+    checkpoint_id = next((r for r in rest if not r.startswith("-")), None)
+
     if use_last:
         cp = store.load_latest()
         if cp is None:
@@ -237,7 +351,7 @@ def _cmd_resume(store: CheckpointStore, checkpoint_id: str | None, use_last: boo
         checkpoint_id = cp.id
 
     if not checkpoint_id:
-        print("Provide a checkpoint ID or use --last.")
+        print("Usage: tasker resume <checkpoint_id>  or  tasker resume --last")
         return
 
     cp = store.load(checkpoint_id)
@@ -246,48 +360,74 @@ def _cmd_resume(store: CheckpointStore, checkpoint_id: str | None, use_last: boo
         return
 
     print(f"Resuming checkpoint {cp.id}  [{cp.mode}]  task={cp.original_task!r}")
-    print("(Full resume requires an active worker session — Phase 6.)")
+    print("(Full session resume not yet wired — load the checkpoint and resubmit the task.)")
 
 
 # --------------------------------------------------------------------------- #
 # Entry point
 # --------------------------------------------------------------------------- #
 
+def _first_positional() -> str | None:
+    """Return the first non-flag argument from sys.argv, skipping option values."""
+    skip_next = False
+    for tok in sys.argv[1:]:
+        if skip_next:
+            skip_next = False
+            continue
+        if tok.startswith("--") and "=" not in tok:
+            skip_next = True   # next token is the value for this option
+            continue
+        if tok.startswith("-"):
+            continue
+        return tok
+    return None
+
+
 def main() -> None:
-    parser = _build_parser()
+    if _REGISTRY_YAML.exists():
+        registry = WorkerRegistry.load_from_yaml(_REGISTRY_YAML)
+    else:
+        registry = WorkerRegistry()
+    store = CheckpointStore(_DEFAULT_STORE_DIR)
 
-    # If called with no args, or only --mode/--policy but no subcommand and
-    # no task string, drop into the REPL.
-    args, remaining = parser.parse_known_args()
+    first = _first_positional()
 
-    registry = WorkerRegistry()
-    store    = CheckpointStore(_DEFAULT_STORE_DIR)
+    if first is None or first in _SUBCOMMANDS:
+        # Standard subcommand path — subparsers parser works fine here.
+        args, _ = _build_parser().parse_known_args()
+        cmd = getattr(args, "command", None)
 
-    if args.command == "shell" or (args.command is None and not remaining):
-        _repl(registry, store, initial_mode=args.mode, initial_policy=args.policy)
+        if cmd is None or cmd == "shell":
+            _repl(registry, store, initial_mode=args.mode, initial_policy=args.policy)
+            return
+        if cmd == "workers":
+            _cmd_workers(registry)
+            return
+        if cmd == "checkpoints":
+            _cmd_checkpoints(store)
+            return
+        if cmd == "resume":
+            rest = []
+            if getattr(args, "last", False):
+                rest.append("--last")
+            if getattr(args, "checkpoint_id", None):
+                rest.append(args.checkpoint_id)
+            _cmd_resume(store, rest)
+            return
+        _build_parser().print_help()
         return
 
-    if args.command == "workers":
-        _cmd_workers(registry)
-        return
-
-    if args.command == "checkpoints":
-        _cmd_checkpoints(store)
-        return
-
-    if args.command == "resume":
-        _cmd_resume(store, args.checkpoint_id, args.last)
-        return
-
-    # Positional task string: tasker --mode code "do something"
+    # Free-form task string — avoid subparsers clash by using a flags-only parser.
+    _tp = argparse.ArgumentParser(add_help=False)
+    _tp.add_argument("--mode", default="chat",
+                     choices=["chat", "code", "cowork", "research", "secure"])
+    _tp.add_argument("--policy", default=None)
+    args, remaining = _tp.parse_known_args()
     task = " ".join(remaining).strip()
     if task:
-        policy = args.policy or "default"
-        print(f"[{args.mode}] policy={policy}  task={task!r}")
-        print("(Task execution requires an active worker session — Phase 6.)")
-        return
-
-    parser.print_help()
+        asyncio.run(_run_task(task, args.mode, registry, store))
+    else:
+        _build_parser().print_help()
 
 
 if __name__ == "__main__":

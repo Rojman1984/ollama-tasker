@@ -6,6 +6,10 @@ See SDD Sections 5.4 and 5.5.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
+import yaml
+
 from tasker.workers.base import (
     Capability,
     ComputeLocation,
@@ -58,6 +62,22 @@ class WorkerRegistry:
 
     def get(self, worker_id: str) -> WorkerManifest | None:
         return self._workers.get(worker_id)
+
+    @classmethod
+    def load_from_yaml(cls, path: Path) -> WorkerRegistry:
+        """Load a WorkerRegistry from config/workers/worker_registry.yaml."""
+        registry = cls()
+        with path.open(encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        for entry in data.get("workers", []):
+            entry.setdefault("available", True)
+            entry.setdefault("vram_mb", None)
+            entry.setdefault("capability_scores", {})
+            try:
+                registry.register(WorkerManifest.from_dict(entry))
+            except Exception:
+                pass
+        return registry
 
 
 class WorkerSelector:

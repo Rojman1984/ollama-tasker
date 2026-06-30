@@ -290,8 +290,12 @@ python -m unittest tests.unit.test_orchestrator_nano -v
 
 *(Update this section at the end of every Cowork or Code session)*
 
-**Last worked on:** Phase 7 — Hardening (notifier tests, OpenAI-compat API server, hardware auto-detection, episodic memory bridge + CoworkRunner wiring)  
-**Last file modified:** `tests/unit/test_episodic_bridge.py`, `tasker/session/episodic.py`, `tasker/modes/cowork.py`  
-**Next task:** Core roadmap complete. Future work: live integration testing against real Ollama Cloud account, real Anthropic/OpenAI/Fugu API keys, and first real multi-step COWORK task end-to-end on TASKER-P1 hardware.  
+**Last worked on:** Orchestrator factory + CLI wiring — `tasker/orchestrator/factory.py`, `cli/shell.py` real task dispatch, `WorkerRegistry.load_from_yaml`, `HardwareProfile.orchestrator_model` field, smoke-tested against local Ollama.  
+**Last file modified:** `cli/shell.py`, `tasker/orchestrator/factory.py`, `tasker/modes/base.py`, `tasker/workers/registry.py`, `config/workers/worker_registry.yaml`  
+**Next task:** Multi-step COWORK plan smoke test (task that produces 3+ plan steps from SingleLLM/Nano, verifying checkpoint flow), then live Ollama Cloud test once cloud credentials are configured.  
 **Blockers:** None  
-**Open decisions:** None — all captured in SDD v0.1.0-draft
+**Open decisions:** None — all captured in SDD v0.1.0-draft  
+
+**Live model config (tier1_tasker):**  
+- Orchestrator: `lfm2.5-thinking:latest` (local, 1.2B — was `qwen3:1.7b`, not installed)  
+- Worker: `lfm2.5-thinking:latest` (local, 1.2B — was `lfm2.5:latest`, not installed)
