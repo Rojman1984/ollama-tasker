@@ -84,10 +84,12 @@ def _ok_response(content: str = "Hello!", tool_calls: list | None = None) -> dic
     }
 
 
-def _make_post(status: int, response: dict):
+def _make_post(status: int, response: dict, captured: list | None = None):
     async def _post(url: str, payload: dict) -> tuple[int, dict]:
         # strip the injected _timeout key so tests can inspect the payload cleanly
         payload.pop("_timeout", None)
+        if captured is not None:
+            captured.append(payload)
         return status, response
     return _post
 
@@ -99,13 +101,20 @@ def _make_get(status: int, response: dict):
 
 
 def _provider(post_status=200, post_response=None, get_status=200, get_response=None,
-              concurrency_mgr=None) -> OllamaProvider:
+              concurrency_mgr=None, captured_payloads: list | None = None) -> OllamaProvider:
     return OllamaProvider(
         base_url="http://localhost:11434",
         concurrency_mgr=concurrency_mgr,
-        _post_fn=_make_post(post_status, post_response or _ok_response()),
+        _post_fn=_make_post(post_status, post_response or _ok_response(), captured_payloads),
         _get_fn=_make_get(get_status, get_response or {"models": []}),
     )
+
+
+def _lfm25_manifest(tool_result_role: str | None = "tool") -> WorkerManifest:
+    m = _manifest(model_id="lfm2.5-thinking:latest")
+    m.tool_protocol = ToolProtocol.LFM25
+    m.tool_result_role = tool_result_role
+    return m
 
 
 # ------------------------------------------------------------------ #
@@ -177,6 +186,63 @@ class TestOllamaProviderExecuteLocal(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result.tool_results), 1)
         self.assertEqual(result.tool_results[0].tool_name, "bash")
         self.assertEqual(result.tool_results[0].tool_input["cmd"], "ls")
+
+
+class TestOllamaProviderProtocolRouting(unittest.IsolatedAsyncioTestCase):
+    """Phase 7.5: LFM25 protocol routing -- see SDD_ADDENDUM_7.5.md A.2b."""
+
+    def _tools(self) -> list[ToolDefinition]:
+        return [ToolDefinition(
+            name="get_weather",
+            description="Get current weather",
+            parameters={"type": "object", "properties": {"location": {"type": "string"}}},
+        )]
+
+    async def test_native_protocol_includes_tools_in_payload(self):
+        captured: list = []
+        p = _provider(post_response=_ok_response(), captured_payloads=captured)
+        await p.execute(_task(tools=self._tools()), _manifest())
+        self.assertIn("tools", captured[0])
+        self.assertEqual(captured[0]["tools"][0]["function"]["name"], "get_weather")
+
+    async def test_lfm25_protocol_excludes_tools_from_payload(self):
+        captured: list = []
+        p = _provider(post_response=_ok_response(), captured_payloads=captured)
+        await p.execute(_task(tools=self._tools()), _lfm25_manifest())
+        self.assertNotIn("tools", captured[0])
+
+    async def test_lfm25_protocol_injects_list_of_tools_into_system_message(self):
+        captured: list = []
+        p = _provider(post_response=_ok_response(), captured_payloads=captured)
+        await p.execute(_task(tools=self._tools()), _lfm25_manifest())
+        system_msgs = [m for m in captured[0]["messages"] if m["role"] == "system"]
+        self.assertEqual(len(system_msgs), 1)
+        self.assertIn("List of tools:", system_msgs[0]["content"])
+        self.assertIn("get_weather", system_msgs[0]["content"])
+
+    async def test_lfm25_protocol_response_routed_through_extract_tool_calls(self):
+        resp = _ok_response(content='[{"name": "get_weather", "arguments": {"location": "Austin"}}]')
+        p = _provider(post_response=resp)
+        result = await p.execute(_task(tools=self._tools()), _lfm25_manifest())
+        self.assertEqual(len(result.tool_results), 1)
+        self.assertEqual(result.tool_results[0].tool_name, "get_weather")
+        self.assertEqual(result.tool_results[0].tool_input, {"location": "Austin"})
+
+    async def test_lfm25_protocol_pythonic_fallback_routed_correctly(self):
+        resp = _ok_response(
+            content='<|tool_call_start|>[get_weather(location="Austin")]<|tool_call_end|>'
+        )
+        p = _provider(post_response=resp)
+        result = await p.execute(_task(tools=self._tools()), _lfm25_manifest())
+        self.assertEqual(result.tool_results[0].tool_name, "get_weather")
+
+    async def test_lfm25_protocol_no_tools_no_injection(self):
+        captured: list = []
+        p = _provider(post_response=_ok_response(), captured_payloads=captured)
+        await p.execute(_task(tools=None), _lfm25_manifest())
+        system_msgs = [m for m in captured[0]["messages"] if m["role"] == "system"]
+        self.assertEqual(system_msgs, [])
+        self.assertNotIn("tools", captured[0])
 
 
 class TestOllamaProviderCloud(unittest.IsolatedAsyncioTestCase):

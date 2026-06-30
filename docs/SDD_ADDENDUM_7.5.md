@@ -57,6 +57,104 @@ A.6 below.
 
 ---
 
+## A.2b LFM25 Tool Protocol (new — corrects an existing registry error)
+
+This subsection was added mid-Phase-7.5, prompted by the official LiquidAI
+LFM2.5 documentation, which corrects two wrong assumptions already present
+in the codebase before this addendum:
+
+1. **LFM2.5-family models do not use LFM2's wrapper tokens.** LFM2
+   (original Tool-GGUF) wraps tool definitions in
+   `<|tool_list_start|>`/`<|tool_list_end|>` and tool results in
+   `<|tool_response_start|>`/`<|tool_response_end|>`. LFM2.5
+   (Instruct/Thinking, including `lfm2.5-thinking:latest` on TASKER-P1)
+   uses neither — plain JSON injection into the system message, and a
+   direct tool-role message for results. Both dialects share
+   `<|tool_call_start|>`/`<|tool_call_end|>` for the model's *output*
+   when it falls back to Pythonic-style calls instead of JSON.
+
+2. **`lfm2.5-local` was registered with `tool_protocol: native`.** This is
+   wrong: Ollama still reports `capability: completion` (not
+   `tool_use`/`tools`) for this model family via `/api/tags`, and rejects
+   the standard `tools[]` request parameter for it. `NATIVE` means "Ollama
+   handles tool calling transparently via the standard tool-calling API" —
+   that is not what happens here. Before this fix, `OllamaProvider` sent
+   `tools[]` unconditionally for every protocol (a second, independent bug
+   — see below), so this was masked rather than causing a visible failure.
+
+A new `ToolProtocol.LFM25` value is added, handled entirely inside Ollama
+Tasker — **no dependency on the separate LFM2 Skill Translator service**
+for these models. The Skill Translator remains its own project, scoped to
+the Claude Code → Ollama use case; it is referenced here only as a design
+comparison, not a dependency.
+
+### LFM25 protocol specification
+
+**INBOUND (tool injection into the Ollama request):**
+Do not send a `tools[]` parameter to Ollama for this protocol — Ollama
+rejects it for this model family. Instead, inject tool definitions into
+the system message as:
+```
+List of tools: <json array of {name, description, parameters}>
+Output function calls as JSON
+```
+No wrapper tokens. The "Output function calls as JSON" instruction
+requests the JSON output format, which is strongly preferred over the
+Pythonic format for reliable parsing. `OllamaProvider` must not include
+`tools[]` in the request payload for this protocol.
+
+**OUTBOUND (parsing the model's response):**
+1. *Primary:* parse a JSON array, `[{"name": "func", "arguments": {...}}]`.
+2. *Fallback:* parse the Pythonic format,
+   `<|tool_call_start|>[func(key="val")]<|tool_call_end|>`, using
+   `str.find()` for token boundaries (not regex over the whole text — the
+   tokens are fixed literal strings, regex adds no value and is slower).
+   Trailing text after `<|tool_call_end|>` is discarded.
+
+**TOOL RESULT INJECTION (multi-turn):**
+Configurable via `WorkerManifest.tool_result_role`:
+- `"tool"` — the official spec role; may work on newer Ollama versions.
+- `"user"` — an empirically-validated Ollama workaround for LFM2 (the
+  Skill Translator project hit this; documented here as a known
+  discrepancy, not yet independently confirmed for LFM2.5/Ollama Tasker).
+`None`/absent defaults to the protocol default (`"tool"` for LFM25, tested
+first). Record whichever value is confirmed working in `CLAUDE.md` after a
+live test. **Scope note:** Ollama Tasker does not yet have an automatic
+multi-turn tool-execution loop anywhere in the codebase (`WorkerResult.
+tool_results` is produced by providers but nothing currently re-invokes a
+worker with results appended) — `tool_result_role` is consumed by a
+provider-owned message-building helper, ready for whichever orchestration
+layer eventually drives that loop. This is a pre-existing gap, not
+introduced or closed by this addendum.
+
+**RESPONSE:** standard `WorkerToolResult` (unchanged) — same contract as
+every other protocol per SDD 5.7.
+
+### Comparison to the LFM2 dialect (Skill Translator reference)
+
+| | LFM2 (Skill Translator) | LFM25 (Ollama Tasker, this addendum) |
+|---|---|---|
+| Tool definitions | `<\|tool_list_start\|>`/`<\|tool_list_end\|>` wrapper | Plain `List of tools: [json]` — no wrapper tokens |
+| Tool results | `<\|tool_response_start\|>`/`<\|tool_response_end\|>` wrapper | Raw JSON content in a `tool`-role message — no wrapper tokens |
+| Output parsing | `<\|tool_call_start\|>`/`<\|tool_call_end\|>` | Same tokens, used only as the *fallback* path (JSON array is primary) |
+
+### Second, independent bug this fix also closes
+
+`OllamaProvider.execute()` previously sent `payload["tools"]` for **every**
+protocol, including non-`NATIVE` ones — contradicting `ToolCallNormalizer`'s
+own docstring, which already claimed text-protocol providers serialize
+tool definitions into the system prompt. No registered worker exercised
+the non-`NATIVE` path before this session (every entry in
+`worker_registry.yaml` was `tool_protocol: native`), so this was latent.
+The fix adds explicit protocol-aware routing in `OllamaProvider`: `tools[]`
+is only ever populated for `NATIVE`; every other protocol routes through
+`ToolCallNormalizer.inject_tools()` instead. `JSON_EXTRACT`/`XML_EXTRACT`/
+`FEW_SHOT` still have no real registered worker and no injection behavior
+defined — they pass messages through unchanged, documented in code for
+whoever wires up a real worker on one of those protocols next.
+
+---
+
 ## A.3 Revised Section 8 — Configuration System
 
 ### A.3.1 Configuration Resolution Order (replaces original 8.1)

@@ -18,6 +18,7 @@ from tasker.workers.base import (
     ModelUsage,
     OllamaQueueFullError,
     ProviderType,
+    ToolProtocol,
     WorkerManifest,
     WorkerResult,
     WorkerStatus,
@@ -51,6 +52,27 @@ def _deferred(task: WorkerTask, worker: WorkerManifest) -> WorkerResult:
         duration_ms=0,
         reason="No Ollama Cloud concurrency slot available.",
     )
+
+
+def format_tool_result_message(tool_name: str, result: str | dict, role: str | None) -> dict:
+    """
+    Build the message dict to append to the next turn's context['messages']
+    after a tool executes, respecting WorkerManifest.tool_result_role.
+
+    "tool" is the official role for tool results; Ollama has been observed
+    to reject it for some LFM2-family models, requiring "user" as a
+    workaround instead -- see SDD_ADDENDUM_7.5.md A.2b. role=None means
+    "use the protocol default" ("tool" for LFM25, tested first).
+
+    Note: Ollama Tasker has no automatic multi-turn tool-execution loop
+    yet -- nothing currently re-invokes a worker with tool results
+    appended -- so this is not exercised end-to-end by OllamaProvider
+    itself. It exists as the provider-owned building block for whichever
+    orchestration layer eventually drives that loop, so tool_result_role
+    has one real, testable consumer rather than sitting unused.
+    """
+    content = result if isinstance(result, str) else json.dumps(result)
+    return {"role": role or "tool", "content": content}
 
 
 def _error(task: WorkerTask, worker: WorkerManifest, reason: str, elapsed: float) -> WorkerResult:
@@ -118,14 +140,30 @@ class OllamaProvider(WorkerProviderBase):
         start = time.monotonic()
         try:
             messages = _build_messages(task)
-            tools = ToolCallNormalizer.format_tools(task.tools, worker.tool_protocol)
+
+            # Protocol-aware tool routing. NATIVE: Ollama handles tool
+            # calling transparently via tools[] -- never inject into the
+            # system prompt. Everything else: Ollama rejects tools[] for
+            # these model families (confirmed for LFM2.5 -- see
+            # SDD_ADDENDUM_7.5.md A.2b), so tool definitions are injected
+            # into the messages instead and tools[] is omitted entirely.
+            ollama_tools: list[dict] | None = None
+            if worker.tool_protocol == ToolProtocol.NATIVE:
+                formatted = ToolCallNormalizer.format_tools(task.tools, worker.tool_protocol)
+                if formatted:
+                    ollama_tools = formatted
+            elif task.tools:
+                messages = ToolCallNormalizer.inject_tools(
+                    messages, task.tools, worker.tool_protocol
+                )
+
             payload: dict = {
                 "model": worker.model_id,
                 "messages": messages,
                 "stream": False,
             }
-            if tools:
-                payload["tools"] = tools
+            if ollama_tools:
+                payload["tools"] = ollama_tools
 
             timeout = task.timeout_s or 120.0
             status, data = await self._post_fn(
@@ -142,26 +180,33 @@ class OllamaProvider(WorkerProviderBase):
 
             msg = data.get("message", {})
             content: str = msg.get("content") or ""
-            raw_calls: list[dict] = msg.get("tool_calls") or []
 
-            # Ollama returns arguments as dict, not JSON string — normalise to OpenAI format
-            native_calls = [
-                {
-                    "id": f"call_{i}",
-                    "type": "function",
-                    "function": {
-                        "name": c.get("function", {}).get("name", ""),
-                        "arguments": json.dumps(
-                            c.get("function", {}).get("arguments", {})
-                        ),
-                    },
-                }
-                for i, c in enumerate(raw_calls)
-            ]
-
-            tool_results = ToolCallNormalizer.extract(
-                content, native_calls, worker.tool_protocol
-            )
+            if worker.tool_protocol == ToolProtocol.NATIVE:
+                raw_calls: list[dict] = msg.get("tool_calls") or []
+                # Ollama returns arguments as dict, not JSON string — normalise to OpenAI format
+                native_calls = [
+                    {
+                        "id": f"call_{i}",
+                        "type": "function",
+                        "function": {
+                            "name": c.get("function", {}).get("name", ""),
+                            "arguments": json.dumps(
+                                c.get("function", {}).get("arguments", {})
+                            ),
+                        },
+                    }
+                    for i, c in enumerate(raw_calls)
+                ]
+                tool_results = ToolCallNormalizer.extract(
+                    content, native_calls, worker.tool_protocol
+                )
+            else:
+                # Non-native protocols never get tool_calls[] from Ollama --
+                # the model emits the call as text per the protocol's
+                # output format, parsed by extract_tool_calls().
+                tool_results = ToolCallNormalizer.extract_tool_calls(
+                    content, worker.tool_protocol
+                )
             input_tok = data.get("prompt_eval_count", 0)
             output_tok = data.get("eval_count", 0)
             cost = (

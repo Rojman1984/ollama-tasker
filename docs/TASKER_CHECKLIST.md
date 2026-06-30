@@ -136,3 +136,26 @@ command in TESTING_GUIDE.md.
 - [x] docs/ollama-amd-igpu-config-guide.md added to repo
 - [x] CLAUDE.md updated: Linux/WSL2 primary, Windows secondary, both AMD guides referenced
 - [x] AMD discrete / Intel / Apple Silicon explicitly documented as out-of-scope extension points (SDD_ADDENDUM_7.5.md A.4.3)
+
+## LFM25 Protocol
+- [x] ToolProtocol.LFM25 enum added
+- [x] WorkerManifest.tool_result_role field added
+- [x] ToolCallNormalizer.inject_tools() LFM25 path
+- [x] ToolCallNormalizer.extract_tool_calls() JSON primary + Pythonic fallback
+- [x] OllamaProvider protocol-aware routing (NATIVE vs non-NATIVE)
+- [x] worker_registry.yaml: lfm2.5-local updated to lfm25 protocol
+- [x] Unit tests passing (356/356 full suite, incl. 23 new LFM25-specific tests)
+- [x] Live smoke test: raw response format confirmed -- JSON primary path works,
+      but required hardening beyond the original spec: spec's literal
+      instruction alone produced empty content; model also varied between
+      array/bare-object/markdown-fenced JSON across runs. See CLAUDE.md
+      "Live test result" and SDD_ADDENDUM_7.5.md A.2b for what changed.
+- [ ] tool_result_role confirmed working ("tool"/"user") -- blocked: no
+      multi-turn tool-execution loop exists anywhere in the codebase yet to
+      test it against (see CLAUDE.md "Open decisions")
+- [ ] First real tool call through harness confirmed end-to-end -- blocked:
+      cli/shell.py's _run_task() hardcodes tools=[] for every WorkerTask, for
+      every mode, not just LFM25 -- pre-existing gap, not introduced or
+      closed by this session. LFM25 parsing/injection itself is validated
+      directly against the live Ollama API instead (3/3 clean runs after
+      hardening).

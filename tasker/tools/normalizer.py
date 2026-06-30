@@ -10,7 +10,11 @@ Protocols:
   JSON_EXTRACT-- tool call embedded in a JSON text block
   XML_EXTRACT -- tool call in <tool_call> XML tags
   FEW_SHOT    -- few-shot taught format (TOOL_CALL: {...})
-See SDD Section 5.7.
+  LFM25       -- LFM2.5-Instruct/Thinking: JSON array primary, Pythonic
+                 <|tool_call_start|>/<|tool_call_end|> fallback. No wrapper
+                 tokens on input, unlike LFM2's <|tool_list_start|>/
+                 <|tool_list_end|>. See SDD Section 5.7 and
+                 SDD_ADDENDUM_7.5.md A.2b.
 """
 from __future__ import annotations
 
@@ -18,6 +22,11 @@ import json
 import re
 
 from tasker.workers.base import ToolDefinition, ToolProtocol, WorkerToolResult
+
+_LFM25_CALL_START = "<|tool_call_start|>"
+_LFM25_CALL_END = "<|tool_call_end|>"
+_LFM25_PYTHONIC_RE = re.compile(r"^(\w+)\((.*)\)$", re.DOTALL)
+_LFM25_KWARG_RE = re.compile(r'(\w+)\s*=\s*"((?:[^"\\]|\\.)*)"')
 
 
 class ToolCallNormalizer:
@@ -56,7 +65,21 @@ class ToolCallNormalizer:
             return ToolCallNormalizer._extract_xml(response_text)
         if protocol == ToolProtocol.FEW_SHOT:
             return ToolCallNormalizer._extract_few_shot(response_text)
+        if protocol == ToolProtocol.LFM25:
+            return ToolCallNormalizer._extract_lfm25(response_text)
         return []
+
+    @staticmethod
+    def extract_tool_calls(
+        response_text: str | None,
+        protocol: ToolProtocol,
+    ) -> list[WorkerToolResult]:
+        """
+        Convenience entry point for non-NATIVE callers (e.g. OllamaProvider)
+        that only have response text, never a native_calls array. Equivalent
+        to extract(response_text, None, protocol).
+        """
+        return ToolCallNormalizer.extract(response_text, None, protocol)
 
     @staticmethod
     def _extract_native(native_calls: list[dict] | None) -> list[WorkerToolResult]:
@@ -181,6 +204,82 @@ class ToolCallNormalizer:
                 pass
         return results
 
+    @staticmethod
+    def _extract_lfm25(response_text: str | None) -> list[WorkerToolResult]:
+        """
+        LFM2.5 output parsing. Primary: JSON (array of calls, or a single
+        call object -- live testing against lfm2.5-thinking:latest showed
+        the model sometimes emits one bare object instead of a 1-element
+        array, occasionally inside a ```json fence despite being told not
+        to). Fallback: Pythonic <|tool_call_start|>[func(key="val")]<|tool_call_end|>.
+
+        The JSON path uses JSONDecoder.raw_decode rather than hand-rolled
+        bracket counting or a greedy regex: it is the standard library's
+        own bracket/string-aware scanner, so it naturally finds the correct
+        boundary even when an argument value is itself a nested dict, and
+        it ignores any trailing text without needing a separate strip step.
+        """
+        text = (response_text or "").strip()
+        if not text:
+            return []
+
+        fence_match = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, re.DOTALL)
+        json_candidate = fence_match.group(1).strip() if fence_match else text
+
+        if json_candidate.startswith("[") or json_candidate.startswith("{"):
+            try:
+                parsed, _ = json.JSONDecoder().raw_decode(json_candidate)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict):
+                parsed = [parsed]
+            if isinstance(parsed, list):
+                results = []
+                for item in parsed:
+                    if not isinstance(item, dict):
+                        continue
+                    args = item.get("arguments") or {}
+                    results.append(
+                        WorkerToolResult(
+                            tool_name=item.get("name", ""),
+                            tool_input=args if isinstance(args, dict) else {"value": args},
+                            tool_output=None,
+                            error=None,
+                            duration_ms=0,
+                        )
+                    )
+                if results:
+                    return results
+
+        # Fallback: Pythonic format. find() locates fixed literal token
+        # boundaries -- regex would add no value here and risks matching
+        # across multiple calls. Trailing text after the end token is
+        # discarded simply by never slicing past end_idx.
+        start_idx = text.find(_LFM25_CALL_START)
+        end_idx = text.find(_LFM25_CALL_END)
+        if start_idx == -1 or end_idx == -1 or end_idx < start_idx:
+            return []
+
+        inner = text[start_idx + len(_LFM25_CALL_START):end_idx].strip()
+        if inner.startswith("[") and inner.endswith("]"):
+            inner = inner[1:-1].strip()
+
+        match = _LFM25_PYTHONIC_RE.match(inner)
+        if not match:
+            return []
+
+        func_name, args_str = match.group(1), match.group(2)
+        args = {k: v.replace('\\"', '"') for k, v in _LFM25_KWARG_RE.findall(args_str)}
+        return [
+            WorkerToolResult(
+                tool_name=func_name,
+                tool_input=args,
+                tool_output=None,
+                error=None,
+                duration_ms=0,
+            )
+        ]
+
     # ------------------------------------------------------------------ #
     # Input normalization  (ToolDefinition → model input format)
     # ------------------------------------------------------------------ #
@@ -209,3 +308,54 @@ class ToolCallNormalizer:
             }
             for t in tools
         ]
+
+    @staticmethod
+    def inject_tools(
+        messages: list[dict],
+        tools: list[ToolDefinition],
+        protocol: ToolProtocol,
+    ) -> list[dict]:
+        """
+        Inject tool definitions directly into the message list, for
+        protocols where the provider must NOT send a native tools[]
+        request parameter (Ollama rejects it for these model families).
+        Returns a new list -- does not mutate the input.
+
+        LFM25: appends "List of tools: <json>\\nOutput function calls as
+        JSON" to the system message (creating one if absent). No wrapper
+        tokens -- this is the key difference from the LFM2 dialect, which
+        wraps definitions in <|tool_list_start|>/<|tool_list_end|>. See
+        SDD_ADDENDUM_7.5.md A.2b.
+
+        Other non-NATIVE protocols (JSON_EXTRACT, XML_EXTRACT, FEW_SHOT)
+        have no registered worker today and no injection behavior defined
+        yet here -- messages pass through unchanged. Implement when a real
+        worker is registered on one of those protocols.
+        """
+        if not tools or protocol != ToolProtocol.LFM25:
+            return list(messages)
+
+        tools_json = json.dumps([
+            {"name": t.name, "description": t.description, "parameters": t.parameters}
+            for t in tools
+        ])
+        # "Output function calls as JSON" alone was not enough on live testing
+        # against lfm2.5-thinking:latest (Ollama 0.30.11): the model reasoned
+        # to the correct call inside its thinking trace but then emitted no
+        # content at all. Appending an explicit "respond with ONLY the call"
+        # instruction was the fix that got it into content -- see
+        # SDD_ADDENDUM_7.5.md A.2b live test note.
+        suffix = (
+            f"List of tools: {tools_json}\n"
+            "Output function calls as JSON. Respond with ONLY the JSON array "
+            "function call and no other text."
+        )
+
+        result = [dict(m) for m in messages]
+        for m in result:
+            if m.get("role") == "system":
+                m["content"] = f"{m.get('content', '')}\n{suffix}"
+                return result
+
+        result.insert(0, {"role": "system", "content": suffix})
+        return result

@@ -8,7 +8,12 @@ workers:
     model_id: "lfm2.5-thinking:latest"
     compute_location: local
     capabilities: [tool_use, code, search]
-    tool_protocol: native
+    tool_protocol: lfm25             # was: native (incorrect -- Ollama reports
+                                      # capability: completion for this model
+                                      # family and rejects tools[]; see
+                                      # SDD_ADDENDUM_7.5.md A.2b)
+    tool_result_role: tool           # test first; fall back to "user" if
+                                      # Ollama rejects the "tool" role
     context_window: 128000
     cost_input: 0.0
     cost_output: 0.0

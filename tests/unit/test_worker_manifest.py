@@ -87,6 +87,18 @@ class TestWorkerManifest(unittest.TestCase):
         m2 = WorkerManifest.from_dict(d)
         self.assertAlmostEqual(m2.capability_scores["HumanEval"], 0.85)
 
+    def test_tool_result_role_defaults_to_none(self):
+        m = _manifest()
+        self.assertIsNone(m.tool_result_role)
+
+    def test_tool_result_role_round_trip(self):
+        m = _manifest()
+        m.tool_protocol = ToolProtocol.LFM25
+        m.tool_result_role = "tool"
+        m2 = WorkerManifest.from_dict(m.to_dict())
+        self.assertEqual(m2.tool_result_role, "tool")
+        self.assertEqual(m2.tool_protocol, ToolProtocol.LFM25)
+
 
 if __name__ == "__main__":
     unittest.main()

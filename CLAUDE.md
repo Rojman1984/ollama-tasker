@@ -241,6 +241,12 @@ Full rationale in `docs/SDD.md`. Quick reference:
   assumptions; profiles never hardcode mode behavior.
 - **PrivacyTier** is attached to both the TaskerMode (default) and individual
   WorkerTasks (per-step override in COWORK mode).
+- **LFM2.5 models use `ToolProtocol.LFM25`, not `NATIVE`** — Ollama Tasker
+  handles the dialect internally (system-prompt JSON injection, JSON/Pythonic
+  output parsing). The **LFM2 Skill Translator is a separate project**, scoped
+  to the Claude Code → Ollama use case — it is not a dependency of Ollama
+  Tasker and is referenced in `docs/SDD_ADDENDUM_7.5.md` A.2b only as a
+  design comparison (LFM2's wrapper-token dialect vs. LFM25's plain-JSON one).
 
 ---
 
@@ -335,26 +341,61 @@ python -m unittest tests.unit.test_orchestrator_nano -v
 
 *(Update this section at the end of every Cowork or Code session)*
 
-**Last worked on:** Phase 7.5.1 — cross-platform migration audit. Repo migrated to
-native Linux filesystem (`~/projects/ollama-tasker`), no `.git` history existed
-here despite the addendum assuming it, so initialized git fresh (`.gitignore`,
-`.gitattributes` with `eol=lf` normalization, initial scaffold commit). Audited
-codebase for Windows-only path/string assumptions — found none (`DesktopNotifier`
-already had a cross-platform `plyer` fallback, no backslash literals, no
-`os.name`/`platform.system` branching, no PowerShell refs in `.py` files).
-Updated `CLAUDE.md` to document Linux/WSL2 as primary shell with Windows/PowerShell
-as secondary, and referenced both AMD APU guides. Ran full test suite (330/330
-passing) and all 3 required smoke tests (CHAT/CODE/COWORK) against local Ollama
-from this Linux environment.  
-**Last file modified:** `CLAUDE.md`, `.gitignore`, `.gitattributes`,
-`docs/TASKER_CHECKLIST.md`  
-**Next task:** Phase 7.5.2 — `GPUBackend` ABC, `GPUInfo` dataclass, `NoGpuBackend`,
-`tasker-hardware` applet scaffold (detect/verify/show/clear), cache schema with
-hostname-scoping, `ModeConfigurator` 3-source resolution order rewrite. See
-`docs/SDD_ADDENDUM_7.5.md` Section A.7 for the prompt summary.  
+**Last worked on:** LFM25 tool protocol. The official LiquidAI LFM2.5 docs
+corrected two wrong assumptions: `lfm2.5-thinking:latest` was registered with
+`tool_protocol: native`, but Ollama reports `capability: completion` for this
+model family and rejects `tools[]`; and LFM2.5 doesn't use LFM2's
+`<|tool_list_start|>`/`<|tool_list_end|>` wrapper tokens (plain JSON injection
+instead). Added `ToolProtocol.LFM25`, `WorkerManifest.tool_result_role`,
+`ToolCallNormalizer.inject_tools()`/`extract_tool_calls()`, and protocol-aware
+routing in `OllamaProvider` (NATIVE sends `tools[]`; everything else injects
+into the system message and never sends `tools[]` — this also fixes a second,
+independent latent bug where `OllamaProvider` sent `tools[]` unconditionally
+for every protocol). Full details and rationale in `docs/SDD_ADDENDUM_7.5.md`
+A.2b. 356/356 unit tests passing.
+
+**Live test result (lfm2.5-thinking:latest, Ollama 0.30.11):** the spec's
+literal instruction — append only "Output function calls as JSON" to the
+system message — was **not sufficient**: the model reasoned to the correct
+call inside its thinking trace but then emitted empty `content`. Fix: append
+an explicit "Respond with ONLY the JSON array function call and no other
+text." instruction too (now baked into `inject_tools()`). Even with that fix,
+real output varied run to run — sometimes a clean JSON array, sometimes a
+single (non-array) JSON object, sometimes wrapped in a ` ```json ` fence
+despite being told not to — so `_extract_lfm25()` was hardened to accept all
+three shapes. 3/3 manual runs parsed correctly after hardening.
+**`tool_result_role` confirmed working:** not yet — no multi-turn
+tool-execution loop exists anywhere in the codebase yet (`WorkerResult.
+tool_results` is produced but nothing re-invokes a worker with results
+appended), so this field has no live test to run yet. Default `"tool"` is
+untested in practice; flagged in SDD_ADDENDUM_7.5.md A.2b as a follow-up.
+
+**Gap found, not fixed this session:** `cli/shell.py`'s `_run_task()` hardcodes
+`tools=[]` on every `WorkerTask` (line ~128) — no mode's tool bundle
+(`tasker/tools/bundles.py`) is wired into the live CLI dispatch for *any*
+mode, not just LFM25 workers. `tasker --mode code "what is the weather in
+McAllen TX"` therefore answered from the model's own knowledge instead of
+invoking anything — there was nothing in `task.tools` to invoke. The LFM25
+protocol itself is validated end-to-end directly against the Ollama API
+(see above); the "first real tool call through the harness" CLI-level
+criterion is blocked by this separate, pre-existing gap, not by anything in
+this session's change.
+
+**Last file modified:** `tasker/workers/base.py`, `tasker/tools/normalizer.py`,
+`tasker/workers/providers/ollama.py`, `config/workers/worker_registry.yaml`,
+`docs/SDD_ADDENDUM_7.5.md`, `docs/TASKER_CHECKLIST.md`,
+`tests/unit/test_tool_normalizer.py`, `tests/unit/test_provider_ollama.py`,
+`tests/unit/test_worker_manifest.py`  
+**Next task:** Wire `tasker/tools/bundles.py` mode bundles into
+`cli/shell.py`'s `_run_task()` so `task.tools` is actually populated per
+mode — prerequisite for any real CLI-level agentic tool-call smoke test
+(LFM25 or otherwise). Then Phase 7.5.2 — `GPUBackend` ABC, `GPUInfo`
+dataclass, `NoGpuBackend`, `tasker-hardware` applet scaffold.  
 **Blockers:** None  
-**Open decisions:** None — all captured in `docs/SDD_ADDENDUM_7.5.md`  
+**Open decisions:** `tool_result_role` default (`"tool"`) is unvalidated —
+test "tool" vs "user" once a multi-turn loop exists.  
 
 **Live model config (tier1_tasker):**  
 - Orchestrator: `lfm2.5-thinking:latest` (local, 1.2B — was `qwen3:1.7b`, not installed)  
-- Worker: `lfm2.5-thinking:latest` (local, 1.2B — was `lfm2.5:latest`, not installed)
+- Worker: `lfm2.5-thinking:latest` (local, 1.2B — `tool_protocol: lfm25`, was
+  incorrectly `native`; was `lfm2.5:latest`, not installed)

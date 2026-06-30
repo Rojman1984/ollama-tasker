@@ -183,6 +183,132 @@ class TestFewShotProtocol(unittest.TestCase):
 
 
 # ------------------------------------------------------------------ #
+# LFM25 protocol
+# ------------------------------------------------------------------ #
+
+class TestLfm25InjectTools(unittest.TestCase):
+
+    def test_appends_list_of_tools_to_system_message(self):
+        messages = [{"role": "system", "content": "You are helpful."}]
+        tools = [_tool("get_weather")]
+        result = ToolCallNormalizer.inject_tools(messages, tools, ToolProtocol.LFM25)
+        self.assertIn("List of tools:", result[0]["content"])
+        self.assertIn("get_weather", result[0]["content"])
+
+    def test_appends_json_output_instruction(self):
+        messages = [{"role": "system", "content": "You are helpful."}]
+        result = ToolCallNormalizer.inject_tools(messages, [_tool()], ToolProtocol.LFM25)
+        self.assertIn("Output function calls as JSON", result[0]["content"])
+
+    def test_no_wrapper_tokens(self):
+        messages = [{"role": "system", "content": "sys"}]
+        result = ToolCallNormalizer.inject_tools(messages, [_tool()], ToolProtocol.LFM25)
+        self.assertNotIn("<|tool_list_start|>", result[0]["content"])
+        self.assertNotIn("<|tool_list_end|>", result[0]["content"])
+
+    def test_creates_system_message_if_absent(self):
+        messages = [{"role": "user", "content": "hi"}]
+        result = ToolCallNormalizer.inject_tools(messages, [_tool()], ToolProtocol.LFM25)
+        self.assertEqual(result[0]["role"], "system")
+        self.assertIn("List of tools:", result[0]["content"])
+        self.assertEqual(result[1]["role"], "user")
+
+    def test_does_not_mutate_input(self):
+        messages = [{"role": "system", "content": "sys"}]
+        ToolCallNormalizer.inject_tools(messages, [_tool()], ToolProtocol.LFM25)
+        self.assertEqual(messages[0]["content"], "sys")
+
+    def test_empty_tools_returns_messages_unchanged(self):
+        messages = [{"role": "system", "content": "sys"}]
+        result = ToolCallNormalizer.inject_tools(messages, [], ToolProtocol.LFM25)
+        self.assertEqual(result, messages)
+
+    def test_non_lfm25_non_native_protocol_passes_through_unchanged(self):
+        messages = [{"role": "system", "content": "sys"}]
+        result = ToolCallNormalizer.inject_tools(messages, [_tool()], ToolProtocol.JSON_EXTRACT)
+        self.assertEqual(result, messages)
+
+
+class TestLfm25ExtractToolCalls(unittest.TestCase):
+
+    def test_json_array_single_call(self):
+        text = '[{"name": "get_weather", "arguments": {"location": "McAllen, TX"}}]'
+        results = ToolCallNormalizer.extract_tool_calls(text, ToolProtocol.LFM25)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].tool_name, "get_weather")
+        self.assertEqual(results[0].tool_input, {"location": "McAllen, TX"})
+
+    def test_json_array_multiple_calls(self):
+        text = (
+            '[{"name": "a", "arguments": {"x": 1}}, '
+            '{"name": "b", "arguments": {"y": 2}}]'
+        )
+        results = ToolCallNormalizer.extract_tool_calls(text, ToolProtocol.LFM25)
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0].tool_name, "a")
+        self.assertEqual(results[1].tool_name, "b")
+
+    def test_json_array_nested_dict_argument(self):
+        text = '[{"name": "configure", "arguments": {"opts": {"nested": true, "n": 2}}}]'
+        results = ToolCallNormalizer.extract_tool_calls(text, ToolProtocol.LFM25)
+        self.assertEqual(results[0].tool_input["opts"], {"nested": True, "n": 2})
+
+    def test_pythonic_fallback_parsed(self):
+        text = '<|tool_call_start|>[get_weather(location="McAllen, TX")]<|tool_call_end|>'
+        results = ToolCallNormalizer.extract_tool_calls(text, ToolProtocol.LFM25)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].tool_name, "get_weather")
+        self.assertEqual(results[0].tool_input, {"location": "McAllen, TX"})
+
+    def test_pythonic_trailing_text_stripped(self):
+        text = (
+            'Sure, let me check.'
+            '<|tool_call_start|>[get_weather(location="Austin")]<|tool_call_end|>'
+            ' anything after this is ignored'
+        )
+        results = ToolCallNormalizer.extract_tool_calls(text, ToolProtocol.LFM25)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].tool_input["location"], "Austin")
+
+    def test_plain_text_returns_empty(self):
+        results = ToolCallNormalizer.extract_tool_calls("Just a plain answer.", ToolProtocol.LFM25)
+        self.assertEqual(results, [])
+
+    def test_malformed_json_array_falls_through_to_pythonic(self):
+        text = '[not valid json <|tool_call_start|>[bash(cmd="ls")]<|tool_call_end|>'
+        results = ToolCallNormalizer.extract_tool_calls(text, ToolProtocol.LFM25)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].tool_name, "bash")
+
+    def test_bare_json_object_without_array_wrapper_parsed(self):
+        # Live testing against lfm2.5-thinking:latest showed the model
+        # sometimes emits a single object instead of a 1-element array.
+        text = '{"name": "get_weather", "arguments": {"location": "McAllen, TX"}}'
+        results = ToolCallNormalizer.extract_tool_calls(text, ToolProtocol.LFM25)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].tool_name, "get_weather")
+
+    def test_json_object_wrapped_in_markdown_fence_parsed(self):
+        # Live testing showed the model sometimes wraps its JSON in a
+        # ```json fence despite being told to emit only the JSON.
+        text = '```json\n{"name": "get_weather", "arguments": {"location": "Austin"}}\n```'
+        results = ToolCallNormalizer.extract_tool_calls(text, ToolProtocol.LFM25)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].tool_input["location"], "Austin")
+
+    def test_json_array_wrapped_in_markdown_fence_parsed(self):
+        text = '```json\n[{"name": "get_weather", "arguments": {"location": "Austin"}}]\n```'
+        results = ToolCallNormalizer.extract_tool_calls(text, ToolProtocol.LFM25)
+        self.assertEqual(len(results), 1)
+
+    def test_extract_tool_calls_equivalent_to_extract_with_none_native_calls(self):
+        text = '[{"name": "x", "arguments": {}}]'
+        a = ToolCallNormalizer.extract_tool_calls(text, ToolProtocol.LFM25)
+        b = ToolCallNormalizer.extract(text, None, ToolProtocol.LFM25)
+        self.assertEqual(a, b)
+
+
+# ------------------------------------------------------------------ #
 # format_tools
 # ------------------------------------------------------------------ #
 

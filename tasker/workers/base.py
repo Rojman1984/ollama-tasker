@@ -61,6 +61,7 @@ class ToolProtocol(Enum):
     JSON_EXTRACT = "json_extract"
     XML_EXTRACT  = "xml_extract"
     FEW_SHOT     = "few_shot"
+    LFM25        = "lfm25"   # LFM2.5-Instruct/Thinking — see SDD_ADDENDUM_7.5.md A.2b
 
 
 class RoutingPolicy(Enum):
@@ -257,6 +258,15 @@ class WorkerManifest:
     requires_gpu: bool
     vram_mb: int | None
     capability_scores: dict[str, float] = field(default_factory=dict)
+    tool_result_role: str | None = None
+    """
+    Role to use for tool-result messages on the next turn, for non-NATIVE
+    protocols only ("tool" | "user"). None/absent means "use the protocol
+    default" ("tool" for LFM25). Exists because Ollama has been observed to
+    reject the official "tool" role for some LFM2-family models, requiring
+    "user" as a workaround — see SDD_ADDENDUM_7.5.md A.2b. Ignored entirely
+    for NATIVE workers, where Ollama owns tool-result formatting.
+    """
 
     def __post_init__(self) -> None:
         if Capability.TOOL_USE not in self.capabilities:
@@ -285,6 +295,7 @@ class WorkerManifest:
             "requires_gpu": self.requires_gpu,
             "vram_mb": self.vram_mb,
             "capability_scores": dict(self.capability_scores),
+            "tool_result_role": self.tool_result_role,
         }
 
     @classmethod
@@ -308,6 +319,7 @@ class WorkerManifest:
             requires_gpu=data["requires_gpu"],
             vram_mb=data.get("vram_mb"),
             capability_scores=data.get("capability_scores", {}),
+            tool_result_role=data.get("tool_result_role"),
         )
 
 
