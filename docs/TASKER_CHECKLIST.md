@@ -143,8 +143,32 @@ command in TESTING_GUIDE.md.
     Wiring it in is a small follow-up, deliberately left out of strict
     7.5.2 scope (not in the addendum's file list for this sub-phase).
 - [x] .tasker/ fully gitignored (not just checkpoints/sessions) -- added in 7.5.1's .gitignore pass
-- [ ] 7.5.3 NvidiaBackend implemented + unit tested
-- [ ] NvidiaBackend verified on real hardware (Designlab1)
+- [x] 7.5.3 NvidiaBackend implemented + unit tested (detect() + verify_live(),
+      22 tests in test_gpu_backends.py, 3 tier-computation tests in
+      test_hardware_detect.py -- 400/400 full suite passing)
+  - detect_gpu() now tries NvidiaBackend first (was a commented stub since 7.5.2)
+  - detect_hardware_profile() tier computation: NVIDIA >= 4096MB ->
+    tier_max=2/resident (tier2_designlab.yaml); NVIDIA < 4096MB or no GPU ->
+    tier_max=1/sequential (tier1_tasker.yaml), via a new dedicated
+    _NVIDIA_RESIDENT_VRAM_THRESHOLD_MB=4096 constant -- kept separate from
+    the legacy Phase-7 _GPU_VRAM_THRESHOLD_MB=4000 so existing
+    suggest_profile()/auto_detect_profile() tests keep passing unchanged
+  - Found and fixed a real bug during live testing: nvidia-smi's `-l 1`
+    flag never exits on its own, so verify_live()'s supplementary
+    utilization sample always hits subprocess.TimeoutExpired -- whose
+    .stdout came back as raw bytes despite text=True on the original call,
+    leaking a "b'0 %'" repr into the user-facing message. Fixed with
+    defensive bytes decoding; regression test added
+    (test_utilization_sample_via_timeout_path_decodes_bytes)
+- [x] NvidiaBackend verified on real hardware (Designlab1) -- nvidia-smi
+      reports "NVIDIA GeForce GTX 1050 Ti, 4096" MB; tasker-hardware detect
+      correctly resolved gpu_vendor=nvidia, gpu_memory_mb=4096,
+      is_unified_memory=false, orchestrator_tier_max=2, load_strategy=resident.
+      tasker-hardware verify against a loaded lfm2.5-thinking:latest reported
+      via /api/ps: size_vram=1074716998 bytes == size (full offload) ->
+      gpu_verified_during_inference=true, gpu_verified_size_vram_mb=1024,
+      gpu_verified_offload_status="full". "No model loaded" path also
+      verified live (ran verify before loading any model).
 - [ ] 7.5.4 AmdApuBackend v1 (general guide) implemented + unit tested
 - [ ] AmdApuBackend v1 verified on real hardware (TASKER-P1, first pass)
 - [ ] 7.5.5 AmdApuBackend refined (gfx902 env vars, group check, journalctl offload parsing)

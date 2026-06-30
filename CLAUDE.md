@@ -224,7 +224,7 @@ Update this section as phases complete.
 | 8 | Orchestrator Factory + Live CLI Wiring | ✅ COMPLETE |
 | 7.5.1 | Linux/WSL2 migration audit (see `docs/SDD_ADDENDUM_7.5.md`) | ✅ COMPLETE |
 | 7.5.2 | `GPUBackend` ABC + `NoGpuBackend` + `tasker-hardware` applet + cache + 3-source resolution | ✅ COMPLETE |
-| 7.5.3 | `NvidiaBackend` — detect + verify (Designlab1) | ⬜ NOT STARTED |
+| 7.5.3 | `NvidiaBackend` — detect + verify (Designlab1) | ✅ COMPLETE |
 | 7.5.4–7.5.6 | `AmdApuBackend`, VRAM cross-check, final paired verification | ⬜ NOT STARTED |
 
 ---
@@ -343,69 +343,77 @@ python -m unittest tests.unit.test_orchestrator_nano -v
 
 *(Update this section at the end of every Cowork or Code session)*
 
-**Last worked on:** Phase 7.5.2 — `GPUBackend` ABC, `GPUInfo`, `NoGpuBackend`,
-`tasker-hardware` applet, cache schema, `ModeConfigurator` 3-source
-resolution order. Per the addendum's sub-phase table, this session
-deliberately does **not** implement `NvidiaBackend` or `AmdApuBackend`
-(7.5.3/7.5.4) — `detect_gpu()`'s chain has commented-out import/call stubs
-for both so each future sub-phase only needs to uncomment one block.
+**Last worked on:** Phase 7.5.3 — `NvidiaBackend` (`detect()` +
+`verify_live()`) in `tasker/config/gpu_backends.py`, alongside the new
+`VerifyResult` dataclass (detection-subsystem-specific, not added to
+`workers/base.py`). `detect_gpu()`'s NVIDIA stub (commented out since
+7.5.2) is now live; `AmdApuBackend`'s stub remains commented for 7.5.4.
 
-New: `tasker/config/gpu_backends.py` (`GPUBackend` ABC, `GPUInfo` dataclass
-with the AMD-unified-memory semantic note baked into its docstring,
-`NoGpuBackend`, `detect_gpu()`). Extended `tasker/config/detect.py`
-(Phase 7's `HardwareSnapshot`/`suggest_profile`/`auto_detect_profile`/
-`detect_hardware` left untouched) with `load_yaml_profile()`,
-`detect_hardware_profile()` (now GPU-aware via `detect_gpu()`, correctly
-skips the discrete-VRAM threshold comparison for unified-memory/AMD-APU
-GPUs — comparing total system RAM against a 4GB discrete-card threshold
-would misclassify almost every APU machine as GPU-tier), `load_cached_detection()`
-(hostname-scoped, `platform.node()` checked at call time so it's
-mock-patchable), and `cli_main()` (`detect`/`verify`/`show`/`clear`).
-Added `ModeConfigurator.resolve_hardware_profile()` (explicit/env var ->
-cache -> live detection, with a local import inside the method to avoid a
-module-load-time cycle with `tasker.config.detect`, which imports
-`HardwareProfile` from `tasker.modes.base` at its own top level).
+`detect()`: `shutil.which("nvidia-smi")` precondition check before any
+subprocess call, then `nvidia-smi --query-gpu=name,memory.total
+--format=csv,noheader,nounits`, parses the first line, returns `None` on
+any failure (missing tool, non-zero exit, malformed output, exception) —
+never raises. `verify_live(ollama_base_url)`: primary check is `GET
+/api/ps`'s `size_vram` field (>0 → verified); a supplementary best-effort
+`nvidia-smi --query-gpu=utilization.gpu ... -l 1` sample can only confirm,
+never deny, a positive result. "No model loaded" is reported with a
+specific, distinct message rather than treated as a generic failure.
 
-`pyproject.toml` gained the `tasker-hardware` console script; reinstalled
-with `pip install -e .`. Live-tested all 4 subcommands end-to-end on this
-machine (hostname "Designlab1", 12 cores, 15.3GB RAM, no GPU — `detect_gpu()`
-correctly falls through to `NoGpuBackend` this phase regardless of real
-hardware, resolved to `tier1_tasker`). `.gitignore`'s `.tasker/` coverage
-was already complete from 7.5.1 — confirmed, no change needed.
+**Real bug found and fixed during live testing:** `-l 1` never exits on its
+own, so the utilization sample *always* hits `subprocess.TimeoutExpired` in
+production — and `TimeoutExpired.stdout` came back as raw `bytes` despite
+`text=True` on the original call, leaking a `"b'0 %'"` repr into the
+user-facing verify message. This was invisible to the mocked unit tests
+(which mocked normal completion, not the timeout path) until live-testing
+against the real GPU surfaced it. Fixed with defensive bytes decoding;
+added a regression test
+(`test_utilization_sample_via_timeout_path_decodes_bytes`) that reproduces
+the exact bytes-stdout shape so it can't silently regress.
 
-**Deliberately not wired this session:** `cli/shell.py`'s `_run_task()`
-still calls `configurator.load_profile(os.environ.get("TASKER_PROFILE",
-"tier1_tasker"))` directly rather than the new `resolve_hardware_profile()`.
-Wiring it in is a small, obvious follow-up but wasn't in the addendum's
-7.5.2 file list, so left alone to keep this session's diff scoped to what
-was asked.
+`detect_hardware_profile()`'s tier computation: NVIDIA ≥4096MB → tier_max=2,
+resident (`tier2_designlab.yaml`); NVIDIA <4096MB or no GPU → tier_max=1,
+sequential (`tier1_tasker.yaml`) — via a new, dedicated
+`_NVIDIA_RESIDENT_VRAM_THRESHOLD_MB = 4096` constant, kept separate from the
+legacy Phase-7 `_GPU_VRAM_THRESHOLD_MB = 4000` so `suggest_profile()`'s/
+`auto_detect_profile()`'s existing tests keep passing unchanged. The
+existing `_suggest_profile_name()`/static-YAML-selection mechanism from
+7.5.2 already produced exactly the right `computed_profile` shape once
+`detect_gpu()` returned real NVIDIA data — no separate direct-computation
+path was needed.
 
-382/382 unit tests passing (26 new: 7 in `test_gpu_backends.py`, 6 in
-`test_hardware_cli.py`, 13 added to `test_hardware_detect.py`).
+400/400 unit tests passing (18 new this session: 15 added to
+`test_gpu_backends.py` (now 22 total), 3 tier-computation tests added to
+`test_hardware_detect.py` (now 32 total)).
 
-**Last file modified:** `tasker/config/gpu_backends.py` (new),
-`tasker/config/detect.py`, `tasker/modes/base.py`, `pyproject.toml`,
-`docs/TASKER_CHECKLIST.md`, `CLAUDE.md`, `tests/unit/test_gpu_backends.py`
-(new), `tests/unit/test_hardware_detect.py`, `tests/unit/test_hardware_cli.py`
-(new).  
-**Next task:** Phase 7.5.3 — `NvidiaBackend` (`nvidia-smi --query-gpu=name,
-memory.total --format=csv`), unit tests (mocked `nvidia-smi`), then live
-verification on Designlab1 (this machine reported an NVIDIA GTX 1050 Ti via
-`nvidia-smi` during 7.5.1's prerequisite check, despite `tasker-hardware
-detect` reporting "none" just now — expected, since `NvidiaBackend` doesn't
-exist yet to be detected). Separately, still open from the prior session: harden
+**Live verification on Designlab1 (GTX 1050 Ti), exactly as requested:**
+`nvidia-smi` reports `"NVIDIA GeForce GTX 1050 Ti, 4096"`. `tasker-hardware
+detect` correctly resolved: `gpu_vendor="nvidia"`, `gpu_name="NVIDIA GeForce
+GTX 1050 Ti"`, `gpu_memory_mb=4096`, `gpu_is_unified_memory=false`,
+`orchestrator_tier_max=2`, `load_strategy="resident"`. `tasker-hardware
+verify` run twice: once with no model loaded (correctly reported "No model
+currently loaded in Ollama..."), once with `lfm2.5-thinking:latest` loaded
+(`/api/ps` reported `size_vram=1074716998` bytes, equal to `size` → full
+offload) — cache populated `gpu_verified_during_inference=true,
+gpu_verified_size_vram_mb=1024, gpu_verified_offload_status="full"`. Full
+cache file contents recorded in `docs/TASKER_CHECKLIST.md`.
+
+**Last file modified:** `tasker/config/gpu_backends.py`,
+`tasker/config/detect.py`, `docs/TASKER_CHECKLIST.md`, `CLAUDE.md`,
+`tests/unit/test_gpu_backends.py`, `tests/unit/test_hardware_detect.py`.  
+**Next task:** Phase 7.5.4 — `AmdApuBackend` v1 (general guide), on
+TASKER-P1, not this machine. Separately, still open from prior sessions:
+wire `ModeConfigurator.resolve_hardware_profile()` into `cli/shell.py`
+(still calls `load_profile()` directly); harden
 `tasker/orchestrator/_parse.py`'s `parse_plan()` so an invalid capability
-string doesn't silently discard the whole plan (blocks any CLI-level
-"first real tool call" smoke test); build the multi-turn tool-result loop
-to unblock `tool_result_role` testing.  
-**Blockers:** GitHub push still needs credentials (no credential helper,
-no `gh` CLI in this environment — carried over from the prior session,
-unrelated to this session's work).  
+string doesn't silently discard the whole plan; build the multi-turn
+tool-result loop to unblock `tool_result_role` testing.  
+**Blockers:** None — GitHub push credentials were resolved last session
+(`gh` installed to `~/.local/bin`, authenticated as `Rojman1984` via device
+flow); no longer an open blocker.  
 **Open decisions:** `tool_result_role` default (`"tool"`) still unvalidated
 — needs the multi-turn loop. `_suggest_profile_name()`'s AMD-APU fallthrough
-behavior (ignore `memory_mb` entirely, use only CPU/RAM) is untested against
-real APU hardware since `AmdApuBackend` doesn't exist yet — revisit once
-7.5.4 lands.  
+behavior (ignore `memory_mb` entirely, use only CPU/RAM) is still untested
+against real APU hardware — revisit once 7.5.4 lands on TASKER-P1.  
 
 **Live model config (tier1_tasker):**  
 - Orchestrator: `lfm2.5-thinking:latest` (local, 1.2B — was `qwen3:1.7b`, not installed)  

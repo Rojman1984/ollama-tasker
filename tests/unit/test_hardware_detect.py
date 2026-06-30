@@ -191,6 +191,37 @@ class TestDetectHardwareProfileGpuAware(unittest.TestCase):
 
 
 # ------------------------------------------------------------------ #
+# Phase 7.5.3 -- GPU-driven tier computation (orchestrator_tier_max /
+# load_strategy), exercised via mocked NvidiaBackend output
+# ------------------------------------------------------------------ #
+
+class TestNvidiaTierComputation(unittest.TestCase):
+
+    def test_4096mb_resolves_tier_max_2_resident(self):
+        gpu = GPUInfo(vendor="nvidia", name="GTX 1050 Ti", memory_mb=4096, is_unified_memory=False)
+        profile = detect_hardware_profile(
+            _cpu_fn=lambda: 12, _ram_fn=lambda: 32.0, _gpu_detect_fn=lambda: gpu,
+        )
+        self.assertEqual(profile.orchestrator_tier_max, 2)
+        self.assertFalse(profile.unload_between_tasks)   # resident
+
+    def test_2048mb_resolves_tier_max_1_sequential(self):
+        gpu = GPUInfo(vendor="nvidia", name="GT 1030", memory_mb=2048, is_unified_memory=False)
+        profile = detect_hardware_profile(
+            _cpu_fn=lambda: 12, _ram_fn=lambda: 32.0, _gpu_detect_fn=lambda: gpu,
+        )
+        self.assertEqual(profile.orchestrator_tier_max, 1)
+        self.assertTrue(profile.unload_between_tasks)   # sequential
+
+    def test_no_gpu_unchanged_tier_max_1_sequential(self):
+        profile = detect_hardware_profile(
+            _cpu_fn=lambda: 12, _ram_fn=lambda: 32.0, _gpu_detect_fn=lambda: None,
+        )
+        self.assertEqual(profile.orchestrator_tier_max, 1)
+        self.assertTrue(profile.unload_between_tasks)   # sequential
+
+
+# ------------------------------------------------------------------ #
 # Phase 7.5.2 -- load_cached_detection
 # ------------------------------------------------------------------ #
 

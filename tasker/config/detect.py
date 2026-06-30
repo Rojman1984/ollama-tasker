@@ -33,7 +33,7 @@ from typing import Callable
 
 import yaml
 
-from tasker.config.gpu_backends import GPUInfo, detect_gpu
+from tasker.config.gpu_backends import GPUInfo, NvidiaBackend, VerifyResult, detect_gpu
 from tasker.modes.base import HardwareProfile
 from tasker.workers.base import TaskerConfigError
 
@@ -149,6 +149,18 @@ _REPO_ROOT = Path(__file__).parent.parent.parent
 _PROFILES_DIR = _REPO_ROOT / "config" / "profiles"
 _CACHE_PATH = Path(".tasker") / "hardware_profile.json"
 
+# Phase 7.5.3: NVIDIA discrete-GPU tier threshold, exactly 4096 MB (4 GiB) --
+# distinct from the legacy _GPU_VRAM_THRESHOLD_MB (4000, an approximation
+# used only by the Phase 7 suggest_profile()/auto_detect_profile() path,
+# left untouched so its existing tests keep passing). 4096 is what
+# nvidia-smi actually reports for a 4GB card (confirmed live on Designlab1's
+# GTX 1050 Ti: nvidia-smi reports exactly 4096). >= 4096 MB: resident load
+# strategy eligible, tier_max can be 2 (tier2_designlab.yaml). < 4096 MB:
+# still a discrete GPU but constrained -- tier_max 1, sequential load
+# strategy (tier1_tasker.yaml), same as no GPU at all. See
+# SDD_ADDENDUM_7.5.md A.4.2/A.4.3.
+_NVIDIA_RESIDENT_VRAM_THRESHOLD_MB = 4_096
+
 
 def load_yaml_profile(name: str) -> HardwareProfile:
     """Read config/profiles/<name>.yaml and return a HardwareProfile."""
@@ -172,7 +184,7 @@ def _suggest_profile_name(cpu_cores: int, ram_gb: float, gpu: GPUInfo | None) ->
     revisiting when AmdApuBackend lands.
     """
     if gpu is not None and gpu.vendor == "nvidia" and not gpu.is_unified_memory:
-        if (gpu.memory_mb or 0) >= _GPU_VRAM_THRESHOLD_MB:
+        if (gpu.memory_mb or 0) >= _NVIDIA_RESIDENT_VRAM_THRESHOLD_MB:
             return "tier2_designlab"
     if cpu_cores >= _TIER1_MIN_CORES and ram_gb >= _TIER1_MIN_RAM_GB:
         return "tier1_tasker"
@@ -270,8 +282,16 @@ def _build_cache_dict(
     ram_gb: float,
     gpu: GPUInfo | None,
     profile: HardwareProfile,
+    *,
+    verify: VerifyResult | None = None,
 ) -> dict:
-    """Schema per SDD_ADDENDUM_7.5.md A.3.3."""
+    """
+    Schema per SDD_ADDENDUM_7.5.md A.3.3. verify is None for `detect`
+    (gpu_verified_* fields stay null, as documented in A.3.3 -- populated
+    only after `tasker-hardware verify` has run at least once) and set for
+    `verify` once a backend's verify_live() exists (7.5.3 NVIDIA / 7.5.5
+    AMD APU).
+    """
     is_amd = gpu is not None and gpu.vendor == "amd_apu"
     return {
         "hostname": platform.node(),
@@ -286,12 +306,9 @@ def _build_cache_dict(
         "amd_rocm_disabled": gpu.rocm_disabled if is_amd else None,
         "amd_vulkan_warning": gpu.vulkan_warning if is_amd else None,
         "amd_group_warning": gpu.group_warning if is_amd else None,
-        # Populated only by `tasker-hardware verify` once a backend's
-        # verify_live() exists (7.5.3 NVIDIA / 7.5.5 AMD APU) -- detect()
-        # alone always leaves these null.
-        "gpu_verified_during_inference": None,
-        "gpu_verified_size_vram_mb": None,
-        "gpu_verified_offload_status": None,
+        "gpu_verified_during_inference": verify.verified if verify else None,
+        "gpu_verified_size_vram_mb": verify.size_vram_mb if verify else None,
+        "gpu_verified_offload_status": verify.offload_status if verify else None,
         "computed_profile": {
             "orchestrator_tier_max": profile.orchestrator_tier_max,
             "max_concurrent_local": profile.max_concurrent_local,
@@ -337,19 +354,21 @@ def _cmd_detect(*, _cache_path: Path | None = None) -> None:
 def _cmd_verify(*, _cache_path: Path | None = None) -> None:
     path = _cache_path or _CACHE_PATH
     cpu_cores, ram_gb, gpu, profile_name, profile = _run_live_detection()
-    cache = _build_cache_dict(cpu_cores, ram_gb, gpu, profile)
+
+    verify_result: VerifyResult | None = None
+    if gpu is not None and gpu.vendor == "nvidia":
+        verify_result = NvidiaBackend().verify_live(profile.ollama_base_url)
+
+    cache = _build_cache_dict(cpu_cores, ram_gb, gpu, profile, verify=verify_result)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as fh:
         json.dump(cache, fh, indent=2)
     print(_format_report(cache, profile_name))
     print()
-    if cache["gpu_vendor"] == "nvidia":
-        print(
-            "Live GPU verification for NVIDIA requires Phase 7.5.3 "
-            "(NvidiaBackend.verify_live()) -- not yet implemented this "
-            "phase. Static detection above is all that's available."
-        )
-    elif cache["gpu_vendor"] == "amd_apu":
+
+    if gpu is not None and gpu.vendor == "nvidia":
+        print(verify_result.message)
+    elif gpu is not None and gpu.vendor == "amd_apu":
         print(
             "Live GPU verification for AMD APU requires Phase 7.5.5 "
             "(AmdApuBackend.verify_live()) -- not yet implemented this "
