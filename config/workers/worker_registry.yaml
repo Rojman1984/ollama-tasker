@@ -1,0 +1,121 @@
+# Ollama Tasker -- Worker Registry
+# Only tool-capable models (Capability.TOOL_USE) are registered.
+# See SDD Section 8.3.
+
+workers:
+  - id: lfm2.5-local
+    provider: ollama
+    model_id: "lfm2.5:latest"
+    compute_location: local_hardware
+    capabilities: [tool_use, code, search]
+    tool_protocol: native
+    context_window: 32768
+    cost_input: 0.0
+    cost_output: 0.0
+    ollama_usage_level: null
+    latency_class: medium
+    requires_gpu: false
+
+  - id: nemotron-3-ultra-cloud
+    provider: ollama
+    model_id: "nemotron-3-ultra"
+    compute_location: ollama_cloud
+    capabilities: [tool_use, reasoning, thinking, code]
+    tool_protocol: native
+    context_window: 128000
+    cost_input: 0.0
+    cost_output: 0.0
+    ollama_usage_level: 3
+    latency_class: slow
+    requires_gpu: false
+
+  - id: glm-5.2-cloud
+    provider: ollama
+    model_id: "glm-5.2"
+    compute_location: ollama_cloud
+    capabilities: [tool_use, thinking, reasoning]
+    tool_protocol: native
+    context_window: 128000
+    cost_input: 0.0
+    cost_output: 0.0
+    ollama_usage_level: 3
+    latency_class: slow
+    requires_gpu: false
+
+  - id: glm-5.1-cloud
+    provider: ollama
+    model_id: "glm-5.1"
+    compute_location: ollama_cloud
+    capabilities: [tool_use, code, thinking]
+    tool_protocol: native
+    context_window: 128000
+    cost_input: 0.0
+    cost_output: 0.0
+    ollama_usage_level: 3
+    latency_class: slow
+    requires_gpu: false
+
+  - id: minimax-m3-cloud
+    provider: ollama
+    model_id: "minimax-m3"
+    compute_location: ollama_cloud
+    capabilities: [tool_use, vision, thinking, long_context]
+    tool_protocol: native
+    context_window: 1000000
+    cost_input: 0.0
+    cost_output: 0.0
+    ollama_usage_level: 3
+    latency_class: slow
+    requires_gpu: false
+
+  - id: kimi-k2.7-code-cloud
+    provider: ollama
+    model_id: "kimi-k2.7-code"
+    compute_location: ollama_cloud
+    capabilities: [tool_use, code, vision, thinking]
+    tool_protocol: native
+    context_window: 128000
+    cost_input: 0.0
+    cost_output: 0.0
+    ollama_usage_level: 2
+    latency_class: medium
+    requires_gpu: false
+
+  - id: claude-haiku-4-5
+    provider: anthropic
+    model_id: "claude-haiku-4-5"
+    compute_location: direct_cloud
+    capabilities: [tool_use, code, reasoning]
+    tool_protocol: native
+    context_window: 200000
+    cost_input: 0.80
+    cost_output: 4.00
+    ollama_usage_level: null
+    latency_class: fast
+    requires_gpu: false
+
+  - id: claude-sonnet-4-6
+    provider: anthropic
+    model_id: "claude-sonnet-4-6"
+    compute_location: direct_cloud
+    capabilities: [tool_use, code, reasoning]
+    tool_protocol: native
+    context_window: 200000
+    cost_input: 3.00
+    cost_output: 15.00
+    ollama_usage_level: null
+    latency_class: fast
+    requires_gpu: false
+
+  - id: fugu-ultra
+    provider: fugu
+    model_id: "fugu-ultra"
+    compute_location: direct_cloud
+    capabilities: [tool_use, code, reasoning, multi_agent]
+    tool_protocol: native
+    context_window: 272000
+    cost_input: 5.00
+    cost_output: 30.00
+    ollama_usage_level: null
+    latency_class: slow
+    requires_gpu: false

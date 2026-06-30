@@ -1,0 +1,1 @@
+# core -- Parity Project modules (adopted, do not rewrite)

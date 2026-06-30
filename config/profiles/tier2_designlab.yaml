@@ -1,0 +1,34 @@
+# Tier 2 -- Designlab1
+# Ryzen 5/7, 32GB RAM, GTX 1050 Ti 4GB. GPU-accelerated, resident planner.
+hardware_profile: tier2_local_standard
+description: "Designlab1 -- Ryzen 5/7, 32GB RAM, GTX 1050 Ti 4GB"
+
+orchestrator:
+  tier_max: 2
+  provider: dual_llm
+  planner_model: qwen3:7b
+  synthesizer_model: qwen3:4b
+  load_strategy: resident
+  context_limit: 8192
+
+classifier:
+  provider: local_llm
+  model: qwen3:1.7b
+
+worker_pool:
+  max_concurrent_local: 2
+  max_concurrent_ollama_cloud: 3
+  unload_between_tasks: false
+
+ollama:
+  plan: pro
+  base_url: "http://localhost:11434"
+  session_throttle_at: 0.90
+  weekly_throttle_at: 0.85
+  fallback_on_exhaustion: local_then_direct_cloud
+
+mode_constraints:
+  cowork:
+    behavior: limited_parallel
+  research:
+    behavior: parallel_fetch

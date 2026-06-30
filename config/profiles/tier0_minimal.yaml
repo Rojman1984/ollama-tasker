@@ -1,0 +1,24 @@
+# Tier 0 -- Minimal / No Model
+# Rule-based orchestration only. Zero LLM cost on every request.
+hardware_profile: tier0_minimal
+description: "No model required -- rule-based orchestration only"
+
+orchestrator:
+  tier_max: 0
+  provider: rule_based
+  load_strategy: none
+
+classifier:
+  provider: rule_based
+
+worker_pool:
+  max_concurrent_local: 1
+  max_concurrent_ollama_cloud: 0
+  unload_between_tasks: true
+
+ollama:
+  plan: free
+  base_url: "http://localhost:11434"
+  session_throttle_at: 0.90
+  weekly_throttle_at: 0.85
+  fallback_on_exhaustion: local_only

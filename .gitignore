@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+dist/
+build/
+*.egg-info/
+
+# Environment -- never commit API keys
+.env
+
+# Tasker runtime state
+.tasker/
+.tasker/checkpoints/
+.tasker/sessions/
+
+# Editor
+.vscode/
+.idea/
+*.swp

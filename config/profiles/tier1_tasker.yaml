@@ -1,0 +1,34 @@
+# Tier 1 -- TASKER-P1
+# Ryzen 5 3500U, 32GB RAM, no GPU. Sequential model loading only.
+# Peak RAM = one model at a time.
+hardware_profile: tier1_local_minimal
+description: "TASKER-P1 -- Ryzen 5 3500U, 32GB RAM, CPU-only"
+
+orchestrator:
+  tier_max: 1
+  provider: single_llm
+  model: qwen3:1.7b
+  load_strategy: sequential
+  context_limit: 4096
+
+classifier:
+  provider: rule_based
+  fallback: orchestrator
+
+worker_pool:
+  max_concurrent_local: 1
+  max_concurrent_ollama_cloud: 1
+  unload_between_tasks: true
+
+ollama:
+  plan: pro
+  base_url: "http://localhost:11434"
+  session_throttle_at: 0.90
+  weekly_throttle_at: 0.85
+  fallback_on_exhaustion: local_then_direct_cloud
+
+mode_constraints:
+  cowork:
+    behavior: sequential_only
+  research:
+    behavior: single_worker
