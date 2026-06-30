@@ -1,0 +1,24 @@
+# Ollama Tasker -- COWORK mode defaults
+# SDD Section 5.1 and 8.4
+name: cowork
+orchestrator_tier_max: 3
+routing_policy: hybrid
+interaction_pattern: async_checkpoint
+memory_scope: project_episodic
+private_hard_block: false
+privacy_tier: any_cloud
+tool_bundle:
+  - bash
+  - file_read
+  - file_write
+  - git
+  - linter
+  - test_runner
+  - code_search
+  - checkpoint_write
+  - task_state
+  - progress_report
+  - web_search
+  - retrieve
+  - mcp_call_tool
+  - delegate_agent

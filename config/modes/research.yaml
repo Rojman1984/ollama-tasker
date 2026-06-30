@@ -1,0 +1,15 @@
+# Ollama Tasker -- RESEARCH mode defaults
+# SDD Section 5.1
+name: research
+orchestrator_tier_max: 3
+routing_policy: capability_first
+interaction_pattern: async_stream
+memory_scope: research_session
+private_hard_block: false
+privacy_tier: any_cloud
+tool_bundle:
+  - web_search
+  - retrieve
+  - pdf_extract
+  - citation_tracker
+  - contradiction_detector

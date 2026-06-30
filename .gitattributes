@@ -1,0 +1,14 @@
+# Normalize line endings; let git decide text vs binary, but force LF in the
+# repo regardless of which platform (Windows/PowerShell or Linux/WSL2) checks
+# code out or commits from, since this project is developed across both.
+* text=auto eol=lf
+
+*.py text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.json text eol=lf
+*.sh text eol=lf
+
+*.ps1 text eol=crlf
