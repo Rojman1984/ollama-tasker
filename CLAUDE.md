@@ -140,9 +140,21 @@ ollama-tasker/
 - **Config:** YAML (PyYAML) for hardware profiles, mode defaults, worker registry
 - **Persistence:** JSON files for checkpoints and session state
 - **Testing:** `unittest` (stdlib) — same pattern as Parity Project
-- **Shell:** PowerShell (Windows) — use `python` not `python3`, `;` not `&&`
-- **Venv:** `.venv\Scripts\Activate.ps1` before any `python` command
+- **Shell:** Linux/WSL2 (primary, since Phase 7.5.1) — use `python`, `&&` to chain
+  commands. PowerShell (Windows, secondary) remains supported — use `python` not
+  `python3`, `;` not `&&`. The codebase itself is OS-agnostic (pathlib, asyncio, no
+  Windows-only APIs); only shell syntax in docs/commands differs.
+- **Venv:** Linux/WSL2: `source .venv/bin/activate`. Windows: `.venv\Scripts\Activate.ps1`
 - **dotenv:** use `python-dotenv` for loading `.env` files (never hardcode keys)
+- **AMD APU GPU setup (Linux):** see `docs/Ollama_AMD_APU_Install_Guide.md` for the
+  general Vulkan/Mesa RADV setup (Vega 8 Mobile through RDNA3). For TASKER-P1
+  (Ryzen 5 3500U, gfx902/Raven2) specifically, the general guide's `OLLAMA_VULKAN=1`
+  fix alone is **not** sufficient — it causes a silent runner crash via ROCm
+  enumeration on hardware below ROCm's supported list. Use
+  `docs/ollama-amd-igpu-config-guide.md` instead, which additionally requires
+  `ROCR_VISIBLE_DEVICES=-1` and `HIP_VISIBLE_DEVICES=-1` to disable ROCm enumeration.
+  Documented as the expected fix for TASKER-P1; live confirmation on real hardware
+  is a Phase 7.5.5 task, not yet performed as of 7.5.1.
 
 ---
 
@@ -209,6 +221,9 @@ Update this section as phases complete.
 | 5 | Modes + CLI Shell | ✅ COMPLETE |
 | 6 | Higher Orchestrator Tiers (2, 3, 4) | ✅ COMPLETE |
 | 7 | Hardening (Notifiers, MindSeed, OpenAI API server) | ✅ COMPLETE |
+| 8 | Orchestrator Factory + Live CLI Wiring | ✅ COMPLETE |
+| 7.5.1 | Linux/WSL2 migration audit (see `docs/SDD_ADDENDUM_7.5.md`) | ✅ COMPLETE |
+| 7.5.2–7.5.6 | Dynamic hardware detection (`tasker-hardware` applet, GPU backends) | ⬜ NOT STARTED |
 
 ---
 
@@ -231,7 +246,34 @@ Full rationale in `docs/SDD.md`. Quick reference:
 
 ## Environment Variables
 
-**PowerShell (session):**
+**Linux/WSL2 (session, primary):**
+```bash
+# Ollama (local)
+export OLLAMA_BASE_URL="http://localhost:11434"
+
+# Anthropic
+export ANTHROPIC_API_KEY="sk-ant-..."
+
+# OpenAI
+export OPENAI_API_KEY="sk-..."
+
+# Fugu (via OpenRouter or direct)
+export FUGU_API_KEY="..."
+export FUGU_BASE_URL="https://api.sakana.ai/v1"
+
+# Tasker
+export TASKER_PROFILE="tier1_tasker"   # hardware profile to load
+export TASKER_OLLAMA_PLAN="pro"        # free | pro | max
+export TASKER_LOG_LEVEL="INFO"
+```
+
+**Persistent (add to `~/.bashrc` / `~/.profile`):**
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."
+export TASKER_PROFILE="tier1_tasker"
+```
+
+**PowerShell (Windows, secondary):**
 ```powershell
 # Ollama (local)
 $env:OLLAMA_BASE_URL    = "http://localhost:11434"
@@ -272,7 +314,10 @@ TASKER_LOG_LEVEL=INFO
 
 ## Running Tests
 
-```powershell
+Identical command on Linux/WSL2 and Windows/PowerShell — activate the venv first
+(`source .venv/bin/activate` or `.venv\Scripts\Activate.ps1`).
+
+```bash
 # Full suite
 python -m unittest discover -s tests -v
 
@@ -290,11 +335,25 @@ python -m unittest tests.unit.test_orchestrator_nano -v
 
 *(Update this section at the end of every Cowork or Code session)*
 
-**Last worked on:** Orchestrator factory + CLI wiring — `tasker/orchestrator/factory.py`, `cli/shell.py` real task dispatch, `WorkerRegistry.load_from_yaml`, `HardwareProfile.orchestrator_model` field, smoke-tested against local Ollama.  
-**Last file modified:** `cli/shell.py`, `tasker/orchestrator/factory.py`, `tasker/modes/base.py`, `tasker/workers/registry.py`, `config/workers/worker_registry.yaml`  
-**Next task:** Multi-step COWORK plan smoke test (task that produces 3+ plan steps from SingleLLM/Nano, verifying checkpoint flow), then live Ollama Cloud test once cloud credentials are configured.  
+**Last worked on:** Phase 7.5.1 — cross-platform migration audit. Repo migrated to
+native Linux filesystem (`~/projects/ollama-tasker`), no `.git` history existed
+here despite the addendum assuming it, so initialized git fresh (`.gitignore`,
+`.gitattributes` with `eol=lf` normalization, initial scaffold commit). Audited
+codebase for Windows-only path/string assumptions — found none (`DesktopNotifier`
+already had a cross-platform `plyer` fallback, no backslash literals, no
+`os.name`/`platform.system` branching, no PowerShell refs in `.py` files).
+Updated `CLAUDE.md` to document Linux/WSL2 as primary shell with Windows/PowerShell
+as secondary, and referenced both AMD APU guides. Ran full test suite (330/330
+passing) and all 3 required smoke tests (CHAT/CODE/COWORK) against local Ollama
+from this Linux environment.  
+**Last file modified:** `CLAUDE.md`, `.gitignore`, `.gitattributes`,
+`docs/TASKER_CHECKLIST.md`  
+**Next task:** Phase 7.5.2 — `GPUBackend` ABC, `GPUInfo` dataclass, `NoGpuBackend`,
+`tasker-hardware` applet scaffold (detect/verify/show/clear), cache schema with
+hostname-scoping, `ModeConfigurator` 3-source resolution order rewrite. See
+`docs/SDD_ADDENDUM_7.5.md` Section A.7 for the prompt summary.  
 **Blockers:** None  
-**Open decisions:** None — all captured in SDD v0.1.0-draft  
+**Open decisions:** None — all captured in `docs/SDD_ADDENDUM_7.5.md`  
 
 **Live model config (tier1_tasker):**  
 - Orchestrator: `lfm2.5-thinking:latest` (local, 1.2B — was `qwen3:1.7b`, not installed)  

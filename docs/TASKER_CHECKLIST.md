@@ -109,3 +109,30 @@ command in TESTING_GUIDE.md.
   - CHAT: "say hello in exactly five words" → SingleLLMOrchestrator → local worker → synthesis ok
   - CODE: "list the files in the current directory" → local worker → synthesis ok
   - COWORK: "write a haiku about running code" → local worker → synthesis ok
+
+## Phase 7.5 -- Cross-Platform Migration + Dynamic Hardware Detection
+- [x] 7.5.1 Linux/WSL2 verified as primary dev environment (full suite + 3 smoke tests from WSL2)
+  - Full suite: 330/330 tests passing
+  - Smoke tests re-run natively on Linux: CHAT, CODE, COWORK all synthesized ok via lfm2.5-thinking:latest
+  - Codebase audit found zero Windows-only path/string assumptions (no backslash literals,
+    no os.name/platform.system branching, no PowerShell refs in .py files); DesktopNotifier's
+    plyer fallback already cross-platform
+- [x] .gitattributes added, line-ending drift normalized (eol=lf for source/config/docs, eol=crlf for .ps1)
+- [ ] 7.5.2 GPUBackend ABC + GPUInfo + NoGpuBackend
+- [ ] tasker-hardware applet (detect/verify/show/clear) scaffolded
+- [ ] Cache schema + hostname-scoping implemented
+- [ ] ModeConfigurator 3-source resolution order implemented
+- [x] .tasker/ fully gitignored (not just checkpoints/sessions) -- added in 7.5.1's .gitignore pass
+- [ ] 7.5.3 NvidiaBackend implemented + unit tested
+- [ ] NvidiaBackend verified on real hardware (Designlab1)
+- [ ] 7.5.4 AmdApuBackend v1 (general guide) implemented + unit tested
+- [ ] AmdApuBackend v1 verified on real hardware (TASKER-P1, first pass)
+- [ ] 7.5.5 AmdApuBackend refined (gfx902 env vars, group check, journalctl offload parsing)
+- [ ] AmdApuBackend refined version verified on real hardware (TASKER-P1, offload_status="full" confirmed)
+- [ ] 7.5.6 Worker VRAM cross-check implemented + unit tested
+- [ ] Orchestrator factory confirmed consuming dynamic HardwareProfile correctly
+- [ ] Final paired live verification: both machines, no --profile flag, 3-stage smoke test each
+- [x] docs/Ollama_AMD_APU_Install_Guide.md added to repo
+- [x] docs/ollama-amd-igpu-config-guide.md added to repo
+- [x] CLAUDE.md updated: Linux/WSL2 primary, Windows secondary, both AMD guides referenced
+- [x] AMD discrete / Intel / Apple Silicon explicitly documented as out-of-scope extension points (SDD_ADDENDUM_7.5.md A.4.3)
