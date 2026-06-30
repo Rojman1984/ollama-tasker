@@ -118,10 +118,30 @@ command in TESTING_GUIDE.md.
     no os.name/platform.system branching, no PowerShell refs in .py files); DesktopNotifier's
     plyer fallback already cross-platform
 - [x] .gitattributes added, line-ending drift normalized (eol=lf for source/config/docs, eol=crlf for .ps1)
-- [ ] 7.5.2 GPUBackend ABC + GPUInfo + NoGpuBackend
-- [ ] tasker-hardware applet (detect/verify/show/clear) scaffolded
-- [ ] Cache schema + hostname-scoping implemented
-- [ ] ModeConfigurator 3-source resolution order implemented
+- [x] 7.5.2 GPUBackend ABC + GPUInfo + NoGpuBackend (tasker/config/gpu_backends.py)
+  - detect_gpu() chain structure in place (Nvidia/AmdApu commented stubs ->
+    NoGpuBackend); only NoGpuBackend implemented this phase, as scoped
+- [x] tasker-hardware applet (detect/verify/show/clear) scaffolded
+  (tasker/config/detect.py:cli_main(), wired via pyproject.toml [project.scripts])
+  - Live-tested all 4 subcommands end-to-end on this machine (hostname
+    "Designlab1", 12 cores, 15.3GB RAM, no GPU detected via NoGpuBackend
+    stub -- resolved to tier1_tasker)
+  - verify prints a clear "requires 7.5.3/7.5.5" note rather than failing,
+    since no real backend exists yet this phase
+- [x] Cache schema + hostname-scoping implemented (schema matches
+  SDD_ADDENDUM_7.5.md A.3.3 field-for-field; hostname mismatch -> None,
+  falls through to live detection, never silently applies another
+  machine's profile)
+- [x] ModeConfigurator 3-source resolution order implemented
+  (resolve_hardware_profile() on ModeConfigurator; explicit/env var ->
+  cache (hostname-checked) -> live detection, in that order; all three
+  unit-tested to confirm the earlier sources actually short-circuit the
+  later ones, not just that all three individually work)
+  - NOT wired into cli/shell.py this session, by design: _run_task() still
+    calls configurator.load_profile(os.environ.get("TASKER_PROFILE",
+    "tier1_tasker")) directly rather than resolve_hardware_profile().
+    Wiring it in is a small follow-up, deliberately left out of strict
+    7.5.2 scope (not in the addendum's file list for this sub-phase).
 - [x] .tasker/ fully gitignored (not just checkpoints/sessions) -- added in 7.5.1's .gitignore pass
 - [ ] 7.5.3 NvidiaBackend implemented + unit tested
 - [ ] NvidiaBackend verified on real hardware (Designlab1)

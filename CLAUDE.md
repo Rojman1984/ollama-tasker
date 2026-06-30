@@ -223,7 +223,9 @@ Update this section as phases complete.
 | 7 | Hardening (Notifiers, MindSeed, OpenAI API server) | ✅ COMPLETE |
 | 8 | Orchestrator Factory + Live CLI Wiring | ✅ COMPLETE |
 | 7.5.1 | Linux/WSL2 migration audit (see `docs/SDD_ADDENDUM_7.5.md`) | ✅ COMPLETE |
-| 7.5.2–7.5.6 | Dynamic hardware detection (`tasker-hardware` applet, GPU backends) | ⬜ NOT STARTED |
+| 7.5.2 | `GPUBackend` ABC + `NoGpuBackend` + `tasker-hardware` applet + cache + 3-source resolution | ✅ COMPLETE |
+| 7.5.3 | `NvidiaBackend` — detect + verify (Designlab1) | ⬜ NOT STARTED |
+| 7.5.4–7.5.6 | `AmdApuBackend`, VRAM cross-check, final paired verification | ⬜ NOT STARTED |
 
 ---
 
@@ -341,104 +343,69 @@ python -m unittest tests.unit.test_orchestrator_nano -v
 
 *(Update this section at the end of every Cowork or Code session)*
 
-**Last worked on:** LFM25 tool protocol. The official LiquidAI LFM2.5 docs
-corrected two wrong assumptions: `lfm2.5-thinking:latest` was registered with
-`tool_protocol: native`, but Ollama reports `capability: completion` for this
-model family and rejects `tools[]`; and LFM2.5 doesn't use LFM2's
-`<|tool_list_start|>`/`<|tool_list_end|>` wrapper tokens (plain JSON injection
-instead). Added `ToolProtocol.LFM25`, `WorkerManifest.tool_result_role`,
-`ToolCallNormalizer.inject_tools()`/`extract_tool_calls()`, and protocol-aware
-routing in `OllamaProvider` (NATIVE sends `tools[]`; everything else injects
-into the system message and never sends `tools[]` — this also fixes a second,
-independent latent bug where `OllamaProvider` sent `tools[]` unconditionally
-for every protocol). Full details and rationale in `docs/SDD_ADDENDUM_7.5.md`
-A.2b. 356/356 unit tests passing.
+**Last worked on:** Phase 7.5.2 — `GPUBackend` ABC, `GPUInfo`, `NoGpuBackend`,
+`tasker-hardware` applet, cache schema, `ModeConfigurator` 3-source
+resolution order. Per the addendum's sub-phase table, this session
+deliberately does **not** implement `NvidiaBackend` or `AmdApuBackend`
+(7.5.3/7.5.4) — `detect_gpu()`'s chain has commented-out import/call stubs
+for both so each future sub-phase only needs to uncomment one block.
 
-**Live test result (lfm2.5-thinking:latest, Ollama 0.30.11):** the spec's
-literal instruction — append only "Output function calls as JSON" to the
-system message — was **not sufficient**: the model reasoned to the correct
-call inside its thinking trace but then emitted empty `content`. Fix: append
-an explicit "Respond with ONLY the JSON array function call and no other
-text." instruction too (now baked into `inject_tools()`). Even with that fix,
-real output varied run to run — sometimes a clean JSON array, sometimes a
-single (non-array) JSON object, sometimes wrapped in a ` ```json ` fence
-despite being told not to — so `_extract_lfm25()` was hardened to accept all
-three shapes. 3/3 manual runs parsed correctly after hardening.
-**`tool_result_role` confirmed working:** not yet — no multi-turn
-tool-execution loop exists anywhere in the codebase yet (`WorkerResult.
-tool_results` is produced but nothing re-invokes a worker with results
-appended), so this field has no live test to run yet. Default `"tool"` is
-untested in practice; flagged in SDD_ADDENDUM_7.5.md A.2b as a follow-up.
+New: `tasker/config/gpu_backends.py` (`GPUBackend` ABC, `GPUInfo` dataclass
+with the AMD-unified-memory semantic note baked into its docstring,
+`NoGpuBackend`, `detect_gpu()`). Extended `tasker/config/detect.py`
+(Phase 7's `HardwareSnapshot`/`suggest_profile`/`auto_detect_profile`/
+`detect_hardware` left untouched) with `load_yaml_profile()`,
+`detect_hardware_profile()` (now GPU-aware via `detect_gpu()`, correctly
+skips the discrete-VRAM threshold comparison for unified-memory/AMD-APU
+GPUs — comparing total system RAM against a 4GB discrete-card threshold
+would misclassify almost every APU machine as GPU-tier), `load_cached_detection()`
+(hostname-scoped, `platform.node()` checked at call time so it's
+mock-patchable), and `cli_main()` (`detect`/`verify`/`show`/`clear`).
+Added `ModeConfigurator.resolve_hardware_profile()` (explicit/env var ->
+cache -> live detection, with a local import inside the method to avoid a
+module-load-time cycle with `tasker.config.detect`, which imports
+`HardwareProfile` from `tasker.modes.base` at its own top level).
 
-**Git history reconciled (this session):** `origin/master` turned out to have
-a complete, unrelated git history (initial scaffold → Phases 1–7 →
-orchestrator factory → a Phase 7.5 SDD addendum commit) — this working copy
-had been `git init`'d fresh in the 7.5.1 session without realizing the GitHub
-repo already had history, so the two diverged with zero common ancestor.
-File content was almost entirely identical (most files showed 0 diff); real
-differences were this session's actual new work layered on top of what was
-already on origin. Merged with `--allow-unrelated-histories`; restored two
-files that existed only on origin (`.claude/settings.json`, root-level
-`OLLAMA_TASKER_SDD.md`). The bulk of the apparent conflict set (103 files)
-was a spurious executable-bit difference with byte-identical content, not a
-real disagreement. 356/356 tests passing post-merge. **Push still blocked** —
-no GitHub credentials configured in this environment (no credential helper,
-no `gh` CLI). Needs a PAT via `gh auth login` or an SSH remote from the user.
+`pyproject.toml` gained the `tasker-hardware` console script; reinstalled
+with `pip install -e .`. Live-tested all 4 subcommands end-to-end on this
+machine (hostname "Designlab1", 12 cores, 15.3GB RAM, no GPU — `detect_gpu()`
+correctly falls through to `NoGpuBackend` this phase regardless of real
+hardware, resolved to `tier1_tasker`). `.gitignore`'s `.tasker/` coverage
+was already complete from 7.5.1 — confirmed, no change needed.
 
-**`cli/shell.py` tools=[] gap fixed:** `_run_task()` previously hardcoded
-`tools=[]` on every `WorkerTask`, for every mode — no mode's tool bundle
-(`tasker/tools/bundles.py`) ever reached a live model call. Fixed: resolves
-`config.mode.tool_bundle` via `get_definitions()` and passes the real
-`list[ToolDefinition]` into `WorkerTask`. SECURE's network-tool stripping
-was already baked into its bundle at the data level (`tasker/modes/secure.py`
-already assigns `SECURE_BUNDLE`, and `secure.yaml`'s `tool_bundle` already
-lists only the stripped set) — no extra code needed there, just reaching it.
-Confirmed live: CODE mode's `task.tools` had 7 entries (bash, code_search,
-file_read, file_write, git, linter, test_runner), correctly reaching
-`OllamaProvider`.
+**Deliberately not wired this session:** `cli/shell.py`'s `_run_task()`
+still calls `configurator.load_profile(os.environ.get("TASKER_PROFILE",
+"tier1_tasker"))` directly rather than the new `resolve_hardware_profile()`.
+Wiring it in is a small, obvious follow-up but wasn't in the addendum's
+7.5.2 file list, so left alone to keep this session's diff scoped to what
+was asked.
 
-**Bigger, separate, pre-existing bug found while live-testing the fix:**
-`SingleLLMOrchestrator.plan()` asks `lfm2.5-thinking:latest` for a JSON plan,
-then falls back to `NanoOrchestrator`'s hardcoded single-step "Answer the
-task" template whenever `parse_plan()` fails to parse the response.
-`lfm2.5-thinking:latest` sometimes returns a `capabilities` value outside the
-`Capability` enum (observed: `"bash"` instead of `"tool_use"`), which makes
-`Capability(c)` raise inside `parse_plan()`, silently triggering the
-fallback — **the worker never sees the real task text when this happens**.
-Reproduced directly by hand-sending the planning prompt to the model.
-`python -m cli.shell --mode code "Use the bash tool to list the files in the
-current directory"` hit this fallback in **4/4** runs — never fired a real
-tool call through the literal requested command. When the planning step
-*does* succeed (confirmed once via a direct orchestrator→provider script,
-same pipeline, no CLI print wrapper), the real task reached the worker and
-LFM25 fired a genuine, correctly-parsed tool call end-to-end (wrong tool
-picked — `test_runner` instead of `bash` — but `inject_tools` → JSON
-response → `extract_tool_calls` → `WorkerResult.tool_results` all worked).
-So: **LFM25 itself is validated working; the harness-level "first real tool
-call" milestone is blocked on `parse_plan()` silently discarding the task on
-a capability mismatch, not on anything in this session's changes.** See
-`docs/TASKER_CHECKLIST.md` LFM25 section for full detail.
+382/382 unit tests passing (26 new: 7 in `test_gpu_backends.py`, 6 in
+`test_hardware_cli.py`, 13 added to `test_hardware_detect.py`).
 
-**`tool_result_role` still unconfirmed:** fixing the `tools=[]` gap does
-**not** unblock this — a single-turn tool call never produces a "next turn,"
-so the field still has nothing to exercise it against. Needs the multi-turn
-loop itself built first (explicitly out of scope this session).
-
-**Last file modified:** `cli/shell.py`, `.gitignore`, `.gitattributes`,
-`docs/TASKER_CHECKLIST.md`, `CLAUDE.md` — plus the merge commit touching the
-full tree (file-mode normalization + restoring origin-only files).  
-**Next task:** Harden `tasker/orchestrator/_parse.py`'s `parse_plan()` (or
-the `PLAN_SYSTEM` prompt) so an invalid/unknown capability string doesn't
-discard the entire plan — e.g. skip the unrecognized capability instead of
-raising, or validate against the enum's value set explicitly in the prompt.
-That's the real prerequisite for a CLI-level "first real tool call" smoke
-test (LFM25 or otherwise), not the `tools=[]` wiring (already fixed). Then
-build the multi-turn tool-result loop to finally unblock `tool_result_role`.
-Then Phase 7.5.2 — `GPUBackend` ABC, `GPUInfo` dataclass, `NoGpuBackend`,
-`tasker-hardware` applet scaffold.  
-**Blockers:** GitHub push needs credentials (see above).  
-**Open decisions:** `tool_result_role` default (`"tool"`) is unvalidated —
-test "tool" vs "user" once a multi-turn loop exists.  
+**Last file modified:** `tasker/config/gpu_backends.py` (new),
+`tasker/config/detect.py`, `tasker/modes/base.py`, `pyproject.toml`,
+`docs/TASKER_CHECKLIST.md`, `CLAUDE.md`, `tests/unit/test_gpu_backends.py`
+(new), `tests/unit/test_hardware_detect.py`, `tests/unit/test_hardware_cli.py`
+(new).  
+**Next task:** Phase 7.5.3 — `NvidiaBackend` (`nvidia-smi --query-gpu=name,
+memory.total --format=csv`), unit tests (mocked `nvidia-smi`), then live
+verification on Designlab1 (this machine reported an NVIDIA GTX 1050 Ti via
+`nvidia-smi` during 7.5.1's prerequisite check, despite `tasker-hardware
+detect` reporting "none" just now — expected, since `NvidiaBackend` doesn't
+exist yet to be detected). Separately, still open from the prior session: harden
+`tasker/orchestrator/_parse.py`'s `parse_plan()` so an invalid capability
+string doesn't silently discard the whole plan (blocks any CLI-level
+"first real tool call" smoke test); build the multi-turn tool-result loop
+to unblock `tool_result_role` testing.  
+**Blockers:** GitHub push still needs credentials (no credential helper,
+no `gh` CLI in this environment — carried over from the prior session,
+unrelated to this session's work).  
+**Open decisions:** `tool_result_role` default (`"tool"`) still unvalidated
+— needs the multi-turn loop. `_suggest_profile_name()`'s AMD-APU fallthrough
+behavior (ignore `memory_mb` entirely, use only CPU/RAM) is untested against
+real APU hardware since `AmdApuBackend` doesn't exist yet — revisit once
+7.5.4 lands.  
 
 **Live model config (tier1_tasker):**  
 - Orchestrator: `lfm2.5-thinking:latest` (local, 1.2B — was `qwen3:1.7b`, not installed)  

@@ -1,18 +1,29 @@
 """
 Unit tests -- Hardware profile auto-detection (tasker/config/detect.py)
 Phase 7 -- SDD Section 8.2
+Phase 7.5.2 -- SDD_ADDENDUM_7.5.md A.3 (three-source resolution order)
 
 Detection calls are mocked — tests do not depend on the actual hardware
 the test runner is executing on.
 """
+import json
+import tempfile
 import unittest
+from datetime import datetime, timezone
+from pathlib import Path
+from unittest import mock
 
 from tasker.config.detect import (
     HardwareSnapshot,
     auto_detect_profile,
     detect_hardware,
+    detect_hardware_profile,
+    load_cached_detection,
+    load_yaml_profile,
     suggest_profile,
 )
+from tasker.config.gpu_backends import GPUInfo
+from tasker.modes.base import HardwareProfile, ModeConfigurator
 
 
 # ------------------------------------------------------------------ #
@@ -131,6 +142,159 @@ class TestAutoDetectProfile(unittest.TestCase):
         )
         self.assertEqual(snap.gpu_vram_mb, 0)
         self.assertEqual(suggest_profile(snap), "tier1_tasker")
+
+
+# ------------------------------------------------------------------ #
+# Phase 7.5.2 -- load_yaml_profile / detect_hardware_profile
+# ------------------------------------------------------------------ #
+
+class TestLoadYamlProfile(unittest.TestCase):
+
+    def test_loads_real_profile(self):
+        profile = load_yaml_profile("tier1_tasker")
+        self.assertIsInstance(profile, HardwareProfile)
+
+    def test_unknown_profile_raises(self):
+        from tasker.workers.base import TaskerConfigError
+        with self.assertRaises(TaskerConfigError):
+            load_yaml_profile("nonexistent_profile_xyz")
+
+
+class TestDetectHardwareProfileGpuAware(unittest.TestCase):
+
+    def test_no_gpu_adequate_cpu_ram_resolves_tier1(self):
+        profile = detect_hardware_profile(
+            _cpu_fn=lambda: 6, _ram_fn=lambda: 32.0, _gpu_detect_fn=lambda: None,
+        )
+        self.assertIsInstance(profile, HardwareProfile)
+
+    def test_nvidia_discrete_4gb_resolves_tier2(self):
+        gpu = GPUInfo(vendor="nvidia", name="GTX 1050 Ti", memory_mb=4096, is_unified_memory=False)
+        profile = detect_hardware_profile(
+            _cpu_fn=lambda: 8, _ram_fn=lambda: 16.0, _gpu_detect_fn=lambda: gpu,
+        )
+        expected = load_yaml_profile("tier2_designlab")
+        self.assertEqual(profile.name, expected.name)
+
+    def test_amd_apu_unified_memory_does_not_trigger_discrete_vram_threshold(self):
+        # An APU's memory_mb is total system RAM (e.g. 32GB) -- comparing
+        # that directly against the 4GB discrete threshold would wrongly
+        # classify it as tier2. Must fall through to the CPU/RAM check.
+        gpu = GPUInfo(
+            vendor="amd_apu", name="Vega 8 Mobile", memory_mb=32768, is_unified_memory=True,
+        )
+        profile = detect_hardware_profile(
+            _cpu_fn=lambda: 6, _ram_fn=lambda: 32.0, _gpu_detect_fn=lambda: gpu,
+        )
+        not_expected = load_yaml_profile("tier2_designlab")
+        self.assertNotEqual(profile.name, not_expected.name)
+
+
+# ------------------------------------------------------------------ #
+# Phase 7.5.2 -- load_cached_detection
+# ------------------------------------------------------------------ #
+
+def _cache_json(hostname: str, cpu_cores: int = 8, ram_gb: float = 32.0) -> dict:
+    return {
+        "hostname": hostname,
+        "detected_at": datetime.now(timezone.utc).isoformat(),
+        "cpu_cores": cpu_cores,
+        "ram_gb": ram_gb,
+        "gpu_vendor": "none",
+        "gpu_name": None,
+        "gpu_memory_mb": None,
+        "gpu_is_unified_memory": False,
+        "amd_vulkan_enabled": None,
+        "amd_rocm_disabled": None,
+        "amd_vulkan_warning": None,
+        "amd_group_warning": None,
+        "gpu_verified_during_inference": None,
+        "gpu_verified_size_vram_mb": None,
+        "gpu_verified_offload_status": None,
+        "computed_profile": {
+            "orchestrator_tier_max": 1,
+            "max_concurrent_local": 1,
+            "load_strategy": "sequential",
+        },
+    }
+
+
+class TestLoadCachedDetection(unittest.TestCase):
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.cache_path = Path(self._tmp.name) / "hardware_profile.json"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_missing_file_returns_none(self):
+        self.assertIsNone(load_cached_detection(_cache_path=self.cache_path))
+
+    def test_hostname_mismatch_returns_none(self):
+        self.cache_path.write_text(json.dumps(_cache_json("recorded-host")))
+        with mock.patch("tasker.config.detect.platform.node", return_value="other-machine"):
+            self.assertIsNone(load_cached_detection(_cache_path=self.cache_path))
+
+    def test_hostname_match_returns_hardware_profile(self):
+        self.cache_path.write_text(json.dumps(_cache_json("this-machine", cpu_cores=6, ram_gb=32.0)))
+        with mock.patch("tasker.config.detect.platform.node", return_value="this-machine"):
+            profile = load_cached_detection(_cache_path=self.cache_path)
+        self.assertIsInstance(profile, HardwareProfile)
+
+    def test_corrupt_json_returns_none(self):
+        self.cache_path.write_text("not valid json{{{")
+        self.assertIsNone(load_cached_detection(_cache_path=self.cache_path))
+
+
+# ------------------------------------------------------------------ #
+# Phase 7.5.2 -- ModeConfigurator.resolve_hardware_profile() resolution order
+# ------------------------------------------------------------------ #
+
+class TestResolveHardwareProfile(unittest.TestCase):
+
+    def setUp(self):
+        self.configurator = ModeConfigurator()
+        self._env_patch = mock.patch.dict("os.environ", {}, clear=True)
+        self._env_patch.start()
+
+    def tearDown(self):
+        self._env_patch.stop()
+
+    def test_explicit_profile_skips_cache_and_live_detection(self):
+        with mock.patch("tasker.config.detect.load_cached_detection") as m_cache, \
+             mock.patch("tasker.config.detect.detect_hardware_profile") as m_detect:
+            profile = self.configurator.resolve_hardware_profile("tier1_tasker")
+        self.assertIsInstance(profile, HardwareProfile)
+        m_cache.assert_not_called()
+        m_detect.assert_not_called()
+
+    def test_env_var_skips_cache_and_live_detection(self):
+        with mock.patch.dict("os.environ", {"TASKER_PROFILE": "tier0_minimal"}), \
+             mock.patch("tasker.config.detect.load_cached_detection") as m_cache, \
+             mock.patch("tasker.config.detect.detect_hardware_profile") as m_detect:
+            profile = self.configurator.resolve_hardware_profile()
+        self.assertIsInstance(profile, HardwareProfile)
+        m_cache.assert_not_called()
+        m_detect.assert_not_called()
+
+    def test_no_name_valid_cache_skips_live_detection(self):
+        fake_profile = load_yaml_profile("tier1_tasker")
+        with mock.patch("tasker.config.detect.load_cached_detection", return_value=fake_profile) as m_cache, \
+             mock.patch("tasker.config.detect.detect_hardware_profile") as m_detect:
+            profile = self.configurator.resolve_hardware_profile()
+        self.assertIs(profile, fake_profile)
+        m_cache.assert_called_once()
+        m_detect.assert_not_called()
+
+    def test_no_name_no_cache_falls_back_to_live_detection(self):
+        fake_profile = load_yaml_profile("tier0_minimal")
+        with mock.patch("tasker.config.detect.load_cached_detection", return_value=None) as m_cache, \
+             mock.patch("tasker.config.detect.detect_hardware_profile", return_value=fake_profile) as m_detect:
+            profile = self.configurator.resolve_hardware_profile()
+        self.assertIs(profile, fake_profile)
+        m_cache.assert_called_once()
+        m_detect.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -223,6 +223,37 @@ class ModeConfigurator:
         with path.open(encoding="utf-8") as fh:
             return HardwareProfile.from_dict(yaml.safe_load(fh))
 
+    def resolve_hardware_profile(self, explicit_profile: str | None = None) -> HardwareProfile:
+        """
+        Three-source resolution order (SDD_ADDENDUM_7.5.md A.3.1):
+          1. explicit_profile arg or TASKER_PROFILE env var -> load_profile(name)
+          2. machine-local cache (.tasker/hardware_profile.json), only if its
+             recorded hostname matches this machine
+          3. live detection (slower; prints a suggestion to cache it)
+        All three paths return the same HardwareProfile type -- downstream
+        consumers don't need to know which source was used. Local import to
+        avoid a module-load-time cycle (tasker.config.detect imports
+        HardwareProfile from this module).
+        """
+        import os
+
+        from tasker.config.detect import detect_hardware_profile, load_cached_detection
+
+        name = explicit_profile or os.environ.get("TASKER_PROFILE") or None
+        if name:
+            return self.load_profile(name)
+
+        cached = load_cached_detection()
+        if cached is not None:
+            return cached
+
+        print(
+            "No cached hardware detection found (or hostname mismatch) -- "
+            "running live detection. Run `tasker-hardware detect` once to "
+            "cache this for faster startup."
+        )
+        return detect_hardware_profile()
+
     def load_mode(self, mode_name: str) -> TaskerMode:
         path = self._modes_dir / f"{mode_name}.yaml"
         if not path.exists():

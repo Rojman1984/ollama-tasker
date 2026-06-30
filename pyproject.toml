@@ -22,6 +22,7 @@ dev = [
 
 [project.scripts]
 tasker = "cli.shell:main"
+tasker-hardware = "tasker.config.detect:cli_main"
 
 [tool.ruff]
 line-length = 100
