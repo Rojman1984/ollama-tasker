@@ -1,6 +1,7 @@
 # Python
 __pycache__/
 *.py[cod]
+*.pyo
 *.egg-info/
 .eggs/
 build/
@@ -10,7 +11,7 @@ dist/
 .venv/
 venv/
 
-# Environment / secrets
+# Environment -- never commit API keys
 .env
 
 # Tasker runtime state
@@ -19,10 +20,11 @@ checkpoints/
 sessions/
 *.log
 
+# Claude Code (local overrides -- personal, not team config)
+.claude/settings.local.json
+
 # Editors / OS
 .vscode/
 .idea/
+*.swp
 .DS_Store
-
-# Claude Code local settings (machine-specific, not project config)
-.claude/settings.local.json

@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python *)",
+      "Bash(pip *)",
+      "Bash(.venv/Scripts/python *)",
+      "Bash(.venv/Scripts/pip *)",
+      "Bash(source .venv*)",
+      "Bash(ruff *)",
+      "Bash(pyright *)",
+      "Bash(tasker *)",
+      "Bash(python -m unittest *)",
+      "Bash(python -m ruff *)",
+      "Bash(python -m pyright *)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "fp=$('/c/Users/rojma/AppData/Local/Microsoft/WinGet/Links/jq.exe' -r '.tool_input.file_path // empty'); echo \"$fp\" | grep -qE '[/\\](tasker|core)[/\\]' && (cd '/c/Users/rojma/OneDrive/ClaudeCode/ollama-tasker' && source .venv/Scripts/activate && python -m unittest discover -s tests 2>&1 | tail -20) 2>/dev/null || true",
+            "shell": "bash",
+            "timeout": 60,
+            "statusMessage": "Running unit tests..."
+          }
+        ]
+      }
+    ]
+  }
+}
