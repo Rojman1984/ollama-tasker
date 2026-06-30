@@ -15,6 +15,9 @@ build/
 .tasker/checkpoints/
 .tasker/sessions/
 
+# Claude Code (local overrides — personal, not team config)
+.claude/settings.local.json
+
 # Editor
 .vscode/
 .idea/

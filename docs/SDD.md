@@ -649,6 +649,11 @@ class Checkpoint:
 
 ### 6.6 OllamaSessionBudget
 
+> **NOTE — Placeholder limits:** Exact session/weekly unit limits are placeholders
+> pending real Ollama Cloud telemetry. Current values live in
+> `tasker/session/budget.py` (`_SESSION_LIMIT`, `_WEEKLY_LIMIT`) — do not silently
+> change them without updating both the code and this note.
+
 ```python
 @dataclass
 class OllamaSessionBudget:

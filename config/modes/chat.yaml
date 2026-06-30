@@ -1,3 +1,13 @@
-# Ollama Tasker -- chat mode defaults
-# TODO Phase 5 -- populate per SDD Section 5.1
+# Ollama Tasker -- CHAT mode defaults
+# SDD Section 5.1
 name: chat
+orchestrator_tier_max: 1
+routing_policy: cost_optimized
+interaction_pattern: sync_stream
+memory_scope: session
+private_hard_block: false
+privacy_tier: any_cloud
+tool_bundle:
+  - search
+  - calculator
+  - memory_read

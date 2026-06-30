@@ -1,3 +1,17 @@
-# Ollama Tasker -- code mode defaults
-# TODO Phase 5 -- populate per SDD Section 5.1
+# Ollama Tasker -- CODE mode defaults
+# SDD Section 5.1
 name: code
+orchestrator_tier_max: 1
+routing_policy: capability_first
+interaction_pattern: cli_repl
+memory_scope: project_aware
+private_hard_block: false
+privacy_tier: any_cloud
+tool_bundle:
+  - bash
+  - file_read
+  - file_write
+  - git
+  - linter
+  - test_runner
+  - code_search

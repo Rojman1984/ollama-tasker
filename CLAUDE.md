@@ -187,7 +187,9 @@ These are enforced mechanically, never by convention:
 
 - **workers/base.py is the contract:** All data models and enumerations are defined
   here. No other module defines WorkerManifest, WorkerResult, WorkerTask, or any
-  Capability/RoutingPolicy/PrivacyTier enum. Import from here only.
+  Capability/RoutingPolicy/PrivacyTier enum. Import from here only. This also includes
+  the Phase 5 mode/tool enums (ToolID, InteractionPattern, MemoryScope) — do not look
+  for these in tasker/tools/bundles.py or tasker/modes/base.py.
 
 - **Providers are opaque to the orchestrator:** The orchestrator receives only
   `WorkerManifest` and `WorkerResult`. It never imports from `tasker/workers/providers/`.
@@ -200,12 +202,12 @@ Update this section as phases complete.
 
 | Phase | Description | Status |
 |-------|-------------|--------|
-| 1 | Data models + Worker Registry + Selector | ⬜ NOT STARTED |
-| 2 | Session Layer (Budget, Checkpoint, Manager, Notifier) | ⬜ NOT STARTED |
-| 3 | Orchestrator (Base ABC, Tier 0, Tier 1) | ⬜ NOT STARTED |
-| 4 | Providers (Ollama, Anthropic, OpenAI, Fugu) + ToolNormalizer | ⬜ NOT STARTED |
-| 5 | Modes + CLI Shell | ⬜ NOT STARTED |
-| 6 | Higher Orchestrator Tiers (2, 3, 4) | ⬜ NOT STARTED |
+| 1 | Data models + Worker Registry + Selector | ✅ COMPLETE |
+| 2 | Session Layer (Budget, Checkpoint, Manager, Notifier) | ✅ COMPLETE |
+| 3 | Orchestrator (Base ABC, Tier 0, Tier 1) | ✅ COMPLETE |
+| 4 | Providers (Ollama, Anthropic, OpenAI, Fugu) + ToolNormalizer | ✅ COMPLETE |
+| 5 | Modes + CLI Shell | ✅ COMPLETE |
+| 6 | Higher Orchestrator Tiers (2, 3, 4) | ✅ COMPLETE |
 | 7 | Hardening (Notifiers, MindSeed, OpenAI API server) | ⬜ NOT STARTED |
 
 ---
@@ -288,9 +290,8 @@ python -m unittest tests.unit.test_orchestrator_nano -v
 
 *(Update this section at the end of every Cowork or Code session)*
 
-**Last worked on:** —  
-**Last file modified:** —  
-**Next task:** Begin Phase 1 — create `tasker/workers/base.py` with all data models
-and enumerations per SDD Section 6.  
+**Last worked on:** Phase 6 — Higher Orchestrator Tiers (_parse.py shared module, DualLLMOrchestrator Tier 2, ReasoningOrchestrator Tier 3, CloudOrchestrator Tier 4)  
+**Last file modified:** `tasker/orchestrator/tier4_cloud.py`, `tests/unit/test_orchestrator_tier4.py`  
+**Next task:** Begin Phase 7 — Hardening (DesktopNotifier + WebhookNotifier verification, OpenAI-compat API server, hardware profile auto-detection, MindSeed episodic memory bridge for COWORK mode)  
 **Blockers:** None  
 **Open decisions:** None — all captured in SDD v0.1.0-draft

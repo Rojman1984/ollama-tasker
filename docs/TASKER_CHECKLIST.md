@@ -4,64 +4,81 @@ Update when each feature completes. Every checked item needs a test
 command in TESTING_GUIDE.md.
 
 ## Phase 1 -- Data Models + Worker Registry + Selector
-- [ ] WorkerManifest (tasker/workers/base.py)
-- [ ] WorkerTask dataclass
-- [ ] WorkerResult dataclass
-- [ ] WorkerToolResult dataclass
-- [ ] ModelUsage dataclass
-- [ ] All enumerations (ProviderType, ComputeLocation, Capability, etc.)
-- [ ] TaskerPolicyError, TaskerConfigError exceptions
-- [ ] WorkerManifest validates TOOL_USE presence
-- [ ] WorkerRegistry (register, deregister, filter, health_check, list_all)
-- [ ] WorkerSelector (full decision tree per SDD 5.5)
-- [ ] config/workers/worker_registry.yaml
-- [ ] tests/unit/test_worker_manifest.py passing
-- [ ] tests/unit/test_worker_registry.py passing
-- [ ] tests/unit/test_worker_selector.py passing
+- [x] WorkerManifest (tasker/workers/base.py)
+- [x] WorkerTask dataclass
+- [x] WorkerResult dataclass
+- [x] WorkerToolResult dataclass
+- [x] ModelUsage dataclass
+- [x] ExecutionPlan + PlanStep dataclasses
+- [x] All enumerations (ProviderType, ComputeLocation, Capability, etc.)
+- [x] TaskerPolicyError, TaskerConfigError, OllamaQueueFullError exceptions
+- [x] WorkerManifest validates TOOL_USE presence
+- [x] WorkerRegistry (register, deregister, filter, health_check, list_all)
+- [x] WorkerSelector (full decision tree per SDD 5.5)
+- [x] tests/unit/test_worker_manifest.py passing
+- [x] tests/unit/test_worker_registry.py passing
+- [x] tests/unit/test_worker_selector.py passing
+- [x] tests/unit/test_concurrency_manager.py passing
 
 ## Phase 2 -- Session Layer
-- [ ] OllamaSessionBudget
-- [ ] OllamaCloudConcurrencyManager
-- [ ] Checkpoint dataclass + CheckpointStore
-- [ ] SessionManager state machine
-- [ ] NotifierBase + TerminalNotifier + LogNotifier
-- [ ] tests/unit/test_session_budget.py passing
-- [ ] tests/unit/test_session_manager.py passing
-- [ ] tests/unit/test_checkpoint.py passing
+- [x] OllamaSessionBudget (5-hour window, throttle/exhaustion signals)
+- [x] OllamaCloudConcurrencyManager (asyncio-based, DEFERRED on exhaustion)
+- [x] Checkpoint dataclass (uses ExecutionPlan, full serialization round-trip)
+- [x] CheckpointStore (JSON persistence, load_latest, list_all, delete)
+- [x] SessionManager state machine (tick, pause, resume, should_auto_resume)
+- [x] NotifierBase + TerminalNotifier + LogNotifier + WebhookNotifier + CompositeNotifier
+- [x] tests/unit/test_session_budget.py passing
+- [x] tests/unit/test_session_manager.py passing
+- [x] tests/unit/test_checkpoint.py passing
 
 ## Phase 3 -- Orchestrator
-- [ ] OrchestratorBase ABC
-- [ ] NanoOrchestrator (Tier 0)
-- [ ] SingleLLMOrchestrator (Tier 1)
-- [ ] tests/unit/test_orchestrator_nano.py passing
-- [ ] tests/unit/test_orchestrator_single.py passing
+- [x] OrchestratorBase ABC (plan, synthesize, should_retry)
+- [x] NanoOrchestrator (Tier 0 — rule-based, zero model calls)
+- [x] SingleLLMOrchestrator (Tier 1 — injectable call_model, JSON fallback to Nano)
+- [x] tests/unit/test_orchestrator_nano.py passing
+- [x] tests/unit/test_orchestrator_single.py passing
 
 ## Phase 4 -- Providers + ToolNormalizer
-- [ ] WorkerProviderBase ABC
-- [ ] OllamaProvider (local + cloud unified)
-- [ ] AnthropicProvider
-- [ ] OpenAIProvider
-- [ ] FuguProvider
-- [ ] ToolCallNormalizer (NATIVE, JSON_EXTRACT, XML_EXTRACT, FEW_SHOT)
-- [ ] Integration tests passing with fake servers
+- [x] WorkerProviderBase ABC
+- [x] ToolCallNormalizer (NATIVE, JSON_EXTRACT, XML_EXTRACT, FEW_SHOT)
+- [x] OllamaProvider (local + cloud unified, concurrency slot management)
+- [x] AnthropicProvider
+- [x] OpenAIProvider
+- [x] FuguProvider (MULTI_AGENT, opaque worker)
+- [x] tests/unit/test_tool_normalizer.py passing
+- [x] tests/unit/test_provider_ollama.py passing
+- [x] tests/unit/test_provider_anthropic.py passing
+- [x] tests/unit/test_provider_openai.py passing
+- [x] tests/unit/test_provider_fugu.py passing
+- [ ] Integration tests passing with fake servers (deferred to Phase 7 hardening)
 
 ## Phase 5 -- Modes + CLI
-- [ ] TaskerMode dataclass + ModeConfigurator
-- [ ] CHAT mode
-- [ ] CODE mode
-- [ ] COWORK mode
-- [ ] RESEARCH mode
-- [ ] SECURE mode (hard block verified)
-- [ ] CLI shell + slash commands
-- [ ] E2E tests passing for all 5 modes
+- [x] ToolID, InteractionPattern, MemoryScope enums (tasker/workers/base.py)
+- [x] tasker/tools/bundles.py (CHAT/CODE/COWORK/RESEARCH/SECURE bundles, secure_bundle(), get_definitions())
+- [x] config/modes/*.yaml populated (all 5 modes)
+- [x] TaskerMode dataclass + HardwareProfile + ExecutionConfig + ModeConfigurator
+- [x] CHAT mode (tasker/modes/chat.py)
+- [x] CODE mode (tasker/modes/code.py)
+- [x] COWORK mode (tasker/modes/cowork.py) + CoworkRunner with tick/pause/checkpoint loop
+- [x] RESEARCH mode (tasker/modes/research.py)
+- [x] SECURE mode (tasker/modes/secure.py) -- hard block verified via WorkerSelector
+- [x] CLI shell + slash commands (cli/shell.py)
+- [x] tests/unit/test_harness_modes.py passing (214 total, incl. COWORK pause integration test)
+- [ ] E2E tests (deferred -- requires Phase 6 higher tiers for real task execution)
 
 ## Phase 6 -- Higher Orchestrator Tiers
-- [ ] DualLLMOrchestrator (Tier 2)
-- [ ] ReasoningOrchestrator (Tier 3)
-- [ ] CloudOrchestrator (Tier 4)
+- [x] tasker/orchestrator/_parse.py (shared system prompts, parse_plan, parse_retry, prompt builders)
+- [x] tier1_single.py refactored to import from _parse.py (no logic change)
+- [x] DualLLMOrchestrator (Tier 2) — separate call_planner + call_synthesizer callables
+- [x] ReasoningOrchestrator (Tier 3) — single call_model, GPU-resident, distinct from Tier 1
+- [x] CloudOrchestrator (Tier 4) — routes through WorkerProviderBase.execute(), LOCAL_ONLY guard
+- [x] tests/unit/test_orchestrator_tier2.py passing (10 tests)
+- [x] tests/unit/test_orchestrator_tier3.py passing (10 tests)
+- [x] tests/unit/test_orchestrator_tier4.py passing (13 tests)
+- [x] CheckpointStore: _save_ns + _save_seq tiebreaker (fixes Windows clock resolution flake)
 
 ## Phase 7 -- Hardening
-- [ ] DesktopNotifier + WebhookNotifier
+- [ ] DesktopNotifier + WebhookNotifier verified
 - [ ] OpenAI-compat API server
 - [ ] Hardware profile auto-detection
 - [ ] MindSeed episodic memory bridge (COWORK mode)
