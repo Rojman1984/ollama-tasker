@@ -12,6 +12,7 @@ from tasker.workers.base import (
     TaskerPolicyError,
     ToolProtocol,
     WorkerManifest,
+    WorkerRole,
 )
 
 
@@ -98,6 +99,16 @@ class TestWorkerManifest(unittest.TestCase):
         m2 = WorkerManifest.from_dict(m.to_dict())
         self.assertEqual(m2.tool_result_role, "tool")
         self.assertEqual(m2.tool_protocol, ToolProtocol.LFM25)
+
+    def test_worker_role_defaults_to_empty_list(self):
+        m = _manifest()
+        self.assertEqual(m.worker_role, [])
+
+    def test_worker_role_round_trip(self):
+        m = _manifest()
+        m.worker_role = [WorkerRole.BACKGROUND_AGENT, WorkerRole.EXECUTION_WORKER]
+        m2 = WorkerManifest.from_dict(m.to_dict())
+        self.assertEqual(m2.worker_role, [WorkerRole.BACKGROUND_AGENT, WorkerRole.EXECUTION_WORKER])
 
 
 if __name__ == "__main__":

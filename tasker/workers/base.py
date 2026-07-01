@@ -84,6 +84,18 @@ class AgentRole(Enum):
     VERIFIER = "verifier"
 
 
+class WorkerRole(Enum):
+    """
+    Cross-session "what this model is suited for" — distinct from AgentRole,
+    which is an orchestration-internal per-plan-step role. A worker can hold
+    multiple WorkerRoles. See SDD_ADDENDUM_PHASE8.md B.4.6/B.6.
+    """
+    BACKGROUND_AGENT  = "background_agent"
+    EXECUTION_WORKER  = "execution_worker"
+    REASONING_WORKER  = "reasoning_worker"
+    ORCHESTRATOR      = "orchestrator"
+
+
 class SessionState(Enum):
     RUNNING       = "running"
     THROTTLING    = "throttling"
@@ -267,6 +279,14 @@ class WorkerManifest:
     "user" as a workaround — see SDD_ADDENDUM_7.5.md A.2b. Ignored entirely
     for NATIVE workers, where Ollama owns tool-result formatting.
     """
+    worker_role: list[WorkerRole] = field(default_factory=list)
+    """
+    Cross-session roles this worker is suited for (BACKGROUND_AGENT,
+    EXECUTION_WORKER, REASONING_WORKER, ORCHESTRATOR) — distinct from
+    AgentRole, which is the per-plan-step orchestration role. Empty by
+    default; populated by the Phase 8.2 readiness checker's role-assignment
+    rules. See SDD_ADDENDUM_PHASE8.md B.4.6/B.6.
+    """
 
     def __post_init__(self) -> None:
         if Capability.TOOL_USE not in self.capabilities:
@@ -296,6 +316,7 @@ class WorkerManifest:
             "vram_mb": self.vram_mb,
             "capability_scores": dict(self.capability_scores),
             "tool_result_role": self.tool_result_role,
+            "worker_role": [r.value for r in self.worker_role],
         }
 
     @classmethod
@@ -320,6 +341,7 @@ class WorkerManifest:
             vram_mb=data.get("vram_mb"),
             capability_scores=data.get("capability_scores", {}),
             tool_result_role=data.get("tool_result_role"),
+            worker_role=[WorkerRole(r) for r in data.get("worker_role", [])],
         )
 
 

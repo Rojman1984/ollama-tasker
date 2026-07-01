@@ -1,6 +1,8 @@
 # Ollama Tasker — Project Context
 
 > **Authoritative design reference:** `docs/SDD.md`
+> **Cross-platform migration + hardware detection addendum:** `docs/SDD_ADDENDUM_7.5.md`
+> **Setup wizard / readiness checker / TUI addendum:** `docs/SDD_ADDENDUM_PHASE8.md`
 > **Feature checklist:** `docs/TASKER_CHECKLIST.md`
 > **Testing guide:** `docs/TESTING_GUIDE.md`
 > **Parity reference:** `docs/PARITY_CHECKLIST.md`
@@ -226,6 +228,8 @@ Update this section as phases complete.
 | 7.5.2 | `GPUBackend` ABC + `NoGpuBackend` + `tasker-hardware` applet + cache + 3-source resolution | ✅ COMPLETE |
 | 7.5.3 | `NvidiaBackend` — detect + verify (Designlab1) | ✅ COMPLETE |
 | 7.5.4–7.5.6 | `AmdApuBackend`, VRAM cross-check, final paired verification | ⬜ NOT STARTED |
+| 8.1 | Setup wizard headless logic + `tasker-setup` CLI (see `docs/SDD_ADDENDUM_PHASE8.md`) — **note:** the row above labeled plain "8" is an unrelated, earlier "Orchestrator Factory" milestone from before `SDD_ADDENDUM_PHASE8.md` existed; this is a real naming collision in the project's own history, not a typo — the two are unrelated | ✅ COMPLETE |
+| 8.2–8.5 | Readiness checker, TUI foundation, model selector, harness panel | ⬜ NOT STARTED |
 
 ---
 
@@ -343,77 +347,105 @@ python -m unittest tests.unit.test_orchestrator_nano -v
 
 *(Update this section at the end of every Cowork or Code session)*
 
-**Last worked on:** Phase 7.5.3 — `NvidiaBackend` (`detect()` +
-`verify_live()`) in `tasker/config/gpu_backends.py`, alongside the new
-`VerifyResult` dataclass (detection-subsystem-specific, not added to
-`workers/base.py`). `detect_gpu()`'s NVIDIA stub (commented out since
-7.5.2) is now live; `AmdApuBackend`'s stub remains commented for 7.5.4.
+**Last worked on:** Phase 8.1 — headless setup wizard (`tasker/setup/`)
+and the `tasker-setup` CLI entry point, per `docs/SDD_ADDENDUM_PHASE8.md`.
+Explicitly did **not** start Phase 8.2 (readiness checker) or any TUI code
+this session — `tasker/tui/app.py` is a one-line stub only.
 
-`detect()`: `shutil.which("nvidia-smi")` precondition check before any
-subprocess call, then `nvidia-smi --query-gpu=name,memory.total
---format=csv,noheader,nounits`, parses the first line, returns `None` on
-any failure (missing tool, non-zero exit, malformed output, exception) —
-never raises. `verify_live(ollama_base_url)`: primary check is `GET
-/api/ps`'s `size_vram` field (>0 → verified); a supplementary best-effort
-`nvidia-smi --query-gpu=utilization.gpu ... -l 1` sample can only confirm,
-never deny, a positive result. "No model loaded" is reported with a
-specific, distinct message rather than treated as a generic failure.
+**Mid-session detour, done first per an explicit interrupt:** appended two
+new sections to `docs/SDD_ADDENDUM_PHASE8.md` — B.4.6 (Role Assignment in
+Readiness Report: a new `WorkerRole` enum distinct from `AgentRole`) and a
+new B.6 (Model-Agnostic Design Principle, including a preview of a future
+DAEMON mode). Existing B.6–B.10 renumbered to B.7–B.11 (headings only, no
+other content touched). Added `WorkerRole` enum
+(`BACKGROUND_AGENT`/`EXECUTION_WORKER`/`REASONING_WORKER`/`ORCHESTRATOR`)
+and `WorkerManifest.worker_role: list[WorkerRole]` (defaults to `[]`) to
+`tasker/workers/base.py`, serialized in `to_dict()`/`from_dict()`, with new
+round-trip tests. This field is unused by anything yet — the Phase 8.2
+readiness checker is what will populate it.
 
-**Real bug found and fixed during live testing:** `-l 1` never exits on its
-own, so the utilization sample *always* hits `subprocess.TimeoutExpired` in
-production — and `TimeoutExpired.stdout` came back as raw `bytes` despite
-`text=True` on the original call, leaking a `"b'0 %'"` repr into the
-user-facing verify message. This was invisible to the mocked unit tests
-(which mocked normal completion, not the timeout path) until live-testing
-against the real GPU surfaced it. Fixed with defensive bytes decoding;
-added a regression test
-(`test_utilization_sample_via_timeout_path_decodes_bytes`) that reproduces
-the exact bytes-stdout shape so it can't silently regress.
+**Provenance note on `docs/SDD_ADDENDUM_PHASE8.md` itself:** the file
+arrived owned by `root` with a Windows `Zone.Identifier` (`ZoneId=3`,
+i.e. downloaded from the internet) — unusual provenance for a repo file.
+Content was verified content-coherent with the actual current codebase
+(correct field names, correct existing function references matching real
+code) before treating it as legitimate reference material; most likely the
+user drafted/generated it in a browser session elsewhere and copied it in.
+Flagged to the user at the time; no injection-style content found.
 
-`detect_hardware_profile()`'s tier computation: NVIDIA ≥4096MB → tier_max=2,
-resident (`tier2_designlab.yaml`); NVIDIA <4096MB or no GPU → tier_max=1,
-sequential (`tier1_tasker.yaml`) — via a new, dedicated
-`_NVIDIA_RESIDENT_VRAM_THRESHOLD_MB = 4096` constant, kept separate from the
-legacy Phase-7 `_GPU_VRAM_THRESHOLD_MB = 4000` so `suggest_profile()`'s/
-`auto_detect_profile()`'s existing tests keep passing unchanged. The
-existing `_suggest_profile_name()`/static-YAML-selection mechanism from
-7.5.2 already produced exactly the right `computed_profile` shape once
-`detect_gpu()` returned real NVIDIA data — no separate direct-computation
-path was needed.
+**New: `tasker/setup/environment.py`** — `is_wsl2()` (`/proc/version`
+contains "microsoft"/"wsl"), `check_python()`, `check_venv()` (warns, never
+blocks), `check_ollama_binary()`, `check_ollama_version()`,
+`check_ollama_service()` (WSL2 vs systemd vs no-systemd remediation
+messages, never auto-starts Ollama).
 
-400/400 unit tests passing (18 new this session: 15 added to
-`test_gpu_backends.py` (now 22 total), 3 tier-computation tests added to
-`test_hardware_detect.py` (now 32 total)).
+**New: `tasker/setup/wizard.py`** — `StepStatus`/`WizardStepResult` (per
+B.3.3), `run_wizard()` (7 steps), `cli_main()`. Steps never abort early —
+even an ERROR/`can_continue=False` step (e.g. Ollama unreachable) still
+lets every later step run and report, so the user sees the full picture in
+one pass. Step 4 (GPU verification) is `SKIPPED`, not `ERROR`, for both
+"no GPU" and "no model loaded" — reuses `NvidiaBackend.verify_live()`
+directly rather than re-implementing `/api/ps` parsing. Step 5 deliberately
+reaches into `tasker.config.detect`'s private cache-writing helpers
+(`_CACHE_PATH`, `_build_cache_dict`, `_run_live_detection`) rather than
+duplicating the A.3.3 schema a second time. Step 6 flags
+`tool_protocol: native` workers whose `model_id` contains "lfm2.5" as
+needing `lfm25` instead (A.2b) — the *current* real registry already has
+none (already fixed in the LFM25 session), so this only fires on
+hypothetically-misconfigured entries; a lightweight VRAM-cross-check note
+also fires for `requires_gpu=true` workers, explicitly deferring the full
+A.3.4 margin-subtraction algorithm to Phase 7.5.6 rather than
+reimplementing it here.
 
-**Live verification on Designlab1 (GTX 1050 Ti), exactly as requested:**
-`nvidia-smi` reports `"NVIDIA GeForce GTX 1050 Ti, 4096"`. `tasker-hardware
-detect` correctly resolved: `gpu_vendor="nvidia"`, `gpu_name="NVIDIA GeForce
-GTX 1050 Ti"`, `gpu_memory_mb=4096`, `gpu_is_unified_memory=false`,
-`orchestrator_tier_max=2`, `load_strategy="resident"`. `tasker-hardware
-verify` run twice: once with no model loaded (correctly reported "No model
-currently loaded in Ollama..."), once with `lfm2.5-thinking:latest` loaded
-(`/api/ps` reported `size_vram=1074716998` bytes, equal to `size` → full
-offload) — cache populated `gpu_verified_during_inference=true,
-gpu_verified_size_vram_mb=1024, gpu_verified_offload_status="full"`. Full
-cache file contents recorded in `docs/TASKER_CHECKLIST.md`.
+**Step 7 deliberately diverges from the addendum's own B.3.2 text:** B.3.2
+defines wizard Step 7 as "Model selector + agentic readiness" (→ B.4), but
+that's Phase 8.2 scope, explicitly excluded this session. This session's
+task instructions directly redefined Step 7 as a Summary step instead — implemented that way, documented as an intentional deviation (not a
+transcription error) in `wizard.py`'s module docstring.
 
-**Last file modified:** `tasker/config/gpu_backends.py`,
-`tasker/config/detect.py`, `docs/TASKER_CHECKLIST.md`, `CLAUDE.md`,
-`tests/unit/test_gpu_backends.py`, `tests/unit/test_hardware_detect.py`.  
-**Next task:** Phase 7.5.4 — `AmdApuBackend` v1 (general guide), on
-TASKER-P1, not this machine. Separately, still open from prior sessions:
-wire `ModeConfigurator.resolve_hardware_profile()` into `cli/shell.py`
-(still calls `load_profile()` directly); harden
-`tasker/orchestrator/_parse.py`'s `parse_plan()` so an invalid capability
-string doesn't silently discard the whole plan; build the multi-turn
+`pyproject.toml`: added `textual>=0.70.0`; `tasker` entry point now points
+to `tasker.tui.app:main` (stub) instead of `cli.shell:main`; added
+`tasker-cli` (→ `cli.shell:main`, preserves the old default entry point
+under a new name — nothing about `cli/shell.py` itself changed);
+`tasker-setup` added.
+
+400/428 → 428/428: 28 new unit tests this session (13 in
+`test_environment.py`, 13 in `test_setup_wizard.py`, 2 new
+`WorkerManifest.worker_role` round-trip tests). All mocked — no live
+Ollama/subprocess/network calls, no writes to the real `.tasker/` cache
+during tests (confirmed via a temp-path-swap test and by checking the real
+cache file's mtime was untouched after the run).
+
+**Live headless run on Designlab1 (this machine), exactly as requested:**
+all 7 steps ran and printed cleanly, no unhandled exceptions. GPU step
+correctly showed `nvidia (NVIDIA GeForce GTX 1050 Ti, 4096MB)`. Worker
+registry step listed all 9 registered workers with protocol/availability.
+Step 4 correctly `SKIPPED` (no model loaded at run time). Full output
+recorded in `docs/TASKER_CHECKLIST.md`. **Did not** run on TASKER-P1 — no
+access to that machine from this session; left unchecked in the checklist
+rather than fabricated.
+
+**Last file modified:** `docs/SDD_ADDENDUM_PHASE8.md`,
+`tasker/workers/base.py`, `tasker/setup/__init__.py` (new),
+`tasker/setup/environment.py` (new), `tasker/setup/wizard.py` (new),
+`tasker/tui/__init__.py` (new), `tasker/tui/app.py` (new),
+`pyproject.toml`, `docs/TASKER_CHECKLIST.md`, `CLAUDE.md`,
+`tests/unit/test_environment.py` (new), `tests/unit/test_setup_wizard.py`
+(new), `tests/unit/test_worker_manifest.py`.  
+**Next task:** Phase 8.2 — Agentic Readiness Checker
+(`tasker/setup/readiness.py`, 3 probe rounds NATIVE→LFM25→JSON_EXTRACT,
+`tasker-setup --check-model <name>`, worker registry write on
+confirmation, `WorkerRole` assignment per B.4.6). Separately, still open
+from prior sessions: Phase 7.5.4 (`AmdApuBackend`, needs TASKER-P1); wire
+`ModeConfigurator.resolve_hardware_profile()` into `cli/shell.py`; harden
+`parse_plan()`'s capability-string handling; build the multi-turn
 tool-result loop to unblock `tool_result_role` testing.  
-**Blockers:** None — GitHub push credentials were resolved last session
-(`gh` installed to `~/.local/bin`, authenticated as `Rojman1984` via device
-flow); no longer an open blocker.  
+**Blockers:** None.  
 **Open decisions:** `tool_result_role` default (`"tool"`) still unvalidated
-— needs the multi-turn loop. `_suggest_profile_name()`'s AMD-APU fallthrough
-behavior (ignore `memory_mb` entirely, use only CPU/RAM) is still untested
-against real APU hardware — revisit once 7.5.4 lands on TASKER-P1.  
+— needs the multi-turn loop. AMD-APU tier-computation fallthrough still
+untested against real hardware — revisit once 7.5.4 lands on TASKER-P1.
+`worker_role` is a schema addition only this session — no code assigns it
+yet; that's Phase 8.2's job per B.4.6's rules.  
 
 **Live model config (tier1_tasker):**  
 - Orchestrator: `lfm2.5-thinking:latest` (local, 1.2B — was `qwen3:1.7b`, not installed)  

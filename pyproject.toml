@@ -12,6 +12,7 @@ dependencies = [
     "aiohttp>=3.9",
     "python-dotenv>=1.0",
     "psutil>=5.9",
+    "textual>=0.70.0",
 ]
 
 [project.optional-dependencies]
@@ -21,8 +22,10 @@ dev = [
 ]
 
 [project.scripts]
-tasker = "cli.shell:main"
+tasker = "tasker.tui.app:main"
+tasker-cli = "cli.shell:main"
 tasker-hardware = "tasker.config.detect:cli_main"
+tasker-setup = "tasker.setup.wizard:cli_main"
 
 [tool.ruff]
 line-length = 100

@@ -233,3 +233,51 @@ command in TESTING_GUIDE.md.
       milestone is blocked on hardening parse_plan()/the planning prompt to
       stop silently discarding the user's task on a capability-string
       mismatch, not on anything in this session's changes.
+
+## Phase 8 -- Setup Wizard, Readiness Checker, TUI
+
+### Phase 8.1 -- Setup Wizard (headless)
+- [x] tasker/setup/environment.py (is_wsl2, check_python, check_venv,
+      check_ollama_binary, check_ollama_version, check_ollama_service)
+- [x] tasker/setup/wizard.py (WizardStepResult, StepStatus, all 7 steps,
+      run_wizard()) -- Step 7 redefined as Summary per this session's task
+      (SDD_ADDENDUM_PHASE8.md B.3.2's own Step 7 is model
+      selector/readiness, deferred to Phase 8.2 -- documented as a
+      deliberate deviation in wizard.py's module docstring)
+- [x] tasker-setup CLI entry point (headless, prints step results with
+      ANSI color; --check-model stubbed for Phase 8.2; --ollama-url;
+      --verbose)
+- [x] pyproject.toml: textual>=0.70.0 added; tasker entry point now
+      tasker.tui.app:main (stub, prints "coming in Phase 8.3"); tasker-cli
+      added for the existing CLI (cli.shell:main, unchanged behavior);
+      tasker-setup added
+- [x] tasker/tui/__init__.py + app.py stub created (Phase 8.3 does the
+      real TUI)
+- [x] tests/unit/test_environment.py passing (13 tests, all mocked --
+      no real filesystem/subprocess/network calls)
+- [x] tests/unit/test_setup_wizard.py passing (13 tests, all mocked --
+      no live Ollama calls per B.10)
+- [x] Live headless run on Designlab1 (this machine) -- see CLAUDE.md for
+      full output. All steps ran, GPU vendor correctly shown as nvidia,
+      worker registry showed all 9 workers, no unhandled exceptions.
+- [ ] Live headless run on TASKER-P1 -- not run this session (no access to
+      that machine from here); flagged as a follow-up, not fabricated.
+
+### Out of scope this session (unchanged from SDD_ADDENDUM_PHASE8.md)
+- [ ] Phase 8.2 -- Agentic Readiness Checker (readiness.py, 3 probe rounds,
+      --check-model)
+- [ ] Phase 8.3 -- TUI Foundation (real TuiApp, WelcomeScreen, status bar)
+- [ ] Phase 8.4 -- SetupWizardScreen + ModelSelectorScreen
+- [ ] Phase 8.5 -- HarnessPanel
+
+### Mid-session addition (before Phase 8.1 code, per explicit interrupt)
+- [x] SDD_ADDENDUM_PHASE8.md B.4.6 (Role Assignment in Readiness Report)
+      and B.6 (Model-Agnostic Design Principle) appended; existing B.6-B.10
+      renumbered to B.7-B.11, no other content changed
+- [x] WorkerRole enum added to tasker/workers/base.py (BACKGROUND_AGENT,
+      EXECUTION_WORKER, REASONING_WORKER, ORCHESTRATOR) -- distinct from
+      AgentRole (orchestration-internal per-step role)
+- [x] WorkerManifest.worker_role: list[WorkerRole] field added (defaults
+      to empty list), serialized in to_dict()/from_dict()
+- [x] Round-trip tests added to test_worker_manifest.py (defaults-empty +
+      round-trip); full suite confirmed passing after the addition

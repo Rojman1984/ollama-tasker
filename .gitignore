@@ -28,3 +28,7 @@ sessions/
 .idea/
 *.swp
 .DS_Store
+
+# Windows "downloaded from the internet" metadata (NTFS alternate data
+# stream, materializes as a real file when copied off Windows/WSL2 mounts)
+*:Zone.Identifier
