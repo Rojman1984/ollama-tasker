@@ -71,6 +71,7 @@ async def _run_task(
         WorkerStatus,
         WorkerTask,
     )
+    from tasker.session.concurrency import OllamaCloudConcurrencyManager
     from tasker.tools.loop import run_tool_loop
     from tasker.workers.providers.ollama import OllamaProvider
     from tasker.workers.registry import WorkerSelector
@@ -91,7 +92,16 @@ async def _run_task(
     # extra stripping is needed here. Per-step narrowing (see
     # narrow_bundle_to_step()) happens inside the step loop below, once
     # each step's description is known.
-    ollama_provider = OllamaProvider(profile.ollama_base_url)
+    #
+    # One shared concurrency manager for the whole run -- covers both
+    # regular worker dispatch (via WorkerSelector/run_tool_loop) and
+    # orchestrator-level plan/synthesize/retry calls (via
+    # build_orchestrator()'s call_model closures), since both paths route
+    # through this same OllamaProvider instance. Previously never
+    # constructed anywhere in production code, so OLLAMA_CLOUD calls on
+    # either path proceeded without any concurrency slot-limiting.
+    concurrency_mgr = OllamaCloudConcurrencyManager(profile.ollama_plan)
+    ollama_provider = OllamaProvider(profile.ollama_base_url, concurrency_mgr)
     provider_map = {ProviderType.OLLAMA: ollama_provider}
     orchestrator = build_orchestrator(config, provider_map)
 

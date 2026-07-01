@@ -27,6 +27,13 @@ class TaskerConfigError(Exception):
 class OllamaQueueFullError(Exception):
     """Raised by OllamaProvider on HTTP 429 (queue full); triggers fallback in harness."""
 
+class OllamaCloudConcurrencyExhaustedError(Exception):
+    """Raised when an orchestrator-level Ollama Cloud call exhausts its
+    bounded DEFERRED retry without acquiring a concurrency slot (distinct
+    from OllamaQueueFullError, which is the server itself signaling
+    overload via HTTP 429 -- this is our own client-side concurrency
+    manager saying no slot was available)."""
+
 
 # --------------------------------------------------------------------------- #
 # Enumerations  (SDD 6.8)

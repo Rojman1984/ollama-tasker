@@ -21,6 +21,8 @@ cloud worker selection.
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 import uuid
 from collections.abc import Awaitable, Callable
 
@@ -35,16 +37,28 @@ from tasker.workers.base import (
     Capability,
     ComputeLocation,
     LatencyClass,
+    OllamaCloudConcurrencyExhaustedError,
     PrivacyTier,
     ProviderType,
     RoutingPolicy,
     ToolProtocol,
     WorkerManifest,
+    WorkerResult,
+    WorkerStatus,
     WorkerTask,
 )
 from tasker.workers.providers.base import WorkerProviderBase
 
+logger = logging.getLogger(__name__)
+
 _ModelCall = Callable[[str, str], Awaitable[str]]
+
+# DEFERRED (no Ollama Cloud concurrency slot) is transient -- worth a
+# short bounded wait before failing the orchestrator step outright,
+# mirroring the same pattern already used for worker-level tool calls in
+# tasker/tools/loop.py's _execute_with_deferred_retry().
+_DEFERRED_MAX_RETRIES = 3
+_DEFERRED_BACKOFF_S = 0.5
 
 
 def _build_orchestrator_manifest(
@@ -73,6 +87,26 @@ def _build_orchestrator_manifest(
     )
 
 
+async def _execute_with_deferred_retry(
+    provider: WorkerProviderBase, task: WorkerTask, manifest: WorkerManifest,
+) -> WorkerResult:
+    """Bounded retry on DEFERRED (no concurrency slot) before giving up --
+    same semantics as tasker/tools/loop.py's worker-side equivalent."""
+    result: WorkerResult | None = None
+    for attempt in range(_DEFERRED_MAX_RETRIES):
+        result = await provider.execute(task, manifest)
+        if result.status != WorkerStatus.DEFERRED:
+            return result
+        if attempt < _DEFERRED_MAX_RETRIES - 1:
+            logger.warning(
+                "build_orchestrator: %s deferred (no Ollama Cloud concurrency "
+                "slot), retrying (%d/%d)",
+                manifest.model_id, attempt + 1, _DEFERRED_MAX_RETRIES,
+            )
+            await asyncio.sleep(_DEFERRED_BACKOFF_S)
+    return result
+
+
 def _make_call_model(
     provider: WorkerProviderBase,
     manifest: WorkerManifest,
@@ -82,7 +116,16 @@ def _make_call_model(
     privacy_tier must be OLLAMA_CLOUD_OK (not the narrower default
     LOCAL_ONLY) for an OLLAMA_CLOUD-routed manifest, or the call would be
     hard-blocked by the project's own privacy-tier enforcement (SDD 11.1)
-    despite the provider itself supporting the cloud call."""
+    despite the provider itself supporting the cloud call.
+
+    A DEFERRED result (no Ollama Cloud concurrency slot) is retried a
+    bounded number of times, then raises OllamaCloudConcurrencyExhaustedError
+    rather than silently collapsing into an empty string indistinguishable
+    from a genuinely empty model response -- the exception propagates
+    uncaught through plan()/synthesize()/should_retry() (tiers 1-3 do not
+    catch exceptions from call_model), reaching callers' existing
+    try/except around orchestrator calls (e.g. cli/shell.py's
+    "Planning failed: ..." handler)."""
     async def call_model(system_prompt: str, user_prompt: str) -> str:
         task = WorkerTask(
             task_id=str(uuid.uuid4()),
@@ -95,7 +138,12 @@ def _make_call_model(
             privacy_tier=privacy_tier,
             timeout_s=120.0,
         )
-        result = await provider.execute(task, manifest)
+        result = await _execute_with_deferred_retry(provider, task, manifest)
+        if result.status == WorkerStatus.DEFERRED:
+            raise OllamaCloudConcurrencyExhaustedError(
+                f"orchestrator call to {manifest.model_id!r} could not acquire "
+                f"an Ollama Cloud concurrency slot after {_DEFERRED_MAX_RETRIES} attempts"
+            )
         return result.output or ""
     return call_model
 

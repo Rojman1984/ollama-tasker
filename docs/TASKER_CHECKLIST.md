@@ -487,6 +487,10 @@ model without touching the local worker.
       other cloud-routed worker registry entries too (glm-5.2, glm-5.1,
       minimax-m3, kimi-k2.7-code) -- not verified individually, out of
       scope for this session's plan.
+      **FIXED in a later session -- see "Cloud Model ID Suffix +
+      Orchestrator Concurrency Slot-Limiting" below: all 5
+      `compute_location: ollama_cloud` entries were missing the suffix,
+      not just this one; all 5 corrected and live-reconfirmed.**
 - [ ] Tier 2 (`DualLLMOrchestrator`) still gets the *same* `model_id` for
       both its planner and synthesizer roles (`factory.py`'s
       `build_orchestrator()`, tier==2 branch) despite the constructor
@@ -502,6 +506,97 @@ model without touching the local worker.
       calls proceed without slot-limiting (no `DEFERRED` possible). Known
       gap, not fixed this session (out of scope: this work was about
       model *choice*, not concurrency).
+      **FIXED in a later session -- see "Cloud Model ID Suffix +
+      Orchestrator Concurrency Slot-Limiting" below. Turned out to be
+      broader than just orchestrator calls: `OllamaCloudConcurrencyManager`
+      was never constructed anywhere in production code at all, so
+      regular WORKER dispatch was unslotted too, not just orchestrator
+      calls -- both share the same `OllamaProvider` instance in
+      `cli/shell.py`, so one wiring fix covers both.**
+
+## Cloud Model ID Suffix + Orchestrator Concurrency Slot-Limiting
+
+Two independent, small fixes, unrelated to each other.
+
+### Fix 1 -- missing `:cloud` suffix
+
+- [x] All 5 `compute_location: ollama_cloud` entries in
+      `config/workers/worker_registry.yaml` (`nemotron-3-ultra-cloud`,
+      `glm-5.2-cloud`, `glm-5.1-cloud`, `minimax-m3-cloud`,
+      `kimi-k2.7-code-cloud`) were missing the `:cloud` suffix Ollama
+      Cloud requires to route to cloud infrastructure -- a systemic
+      omission across every cloud entry, not a single typo.
+      `local_hardware`/`direct_cloud` (Anthropic/OpenAI/Fugu) entries are
+      untouched -- the suffix is Ollama-Cloud-specific.
+- [x] Live-reconfirmed against the real Ollama API for all 5 (not just
+      documentation/prior knowledge): every bare model_id returns
+      `{"error": "model '...' not found"}`; every `:cloud`-suffixed form
+      returns a real response.
+- [x] Regression test against the REAL `config/workers/worker_registry.yaml`
+      file (not a synthetic fixture) added to
+      `tests/unit/test_worker_registry.py`
+      (`TestRealWorkerRegistryYaml`): every `ollama_cloud` worker's
+      `model_id` must end with `:cloud`; non-`ollama_cloud` workers must
+      not. Confirmed the test fails against the pre-fix file and passes
+      against the fix (verified via `git stash`).
+
+### Fix 2 -- concurrency slot-limiting not applied to cloud orchestrator calls
+
+- [x] **Root cause, confirmed by reading before changing anything:** this
+      was a wiring gap, not a missing feature -- `OllamaProvider.execute()`
+      already had correct gating logic
+      (`if is_cloud and self._concurrency: ...`), but
+      `OllamaCloudConcurrencyManager` was never instantiated anywhere in
+      production code (only in its own docstring example and in tests).
+      `cli/shell.py` constructed `OllamaProvider(profile.ollama_base_url)`
+      with no `concurrency_mgr` at all. Since that single `OllamaProvider`
+      instance serves BOTH regular worker dispatch (via
+      `WorkerSelector`/`run_tool_loop`) and orchestrator plan/synthesize/
+      retry calls (via `factory.py`'s `_make_call_model`), this was a
+      single missing wire with broader blast radius than "orchestrator
+      calls only" -- worker dispatch was unslotted too.
+      `tier4_cloud.py`'s `CloudOrchestrator` (Tier 4) needed no code
+      changes: it's never instantiated in production, and calls
+      `self._provider.execute()` directly, so it transitively inherits
+      correct gating from whatever provider it's given, with zero
+      Tier-4-specific logic needed.
+- [x] **The fix:** `cli/shell.py` now constructs one
+      `OllamaCloudConcurrencyManager(profile.ollama_plan)` and passes it
+      into the single `OllamaProvider` instance shared by both call paths
+      -- exactly one manager per run, not one per code path, per the
+      explicit requirement.
+- [x] **Exhausted-slot behavior, decided and documented:** bounded retry
+      (3 attempts, 0.5s backoff) then fail -- matching the existing
+      precedent in `tasker/tools/loop.py`'s worker-side
+      `_execute_with_deferred_retry()` from a previous session, now
+      mirrored for orchestrator-level calls in
+      `tasker/orchestrator/factory.py::_execute_with_deferred_retry()`.
+      On exhaustion, `_make_call_model()`'s `call_model()` raises a new
+      `OllamaCloudConcurrencyExhaustedError` (`tasker/workers/base.py` --
+      distinct from `OllamaQueueFullError`, which is the server itself
+      signaling overload via HTTP 429, not our own client-side
+      concurrency manager) rather than silently collapsing a deferred
+      call into an empty string indistinguishable from a genuinely empty
+      model response. The exception propagates uncaught through
+      `plan()`/`synthesize()`/`should_retry()` (tiers 1-3 don't catch
+      exceptions from `call_model`), reaching `cli/shell.py`'s existing
+      `try/except` around `orchestrator.plan()` ("Planning failed: ...")
+      with no new exception-handling code needed there.
+- [x] 4 new tests in `tests/unit/test_orchestrator_factory.py`
+      (`TestOrchestratorCloudConcurrency`), using the real `OllamaProvider`
+      (HTTP mocked) with a scripted fake concurrency manager for
+      deterministic timing: retry-then-succeed, retry-then-raise
+      (`OllamaCloudConcurrencyExhaustedError`), no-retry-when-immediately-
+      available, and a regression guard confirming `LOCAL_HARDWARE`-routed
+      calls never even touch the concurrency manager.
+- [x] Live-verified on Designlab1: a `tier1_cloud_planner` run exercised
+      BOTH fixes together in one call -- `WorkerSelector` resolved to
+      `nemotron-3-ultra:cloud` (Fix 1) for a step, executed successfully
+      through the now-concurrency-gated `OllamaProvider` (Fix 2), no
+      errors, single slot correctly acquired/released.
+
+523/523 tests passing (7 new: 3 in `test_worker_registry.py`, 4 in
+`test_orchestrator_factory.py`).
 
 ## Phase 8 -- Setup Wizard, Readiness Checker, TUI
 

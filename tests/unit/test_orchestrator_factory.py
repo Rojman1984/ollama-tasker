@@ -3,6 +3,7 @@ Unit tests -- orchestrator factory (tasker/orchestrator/factory.py)
 """
 import unittest
 from datetime import datetime, timezone
+from unittest import mock
 from unittest.mock import AsyncMock
 
 from tasker.modes.base import ExecutionConfig, HardwareProfile, ModeConfigurator, TaskerMode
@@ -16,6 +17,7 @@ from tasker.workers.base import (
     InteractionPattern,
     LatencyClass,
     MemoryScope,
+    OllamaCloudConcurrencyExhaustedError,
     OllamaPlan,
     OllamaUsageLevel,
     PrivacyTier,
@@ -29,6 +31,7 @@ from tasker.workers.base import (
     WorkerStatus,
 )
 from tasker.workers.providers.base import WorkerProviderBase
+from tasker.workers.providers.ollama import OllamaProvider
 
 
 # --------------------------------------------------------------------------- #
@@ -256,6 +259,114 @@ class TestBuildOrchestratorCloudRouting(unittest.IsolatedAsyncioTestCase):
         config = _config(profile_tier=1, mode_tier=1, compute_location="ollama_cloud")
         result = build_orchestrator(config, {})
         self.assertIsInstance(result, NanoOrchestrator)
+
+
+# --------------------------------------------------------------------------- #
+# Concurrency slot-limiting for cloud orchestrator calls
+# --------------------------------------------------------------------------- #
+
+class _ScriptedConcurrencyManager:
+    """
+    Returns a scripted sequence of try_acquire() results -- lets tests drive
+    OllamaProvider's DEFERRED retry path deterministically, without
+    depending on a real OllamaCloudConcurrencyManager's timing/slot count.
+    Mirrors the real manager's interface (see tests/unit/test_concurrency_
+    manager.py for the real thing's behavior in isolation).
+    """
+    def __init__(self, acquire_results: list[bool]):
+        self._results = list(acquire_results)
+        self.acquire_calls = 0
+        self.release_calls = 0
+
+    async def try_acquire(self) -> bool:
+        result = self._results[min(self.acquire_calls, len(self._results) - 1)]
+        self.acquire_calls += 1
+        return result
+
+    async def release(self) -> None:
+        self.release_calls += 1
+
+
+def _ollama_post_ok(content: str = "response text"):
+    async def _post(url: str, payload: dict) -> tuple[int, dict]:
+        payload.pop("_timeout", None)
+        return 200, {
+            "message": {"role": "assistant", "content": content},
+            "prompt_eval_count": 10,
+            "eval_count": 5,
+            "done": True,
+        }
+    return _post
+
+
+class TestOrchestratorCloudConcurrency(unittest.IsolatedAsyncioTestCase):
+    """
+    Regression coverage: previously, no code path in this project ever
+    constructed an OllamaCloudConcurrencyManager, so OLLAMA_CLOUD-routed
+    orchestrator calls proceeded without any slot-limiting even though
+    OllamaProvider.execute() already had the gating logic built in --
+    the gate just never got wired to anything. Uses the real
+    OllamaProvider (HTTP mocked) so the actual gating code path is
+    exercised, not a re-implementation of it.
+    """
+
+    async def test_call_model_retries_on_deferred_then_succeeds(self):
+        mgr = _ScriptedConcurrencyManager([False, False, True])
+        provider = OllamaProvider(
+            base_url="http://localhost:11434",
+            concurrency_mgr=mgr,
+            _post_fn=_ollama_post_ok("recovered plan"),
+        )
+        config = _config(profile_tier=1, mode_tier=1, compute_location="ollama_cloud")
+        orchestrator = build_orchestrator(config, {ProviderType.OLLAMA: provider})
+        with mock.patch("tasker.orchestrator.factory._DEFERRED_BACKOFF_S", 0.001):
+            output = await orchestrator._call_model("sys", "usr")
+        self.assertEqual(output, "recovered plan")
+        self.assertEqual(mgr.acquire_calls, 3)
+
+    async def test_call_model_raises_after_exhausting_deferred_retries(self):
+        """Must NOT silently proceed without a slot -- this is the actual bug."""
+        mgr = _ScriptedConcurrencyManager([False, False, False])
+        provider = OllamaProvider(
+            base_url="http://localhost:11434",
+            concurrency_mgr=mgr,
+            _post_fn=_ollama_post_ok("should never be reached"),
+        )
+        config = _config(profile_tier=1, mode_tier=1, compute_location="ollama_cloud")
+        orchestrator = build_orchestrator(config, {ProviderType.OLLAMA: provider})
+        with mock.patch("tasker.orchestrator.factory._DEFERRED_BACKOFF_S", 0.001):
+            with self.assertRaises(OllamaCloudConcurrencyExhaustedError):
+                await orchestrator._call_model("sys", "usr")
+        self.assertEqual(mgr.acquire_calls, 3)  # _DEFERRED_MAX_RETRIES, no more
+
+    async def test_call_model_does_not_retry_when_slot_immediately_available(self):
+        mgr = _ScriptedConcurrencyManager([True])
+        provider = OllamaProvider(
+            base_url="http://localhost:11434",
+            concurrency_mgr=mgr,
+            _post_fn=_ollama_post_ok("first try"),
+        )
+        config = _config(profile_tier=1, mode_tier=1, compute_location="ollama_cloud")
+        orchestrator = build_orchestrator(config, {ProviderType.OLLAMA: provider})
+        output = await orchestrator._call_model("sys", "usr")
+        self.assertEqual(output, "first try")
+        self.assertEqual(mgr.acquire_calls, 1)
+
+    async def test_local_compute_location_never_gated_by_concurrency(self):
+        """LOCAL_HARDWARE-routed orchestrator calls must never even check
+        the concurrency manager -- OllamaProvider's is_cloud gate already
+        handles this; guards against that regressing."""
+        mgr = _ScriptedConcurrencyManager([False])  # would always defer if ever checked
+        provider = OllamaProvider(
+            base_url="http://localhost:11434",
+            concurrency_mgr=mgr,
+            _post_fn=_ollama_post_ok("local response"),
+        )
+        config = _config(profile_tier=1, mode_tier=1, compute_location="local")
+        orchestrator = build_orchestrator(config, {ProviderType.OLLAMA: provider})
+        output = await orchestrator._call_model("sys", "usr")
+        self.assertEqual(output, "local response")
+        self.assertEqual(mgr.acquire_calls, 0)
 
 
 if __name__ == "__main__":

@@ -347,134 +347,93 @@ python -m unittest tests.unit.test_orchestrator_nano -v
 
 *(Update this section at the end of every Cowork or Code session)*
 
-**Last worked on:** Investigating why the multi-turn tool loop (previous
-session) still couldn't demonstrate real end-to-end CLI execution led to
-a live quantization/prompt-complexity investigation, which then became
-two concrete fixes: **step-aware tool subsetting** and an **Ollama-Cloud-
-routed orchestrator (planner) model**. Both implemented, tested, and
-live-verified this session.
+**Last worked on:** Two independent, small fixes carried over from last
+session's findings — unrelated to each other, done in order.
 
-**Quantization investigation (diagnostic, no code changes from this
-part):** pulled and live-tested `lfm2.5-thinking` at Q8_0 and full bf16
-against the exact prompt that reliably failed at Q4. Finding: **quantization
-was never the bottleneck.** All three precisions failed identically once
-offered the full 7-tool `CODE_BUNDLE` — even bf16 (the best this model can
-do) hit the same empty-content signature. `"think": false` was also tried
-live and made things *worse* (11/12 attempts across both models had the
-model's entire response budget consumed by reasoning with nothing after
-`</think>`, vs. 1/12 with default think behavior). The one thing that was
-100% reliable in every test, across every precision, was offering just the
-1 tool a step actually needed — that became this session's real fix.
+**Fix 1 — missing `:cloud` suffix in `worker_registry.yaml`:** all 5
+`compute_location: ollama_cloud` entries (`nemotron-3-ultra-cloud`,
+`glm-5.2-cloud`, `glm-5.1-cloud`, `minimax-m3-cloud`, `kimi-k2.7-code-cloud`)
+had bare model IDs instead of the `:cloud`-suffixed form Ollama Cloud
+requires — a systemic omission across every cloud entry (last session only
+caught `nemotron-3-ultra` as an example). Live-reconfirmed against the
+real Ollama API for all 5 (not just documentation): bare model_id →
+`"model '...' not found"`; `:cloud`-suffixed → real response.
+`local_hardware`/`direct_cloud` entries untouched. Regression test added
+against the REAL `worker_registry.yaml` file (not a synthetic fixture),
+confirmed to fail pre-fix and pass post-fix via `git stash`.
 
-**Fix 1 — step-aware tool subsetting
-(`tasker/tools/bundles.py::narrow_bundle_to_step()`):** deterministic,
-keyword-group-based narrowing of the tools offered per step, following
-the existing `secure_bundle()` pattern. Explicitly NOT LLM-classified —
-proven unreliable for this same small model (see `_infer_tool_from_flat_object`
-from last session). `PlanStep` only carries `description` (free text) and
-`required_capabilities` (too coarse — `Capability.CODE` doesn't distinguish
-"run tests" from "read a file"), so matching is keyword-group-based on
-`description`: a match requires ALL of a group's substrings present (any
-order), not a fixed phrase — needed after live testing showed the planner
-paraphrases the same real intent multiple ways per run ("List files in
-current directory" / "Listing files" / "List current directory files").
-No match → falls back to the full bundle (today's behavior) + logs a
-WARNING, so unmatched phrasing stays visible/improvable rather than
-silently guessing wrong. Wired into `cli/shell.py::_run_task()`'s step
-loop (was: tools computed once, constant, before the loop).
+**Fix 2 — concurrency slot-limiting not applied to cloud orchestrator
+calls:** turned out broader than the name suggests. Root cause: not "the
+gate exists but orchestrator calls skip it" — `OllamaCloudConcurrencyManager`
+was never instantiated anywhere in production code at all (only in its
+own docstring and in tests), so `cli/shell.py`'s single shared
+`OllamaProvider` instance (used for BOTH regular worker dispatch and
+orchestrator plan/synthesize/retry calls) had no concurrency manager to
+gate anything with — worker dispatch was unslotted too, not just
+orchestrator calls. `OllamaProvider.execute()`'s gating logic itself was
+already correct; it just had nothing wired to it. Fixed with one change:
+`cli/shell.py` now constructs one `OllamaCloudConcurrencyManager(profile.
+ollama_plan)` and passes it into that single shared `OllamaProvider` —
+exactly one manager per run, covering both call paths transitively.
+`tier4_cloud.py`'s `CloudOrchestrator` needed no changes (never
+instantiated in production; inherits gating transitively from whatever
+provider it's given). Added bounded-retry-then-fail semantics to
+`factory.py::_make_call_model()` (3 attempts, 0.5s backoff, mirroring
+`tasker/tools/loop.py`'s existing worker-side pattern) — on exhaustion,
+raises a new `OllamaCloudConcurrencyExhaustedError`
+(`tasker/workers/base.py`) rather than silently collapsing a deferred
+call into an empty string. Propagates uncaught through tiers 1-3's
+`plan()`/`synthesize()`/`should_retry()`, caught cleanly by `cli/shell.py`'s
+existing `try/except` around `orchestrator.plan()` — no new
+exception-handling code needed there.
 
-**Fix 2 — Ollama-Cloud-routed orchestrator model:** lets the *planning*
-role use a stronger model via Ollama's own cloud
-(`ComputeLocation.OLLAMA_CLOUD`, same `OllamaProvider`/endpoint as local
-calls) while the *worker* role stays on the local Q4 model, per explicit
-user preference. **Explicitly rejected a third-party OpenAI-compatible
-router (OpenRouter) after the user corrected that direction** — see
-memory `feedback_cloud_models_via_ollama`. Real gaps found and fixed in
-`tasker/orchestrator/factory.py`: `_build_orchestrator_manifest()` and
-`_make_call_model()` were hardcoded to `ComputeLocation.LOCAL_HARDWARE`/
-`PrivacyTier.LOCAL_ONLY` — both would have hard-blocked a cloud call via
-the project's own privacy-tier enforcement even though `OllamaProvider`
-itself already supports `OLLAMA_CLOUD`. Now both accept params, and
-`build_orchestrator()` branches on a new `HardwareProfile.
-orchestrator_compute_location` field (`"local"` default, `"ollama_cloud"`
-opt-in). No new provider class needed — still only ever resolves
-`provider_registry[ProviderType.OLLAMA]`. New additive profile
-`config/profiles/tier1_cloud_planner.yaml`: local Q4 worker unchanged,
-orchestrator routed to `gpt-oss:120b-cloud` (OpenAI's actual open-weight
-120B release, hosted on Ollama Cloud — confirmed live via `ollama show`
-to have a real 131072-token context window; `context_limit` set to match
-rather than copying the local profile's 4096 CPU-RAM-driven value, per
-explicit user request to "open up the context frame for cloud models").
+**Live verification, Designlab1:** a `tier1_cloud_planner` CLI run
+exercised both fixes together — `WorkerSelector` resolved a step to
+`nemotron-3-ultra:cloud` (Fix 1, previously would have failed with "model
+not found"), executed successfully through the now-concurrency-gated
+`OllamaProvider` (Fix 2), single slot correctly acquired and released, no
+errors. Also confirmed `tier1_tasker` (local-only, no cloud calls
+involved) still runs end-to-end unaffected.
 
-**Live verification, Designlab1:**
-- **Tool subsetting:** the exact prompt that reliably failed last session
-  (`"Use the bash tool to list the files in the current directory"`), on
-  Q4, through the full CLI pipeline: 0 of 3 completed runs hit the
-  no-keyword-match fallback across 3 different planner paraphrases; one
-  run completed with the exact real directory listing as the final
-  answer. The other two hit `max_turns` (the already-documented "model
-  doesn't conclude after a real tool result" quirk from last session, not
-  a narrowing failure — both still executed real tools throughout).
-- **Cloud planner:** this machine had no active Ollama Cloud session at
-  session start (confirmed via a direct `:cloud` API call returning
-  `"Unauthorized"`) — user completed `ollama signin`'s browser flow mid-
-  session (same pattern as the earlier `gh auth login` step). Confirmed
-  `gpt-oss:20b-cloud` and `gpt-oss:120b-cloud` both reachable with real
-  responses. A real planning call through `SingleLLMOrchestrator` wired
-  to `tier1_cloud_planner` produced a clean, valid 3-step plan
-  (`used_fallback=False`, no unrecognized capability strings) — visibly
-  better structured than typical local Q4 planning output. A full
-  `python -m cli.shell --mode code` run using this profile (cloud
-  planner + local Q4 worker) completed with the correct, real directory
-  listing as its final answer.
-- **New, real, pre-existing bug found (not introduced or fixed this
-  session):** the cloud planner's richer plans assign `REASONING`/
-  `THINKING` capabilities the local worker doesn't declare, so
-  `WorkerSelector` falls through to `nemotron-3-ultra-cloud` for those
-  steps — which fails instantly, because `worker_registry.yaml`'s
-  `model_id: "nemotron-3-ultra"` is missing the `:cloud` suffix Ollama
-  Cloud's actual tags require (confirmed: bare `nemotron-3-ultra` returns
-  `"model 'nemotron-3-ultra' not found"`). Likely affects other
-  cloud-routed registry entries too (glm-5.2, glm-5.1, minimax-m3,
-  kimi-k2.7-code) — not individually verified, out of scope this session.
+**Tests:** 7 new (3 `TestRealWorkerRegistryYaml` in
+`test_worker_registry.py`, 4 `TestOrchestratorCloudConcurrency` in
+`test_orchestrator_factory.py`, using a scripted fake concurrency manager
+for deterministic timing rather than real backoff delays). Full suite:
+516/516 → 523/523.
 
-**Tests:** 26 new (18 `test_tool_bundles.py`, 4 `TestBuildOrchestratorCloudRouting`
-in `test_orchestrator_factory.py`, plus 2 existing `HardwareProfile` test
-fixtures updated for the new required field). Full suite: 494/494 → 516/516.
-
-**Last file modified:** `tasker/tools/bundles.py`, `cli/shell.py`,
-`tasker/modes/base.py`, `tasker/orchestrator/factory.py`,
-`config/profiles/tier1_cloud_planner.yaml` (new),
-`tests/unit/test_tool_bundles.py` (new),
-`tests/unit/test_orchestrator_factory.py`, `tests/unit/test_setup_wizard.py`,
-`docs/TASKER_CHECKLIST.md`, `CLAUDE.md`.
+**Last file modified:** `config/workers/worker_registry.yaml`,
+`tests/unit/test_worker_registry.py`, `tasker/workers/base.py`,
+`tasker/orchestrator/factory.py`, `cli/shell.py`,
+`tests/unit/test_orchestrator_factory.py`, `docs/TASKER_CHECKLIST.md`,
+`CLAUDE.md`.
 
 **Next task:** Phase 8.2 — Agentic Readiness Checker
 (`tasker/setup/readiness.py`, 3 probe rounds NATIVE→LFM25→JSON_EXTRACT,
 `tasker-setup --check-model <name>`, worker registry write on
-confirmation, `WorkerRole` assignment per B.4.6). Separately, still open:
-fix `worker_registry.yaml`'s missing `:cloud` suffixes (nemotron-3-ultra
-confirmed broken, others unverified); the empty-content bug itself remains
-unfixed (quantization and `think:false` both ruled out this session —
-still no confirmed lever); the model-doesn't-conclude-after-tool-result
-behavior; Tier 2's same-model-for-both-roles bug (`factory.py`, tier==2
-branch) plus `tier2_designlab.yaml`'s unread `planner_model`/
-`synthesizer_model` keys — the `orchestrator_compute_location` plumbing
-added this session would make this easier to fix now; wiring
-`OllamaCloudConcurrencyManager` to the orchestrator's `OllamaProvider`
-(cloud orchestrator calls currently proceed without slot-limiting); Phase
-7.5.4 (`AmdApuBackend`, needs TASKER-P1); wire
+confirmation, `WorkerRole` assignment per B.4.6). Separately, still open,
+**unchanged from last session** (neither of today's fixes touched these):
+the empty-content bug itself remains unfixed (quantization and
+`think:false` both ruled out — still no confirmed lever); the
+model-doesn't-conclude-after-tool-result behavior; Tier 2's
+same-model-for-both-roles bug (`factory.py`, tier==2 branch) plus
+`tier2_designlab.yaml`'s unread `planner_model`/`synthesizer_model` keys;
+Phase 7.5.4 (`AmdApuBackend`, needs TASKER-P1); wire
 `ModeConfigurator.resolve_hardware_profile()` into `cli/shell.py`.
 **Blockers:** None.
 **Open decisions:** Whether to make `tier1_cloud_planner` the default
-profile going forward, or keep it opt-in alongside `tier1_tasker` — not
-decided this session, both configs exist and work. `tool_result_role="user"`
-still not separately live-tested. AMD-APU tier-computation fallthrough
-still untested against real hardware.
+profile going forward, or keep it opt-in alongside `tier1_tasker` — still
+not decided. `tool_result_role="user"` still not separately live-tested.
+AMD-APU tier-computation fallthrough still untested against real
+hardware. Whether `glm-5.2`/`glm-5.1`/`minimax-m3`/`kimi-k2.7-code`'s
+`:cloud` tags are correct beyond the live-reconfirmation done today (all
+4 returned real responses, so reasonably confident, but not stress-tested
+under load).
 
 **Live model config:**
 - `tier1_tasker` (default): orchestrator + worker both
   `lfm2.5-thinking:latest` (local Q4, 1.2B).
-- `tier1_cloud_planner` (new, opt-in): orchestrator `gpt-oss:120b-cloud`
+- `tier1_cloud_planner` (opt-in): orchestrator `gpt-oss:120b-cloud`
   (Ollama Cloud), worker `lfm2.5-thinking:latest` (local Q4, unchanged).
+  Both worker-dispatch and orchestrator Ollama Cloud calls now correctly
+  slot-limited via one shared `OllamaCloudConcurrencyManager`.
   Requires `ollama signin`.
