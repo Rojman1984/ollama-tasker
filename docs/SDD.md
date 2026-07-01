@@ -458,6 +458,87 @@ class WorkerToolResult:
 
 ---
 
+### 5.7a Multi-turn Tool Loop and Tool Executor
+
+**Status:** Added mid-project, after ToolCallNormalizer (5.7) existed for
+several sessions without anything that actually ran a requested tool call.
+Numbered `5.7a` rather than renumbering 5.8–5.12 onward, since those are
+cross-referenced by exact section number from several modules
+(`tasker/session/concurrency.py`, `episodic.py`, `notifier.py`).
+
+**Problem this closes:** `ToolCallNormalizer.extract()` parses a model's
+requested tool call into a `WorkerToolResult` with `tool_output=None`, but
+nothing downstream ever executed it, and `build_synthesize_prompt()`
+(5.3) only read `WorkerResult.output` — never `tool_results`. A worker
+could request `bash("ls")` and the system would report success while
+`ls` never ran; the synthesizer would then produce plausible-sounding
+prose about what the command "would" show. Confirmed live against
+`lfm2.5-thinking:latest`. See `CLAUDE.md`'s Current Session Notes for the
+investigation.
+
+**Responsibility split (two modules, both under `tasker/tools/`, not
+`tasker/orchestrator/` — the orchestrator ABC's hard rule, "never calls
+tools directly," rules that out; see 7.1):**
+
+- **`tasker/tools/executor.py`** — `execute_tool(tool_result, *, worker,
+  cwd, timeout_s=30.0) -> WorkerToolResult`. Runs one tool call for real
+  and returns a *new* `WorkerToolResult` with `tool_output`/`error`/
+  `duration_ms` populated. Never raises. Dispatches `BASH`, `GIT`,
+  `FILE_READ`, `FILE_WRITE`, `CODE_SEARCH` (all via `asyncio.create_
+  subprocess_exec`, argv-based, never `shell=True`). `LINTER`/
+  `TEST_RUNNER` are deliberately unimplemented — no linter or test
+  framework is configured anywhere in this project, so guessing which
+  one to invoke would be worse than a clear `.error`.
+
+- **`tasker/tools/loop.py`** — `run_tool_loop(task, worker, provider, *,
+  max_turns=5, cwd=None) -> WorkerResult`. Drives `provider.execute()`
+  through as many turns as needed: execute → if the result requests
+  tool calls, run them for real via `execute_tool()`, thread the
+  assistant's own turn (`WorkerResult.raw_assistant_message`, new field
+  on the 5.6 contract) and the tool result
+  (`format_tool_result_message()`, `tasker/workers/providers/ollama.py`)
+  into a running message history, re-invoke. Terminates when a turn
+  requests no more tools, or `max_turns` is hit (returns the last result
+  and logs a WARNING rather than raising). Usage/cost/duration accumulate
+  across all turns; every turn's *executed* `WorkerToolResult`s survive
+  into the final `WorkerResult.tool_results` (not just the last turn's,
+  which typically has none since it's the final answer).
+  `cli/shell.py`'s `_run_task()` calls this in place of a single
+  `provider.execute()` per step.
+
+**Security posture** (this is a local dev CLI, but `COWORK_BUNDLE`
+pairs `bash` with network tools under `privacy_tier: any_cloud` — a
+cloud-routed worker with web-fetched content in context could otherwise
+be tricked into driving local execution):
+
+1. `BASH`, `FILE_WRITE`, `GIT` are hard-gated in `execute_tool()` to
+   `worker.compute_location == ComputeLocation.LOCAL_HARDWARE`,
+   regardless of what a mode's `privacy_tier` allowed at planning time.
+   `FILE_READ`/`CODE_SEARCH` (read-only) are ungated — governed by the
+   existing `PrivacyTier`/`RoutingPolicy` system (11.1).
+2. A small BASH denylist (substring/regex on the command before
+   execution — `rm -rf`, `sudo`, `mkfs`, `dd if=`, fork-bomb pattern,
+   `curl|sh`-style pipes, writes to `/dev/`, `chmod -R 777 /`) is a
+   speed bump against obviously catastrophic commands, **not** a
+   security boundary. Real safety rests on the `LOCAL_HARDWARE` gate and
+   the user's own trust in their local model/machine.
+3. Every tool call has a 30s timeout and an 8000-char output cap
+   (truncated with a marker), to bound cost and avoid flooding the
+   model's context.
+4. `FILE_READ`/`FILE_WRITE` resolve their `path` under `cwd` and reject
+   any resolved path that escapes it. `BASH`/`GIT` cannot be
+   path-contained this way (shell commands can `cd`/use absolute paths
+   freely) — an accepted, documented limitation.
+
+**Known limitation, not closed by this section:** the loop only helps
+tool calls that are *successfully parsed*. If a model's response is
+fully empty (nothing parses into any tool call — confirmed live for
+`lfm2.5-thinking:latest` under `ToolProtocol.LFM25` on some prompts, even
+after `OllamaProvider`'s bounded empty-content retry, 5.6.1), there is
+nothing for this loop to execute. That remains open; see `CLAUDE.md`.
+
+---
+
 ### 5.8 Session Manager
 
 **Responsibility:** Owns the full session lifecycle state machine. Arbitrates between RUNNING, THROTTLING, PAUSING, CHECKPOINTING, PAUSED, RESUMING states. Called before every worker dispatch.

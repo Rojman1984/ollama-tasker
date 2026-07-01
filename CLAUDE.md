@@ -347,109 +347,153 @@ python -m unittest tests.unit.test_orchestrator_nano -v
 
 *(Update this section at the end of every Cowork or Code session)*
 
-**Last worked on:** Hardening `tasker/orchestrator/_parse.py`'s
-`parse_plan()` — this closes out the "known open issue, out of scope"
-note that had been carried across the LFM25, tool-bundle-wiring, and
-Phase 8.1 sessions (previously tracked in `docs/TASKER_CHECKLIST.md`'s
-Phase 7.5 section and in this file's own "Next task"/"still open"
-notes). **RESOLVED, not just documented.**
+**Last worked on:** Building the multi-turn tool-execution loop —
+closes out the "known open issue, out of scope" note carried since the
+LFM25 session (`tool_result_role` unvalidated because nothing ever
+re-invoked a worker with a tool result appended). Started as an
+investigation into the empty-content flakiness noted last session; that
+investigation surfaced a much bigger, pre-existing gap (see below), which
+became this session's real focus per explicit user direction.
 
-**The bug:** `parse_plan()` built each step's capability set with a bare
-set comprehension (`{Capability(c) for c in item.get("capabilities", ...)}`)
-inside the function's single outer `try` block. Any one invalid capability
-string anywhere in the model's plan raised `ValueError`, which propagated
-out of the whole parsing loop and was caught by the blanket
-`except (..., ValueError)`, discarding the ENTIRE plan — including every
-correctly-parsed step — in favor of `NanoOrchestrator`'s generic
-single/double-step template, silently and with no logging.
+**What was actually broken (discovered, not assumed):** no tool call
+requested by a worker LLM was ever executed anywhere in the codebase.
+`ToolCallNormalizer.extract()` parsed a request into a `WorkerToolResult`
+with `tool_output=None`, but nothing downstream ran it — `cli/shell.py`
+marked a step `[ok]` purely on HTTP status, and `build_synthesize_prompt()`
+only read `WorkerResult.output`, never `tool_results`. A worker could
+request `bash("ls")` and the system would report success while `ls`
+never ran; the synthesizer then produced plausible-sounding prose about
+what the command "would" show. Confirmed live before any fix: asking the
+CLI to list files via bash never ran `ls` — it just guessed. Also
+confirmed: despite `CLAUDE.md` describing `core/` as "adopted from Parity
+Project, do not rewrite," every file in `core/` is a literal 6-line stub
+with zero implementation — there was no existing execution primitive to
+build on; everything below is written fresh.
 
-**The fix (`tasker/orchestrator/_parse.py`):** added
-`_resolve_step_capabilities()`, which resolves each step's raw capability
-strings independently: known near-misses (`CAPABILITY_ALIASES` — evidence-
-based, small: `"tool_execution"→TOOL_USE`, `"code_execution"→CODE`,
-`"search_web"→SEARCH`) are silently corrected with no warning; anything
-still unmatched is dropped from *that step only* and logged as a WARNING
-(bad string, step index, full raw response) — the rest of the plan
-(other steps, other capabilities) is untouched. A step left with zero
-valid capabilities still gets `{TOOL_USE}` via the pre-existing
-unconditional default. `parse_plan()` now only returns `None` — triggering
-a caller's fallback — when the response fails to parse as a valid plan
-structure at all (bad JSON, not a list, empty, missing keys); that path
-now also logs a WARNING with the raw response (previously silent).
-`ExecutionPlan` gained `used_fallback: bool = False` (serialized in
-`to_dict`/`from_dict`) so callers/tests can assert directly whether a plan
-is the model's real plan or Nano's template. `tier1_single.py`'s
-`SingleLLMOrchestrator.plan()` now sets `used_fallback = True` on the
-`ExecutionPlan` it gets back from `NanoOrchestrator` only when it actually
-falls back. `tier0_rules.py`/`tier2_dual.py`/`tier3_reasoning.py`/
-`tier4_cloud.py` were deliberately left untouched (not in scope; they call
-the same shared `parse_plan()` and already benefit from the per-step
-recovery, but only `tier1_single.py` — "the primary caller" — was asked
-to surface `used_fallback`).
+**The fix — two new modules, both under `tasker/tools/` (not
+`tasker/orchestrator/`, since "the orchestrator never calls tools
+directly" is a hard rule, constraint #5 above):**
 
-**Tests:** new `tests/unit/test_orchestrator_parse.py` (9 tests): valid
-plan (no warnings, `used_fallback=False`); one bad capability among valid
-ones (plan preserved, WARNING with bad string + step index, still
-`used_fallback=False` — the core regression test); alias match (silent,
-no warning); all-steps-zero-valid-capabilities (each defaults to
-`TOOL_USE`, one warning per step); malformed/empty response (`None`,
-WARNING with raw response); and, via `SingleLLMOrchestrator`, the same
-malformed case showing `used_fallback=True`. Existing
-`test_orchestrator_single.py` tests unchanged and still pass. Full suite:
-428/428 → 437/437.
+- **`tasker/tools/executor.py`** — `execute_tool()` runs one tool call
+  for real (argv-based `asyncio.create_subprocess_exec`, never
+  `shell=True`) for `BASH`, `GIT`, `FILE_READ`, `FILE_WRITE`,
+  `CODE_SEARCH`. `LINTER`/`TEST_RUNNER` deliberately left unimplemented —
+  no linter or test framework is configured anywhere in this project.
+  Security posture (this is a local dev CLI, but `COWORK_BUNDLE` pairs
+  `bash` with network tools under `privacy_tier: any_cloud`, so a
+  cloud-routed worker could otherwise be tricked into driving local
+  execution): `BASH`/`FILE_WRITE`/`GIT` are hard-gated to
+  `ComputeLocation.LOCAL_HARDWARE`; a small BASH denylist is a documented
+  speed bump, not a security boundary; 30s timeout + 8000-char output cap
+  on every call; `FILE_READ`/`FILE_WRITE` path-contained under `cwd`.
+  Full rationale in `docs/SDD.md` §5.7a.
+- **`tasker/tools/loop.py`** — `run_tool_loop()` drives
+  `provider.execute()` through turns: execute → run any requested tools
+  for real → thread the assistant's own turn (`WorkerResult.
+  raw_assistant_message`, new field) and the tool result
+  (`format_tool_result_message()`) into history → re-invoke. Terminates
+  at `max_turns=5` with a WARNING, never raises. Every turn's *executed*
+  tool results survive into the final result (not just the last turn's —
+  a design-review-caught bug: the last turn typically requests none,
+  since it's the final answer, so returning only it would silently
+  discard everything that actually ran). DEFERRED gets bounded retry with
+  backoff before giving up. `cli/shell.py` now calls this instead of a
+  single `provider.execute()` per step.
 
-**Live verification against `lfm2.5-thinking:latest` on Designlab1:**
-reproduced the exact real-world bug repeatedly — the model returned
-invalid capability strings `"bash"`, `"ls"`, `"list_files"`, `"file_list"`,
-`"code review"`, `"bug detection"`, `"bug_fix"` across separate live
-calls for the prompt `"Use the bash tool to list the files in the current
-directory"` and a longer multi-step coding prompt. **Before this fix**,
-any one of these would have collapsed the plan to Nano's generic template
-(e.g. `"Answer the task"` or the CODING template's `"Analyze the coding
-task and plan the implementation"` / `"Implement the solution"`), losing
-the model's real step description entirely and with no log trace. **After
-the fix**, every one of these runs preserved the model's own real step
-description (e.g. `"Analyzing code for bugs"`, `"List files in current
-directory"`) with `used_fallback=False`, and each bad capability string
-was logged as a WARNING with its step index and the raw response. Ran the
-same `python -m cli.shell --mode code "Use the bash tool to list the
-files in the current directory"` command originally used to surface this
-bug: the WARNING now appears in the CLI's output where before there was
-only silent generic fallback.
+**Design review caught three real bugs in the original design before any
+code was written** (see the plan file / this conversation's design-review
+pass): (1) the loop as first sketched wouldn't have fixed the reported
+empty-content case at all, since an empty response parses to zero tool
+calls — nothing for the loop to execute; (2) returning only the last
+turn's `tool_results` would have silently discarded every tool that
+actually ran; (3) naively persisting a `role:"system"` entry into the
+running message history would make `ToolCallNormalizer.inject_tools()`
+re-append the "List of tools..." suffix onto an already-suffixed system
+message every turn, growing unboundedly. All three are fixed and covered
+by regression tests — (3) specifically by an integration test using the
+real `OllamaProvider` (HTTP mocked only), since a fully-isolated loop or
+provider test would each miss the interaction.
 
-**Separate, still-open issue found (not fixed, out of scope for this
-session):** the full `cli.shell` invocation sometimes gets an *empty*
-`content` string back from `lfm2.5-thinking:latest` (not an invalid
-capability string — a totally empty response), which correctly triggers
-the genuinely-malformed-response path (`used_fallback=True`, WARNING
-logged — working as designed). A direct orchestrator→provider script
-(identical pipeline, bypassing only `cli/shell.py`'s print wrapper)
-reliably got non-empty content for the same prompt. Suspected cause: this
-"thinking" model sometimes exhausts its output budget inside the
-`<think>` reasoning block before emitting the final JSON `content` —
-unrelated to capability parsing. Logged in `docs/TASKER_CHECKLIST.md`
-under "Orchestrator Correctness" / the Phase 7.5 CLI-wiring note; not
-investigated further.
+**The actual reason live end-to-end proof initially failed (found via
+live testing, then fixed):** `ToolCallNormalizer._extract_lfm25()` set
+`tool_name=""` whenever the model's JSON call omitted the
+`{"name","arguments"}` envelope. Live testing found `lfm2.5-thinking:latest`
+does this *consistently* for single-tool tasks — e.g. emitting bare
+`{"command": "hostname"}` instead of the spec's wrapped form — reproduced
+identically across 3+ separate prompts, not flakiness. Fixed:
+`ToolCallNormalizer.extract()`/`extract_tool_calls()` gained an optional
+`tools` param (threaded from `task.tools`); `_infer_tool_from_flat_object()`
+matches the flat dict's keys against each offered tool's JSON Schema and
+infers the name only on a unique match, leaving ambiguous/unmatched cases
+as `tool_name=""` (unchanged from before) rather than guessing.
 
-**Last file modified:** `tasker/orchestrator/_parse.py`,
-`tasker/orchestrator/tier1_single.py`, `tasker/workers/base.py`,
-`tests/unit/test_orchestrator_parse.py` (new), `docs/TASKER_CHECKLIST.md`,
-`CLAUDE.md`.
+**Live verification, Designlab1:**
+- **Real tool execution proven end-to-end:** a direct provider+loop
+  script (bypassing the orchestrator's planner) instructed to run
+  `hostname` via the `bash` tool got the model's flat-object response
+  correctly inferred as `bash`, executed for real, and returned
+  `tool_output='Designlab1\n'` — the machine's actual hostname, confirmed
+  against a direct `hostname` shell invocation. First confirmed
+  non-fabricated tool execution in this project's history.
+- **Security gate confirmed live:** an `OLLAMA_CLOUD` worker requesting
+  `bash` gets a clear `.error`, never executes.
+- **Full `python -m cli.shell` pipeline still not observed completing a
+  real tool call in one run** (4/4 attempts this session): the
+  orchestrator's own planning step rephrases the task before the worker
+  ever sees it, and several of those rephrasings reliably trigger the
+  *separate*, pre-existing empty-content bug (unchanged from last
+  session) before the loop's (proven-working) code path is reached. Not
+  a regression — the loop and inference fix are proven correct in
+  isolation; the full pipeline just has one more opportunity to hit the
+  other bug first.
+- **New minor finding, not investigated further:** after a real tool
+  result was fed back, the model sometimes re-issued the identical tool
+  call again instead of answering, repeating until `max_turns` cut it
+  off gracefully. Likely a small-model multi-turn limitation, not a loop
+  bug — the loop's own job (execute + feed back correctly) is separately
+  confirmed via mocked unit tests.
+- **Empty-content bounded retry (`OllamaProvider._EMPTY_CONTENT_MAX_
+  RETRIES=2`, added this session) does not recover the empty-content
+  case** — confirmed live, 3/3 identical retries still empty for the same
+  prompt. Kept as a safe, tested, no-harm mitigation; not a fix for the
+  phrasing-dependent failure. Untried next lever: Ollama's per-request
+  `"think": false` control — `done_reason=stop` + non-empty `thinking` +
+  empty `content` is exactly the signature that control targets.
+
+**Tests:** 46 new (25 `test_tool_executor.py`, 11 `test_tool_loop.py`
+including the system-message-duplication integration test, 7 across
+`test_provider_ollama.py`'s new `TestOllamaProviderMultiTurn`/
+`TestFormatToolResultMessage`, 3 `TestBuildSynthesizePrompt`, 7
+`TestLfm25FlatObjectInference`). Full suite: 437/437 → 494/494.
+
+**Last file modified:** `tasker/tools/executor.py` (new),
+`tasker/tools/loop.py` (new), `tasker/tools/normalizer.py`,
+`tasker/workers/base.py`, `tasker/workers/providers/ollama.py`,
+`cli/shell.py`, `tasker/orchestrator/_parse.py`, `docs/SDD.md`,
+`tests/unit/test_tool_executor.py` (new), `tests/unit/test_tool_loop.py`
+(new), `tests/unit/test_provider_ollama.py`,
+`tests/unit/test_orchestrator_parse.py`, `tests/unit/test_tool_normalizer.py`,
+`docs/TASKER_CHECKLIST.md`, `CLAUDE.md`.
+
 **Next task:** Phase 8.2 — Agentic Readiness Checker
 (`tasker/setup/readiness.py`, 3 probe rounds NATIVE→LFM25→JSON_EXTRACT,
 `tasker-setup --check-model <name>`, worker registry write on
 confirmation, `WorkerRole` assignment per B.4.6). Separately, still open:
-Phase 7.5.4 (`AmdApuBackend`, needs TASKER-P1); wire
-`ModeConfigurator.resolve_hardware_profile()` into `cli/shell.py`; build
-the multi-turn tool-result loop to unblock `tool_result_role` testing; the
-newly-found empty-`content` flakiness in `cli.shell`'s live model calls
-(see above).
+the empty-content bug itself (try `"think": false`); getting the full
+`cli.shell` pipeline to complete one real tool execution end-to-end (not
+just the direct provider+loop script); the model-doesn't-conclude-after-
+tool-result behavior; Phase 7.5.4 (`AmdApuBackend`, needs TASKER-P1); wire
+`ModeConfigurator.resolve_hardware_profile()` into `cli/shell.py`;
+generalize `run_tool_loop()` beyond `OllamaProvider` if/when
+Anthropic/OpenAI/Fugu need a multi-turn loop of their own.
 **Blockers:** None.
-**Open decisions:** `tool_result_role` default (`"tool"`) still
-unvalidated — needs the multi-turn loop. AMD-APU tier-computation
-fallthrough still untested against real hardware — revisit once 7.5.4
-lands on TASKER-P1. `worker_role` is still a schema addition only — no
-code assigns it yet; that's Phase 8.2's job per B.4.6's rules.
+**Open decisions:** `tool_result_role="user"` (the documented Ollama
+workaround) not separately live-tested — `"tool"` (the default) worked,
+so there was no failure forcing the workaround path; revisit if `"tool"`
+ever fails against a different model. AMD-APU tier-computation fallthrough
+still untested against real hardware — revisit once 7.5.4 lands on
+TASKER-P1. `worker_role` is still a schema addition only — no code
+assigns it yet; that's Phase 8.2's job per B.4.6's rules.
 
 **Live model config (tier1_tasker):**
 - Orchestrator: `lfm2.5-thinking:latest` (local, 1.2B — was `qwen3:1.7b`, not installed)

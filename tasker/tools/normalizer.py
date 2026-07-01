@@ -29,6 +29,27 @@ _LFM25_PYTHONIC_RE = re.compile(r"^(\w+)\((.*)\)$", re.DOTALL)
 _LFM25_KWARG_RE = re.compile(r'(\w+)\s*=\s*"((?:[^"\\]|\\.)*)"')
 
 
+def _infer_tool_from_flat_object(item: dict, tools: list[ToolDefinition]) -> str | None:
+    """
+    Given a dict with no {"name", "arguments"} envelope, guess which
+    offered tool it was meant to call by matching its keys against each
+    tool's JSON Schema parameters (all its keys must be required or
+    known-optional properties, and every required key must be present).
+    Returns the tool name only if exactly one tool matches uniquely --
+    ambiguous matches are left unresolved rather than guessed.
+    """
+    item_keys = set(item.keys())
+    matches = []
+    for t in tools:
+        required = set(t.parameters.get("required", []))
+        properties = set(t.parameters.get("properties", {}).keys())
+        if not required:
+            continue  # nothing to anchor the match on -- too ambiguous
+        if required.issubset(item_keys) and item_keys.issubset(properties | required):
+            matches.append(t.name)
+    return matches[0] if len(matches) == 1 else None
+
+
 class ToolCallNormalizer:
     """
     Stateless helper. All methods are static.
@@ -48,6 +69,7 @@ class ToolCallNormalizer:
         response_text: str | None,
         native_calls: list[dict] | None,
         protocol: ToolProtocol,
+        tools: list[ToolDefinition] | None = None,
     ) -> list[WorkerToolResult]:
         """
         Extract tool call requests from a model response.
@@ -56,6 +78,9 @@ class ToolCallNormalizer:
         native_calls:  provider-normalized tool_calls array (OpenAI format)
                        used only for NATIVE protocol
         protocol:      which format to parse
+        tools:         the tool definitions offered to the model this turn.
+                       Only consumed by LFM25 -- see _extract_lfm25's
+                       docstring for why. Every other protocol ignores it.
         """
         if protocol == ToolProtocol.NATIVE:
             return ToolCallNormalizer._extract_native(native_calls)
@@ -66,20 +91,21 @@ class ToolCallNormalizer:
         if protocol == ToolProtocol.FEW_SHOT:
             return ToolCallNormalizer._extract_few_shot(response_text)
         if protocol == ToolProtocol.LFM25:
-            return ToolCallNormalizer._extract_lfm25(response_text)
+            return ToolCallNormalizer._extract_lfm25(response_text, tools)
         return []
 
     @staticmethod
     def extract_tool_calls(
         response_text: str | None,
         protocol: ToolProtocol,
+        tools: list[ToolDefinition] | None = None,
     ) -> list[WorkerToolResult]:
         """
         Convenience entry point for non-NATIVE callers (e.g. OllamaProvider)
         that only have response text, never a native_calls array. Equivalent
-        to extract(response_text, None, protocol).
+        to extract(response_text, None, protocol, tools).
         """
-        return ToolCallNormalizer.extract(response_text, None, protocol)
+        return ToolCallNormalizer.extract(response_text, None, protocol, tools)
 
     @staticmethod
     def _extract_native(native_calls: list[dict] | None) -> list[WorkerToolResult]:
@@ -205,7 +231,10 @@ class ToolCallNormalizer:
         return results
 
     @staticmethod
-    def _extract_lfm25(response_text: str | None) -> list[WorkerToolResult]:
+    def _extract_lfm25(
+        response_text: str | None,
+        tools: list[ToolDefinition] | None = None,
+    ) -> list[WorkerToolResult]:
         """
         LFM2.5 output parsing. Primary: JSON (array of calls, or a single
         call object -- live testing against lfm2.5-thinking:latest showed
@@ -218,6 +247,15 @@ class ToolCallNormalizer:
         own bracket/string-aware scanner, so it naturally finds the correct
         boundary even when an argument value is itself a nested dict, and
         it ignores any trailing text without needing a separate strip step.
+
+        tools: live testing (Designlab1, lfm2.5-thinking:latest, Ollama
+        0.30.11) found the model reliably drops the {"name", "arguments"}
+        envelope entirely and emits the arguments as a bare flat object,
+        e.g. {"command": "ls"} instead of {"name": "bash", "arguments":
+        {"command": "ls"}} -- reproduced identically across multiple
+        prompts, not a one-off. When an item has neither "name" nor
+        "arguments" and tools is given, _infer_tool_from_flat_object()
+        tries to recover the tool name from the flat object's own keys.
         """
         text = (response_text or "").strip()
         if not text:
@@ -238,10 +276,16 @@ class ToolCallNormalizer:
                 for item in parsed:
                     if not isinstance(item, dict):
                         continue
-                    args = item.get("arguments") or {}
+                    name = item.get("name", "")
+                    args = item.get("arguments")
+                    if not name and args is None and tools:
+                        inferred = _infer_tool_from_flat_object(item, tools)
+                        if inferred is not None:
+                            name, args = inferred, item
+                    args = args or {}
                     results.append(
                         WorkerToolResult(
-                            tool_name=item.get("name", ""),
+                            tool_name=name,
                             tool_input=args if isinstance(args, dict) else {"value": args},
                             tool_output=None,
                             error=None,

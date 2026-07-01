@@ -194,14 +194,14 @@ command in TESTING_GUIDE.md.
       instruction alone produced empty content; model also varied between
       array/bare-object/markdown-fenced JSON across runs. See CLAUDE.md
       "Live test result" and SDD_ADDENDUM_7.5.md A.2b for what changed.
-- [ ] tool_result_role confirmed working ("tool"/"user") -- still blocked: no
-      multi-turn tool-execution loop exists anywhere in the codebase yet to
-      test it against (see CLAUDE.md "Open decisions"). The tools=[] wiring
-      gap below being fixed does NOT unblock this -- a single-turn tool call
-      never produces a "next turn", so tool_result_role still has nothing to
-      exercise it. Unblocking requires building the multi-turn loop itself
-      (re-invoke worker with tool result appended), which is out of scope
-      for this session.
+- [x] tool_result_role confirmed working ("tool") -- unblocked by the
+      multi-turn tool loop (see "Multi-turn Tool Loop" section below).
+      Live-verified: default role "tool" round-tripped into a real
+      second-turn request payload against lfm2.5-thinking:latest, with a
+      real executed bash result as the message content. "user" (the
+      documented Ollama workaround) was not separately live-tested this
+      session -- "tool" worked, so there was no failure forcing the
+      workaround path.
 - [x] cli/shell.py tools=[] wiring gap fixed -- _run_task() now resolves
       config.mode.tool_bundle via get_definitions() and passes real
       ToolDefinitions into WorkerTask, for every mode (not just LFM25).
@@ -218,20 +218,44 @@ command in TESTING_GUIDE.md.
       template. Per-step recovery + CAPABILITY_ALIASES + WARNING logging
       implemented in tasker/orchestrator/_parse.py; ExecutionPlan gained
       `used_fallback: bool`.
-- [ ] First real tool call through harness confirmed fully end-to-end via
-      `python -m cli.shell` itself -- separate, still-open flakiness
-      unrelated to parse_plan(): live testing while fixing the capability
-      bug showed the full `cli.shell` invocation sometimes gets an EMPTY
-      `content` string back from lfm2.5-thinking:latest (correctly
-      triggers the genuinely-malformed-response fallback path, now
-      logged/flagged via `used_fallback=True`, working as designed) even
-      though a direct orchestrator->provider script (identical pipeline,
-      bypassing only cli/shell.py's print wrapper) reliably gets non-empty
-      content back for the same prompt. Suspected cause: this "thinking"
+- [x] First real tool call executed end-to-end, live, against
+      lfm2.5-thinking:latest -- proven via a direct orchestrator-bypassing
+      provider+loop script: instructed "Run the hostname command and tell
+      me the exact output", the model's flat `{"command": "hostname"}`
+      response was correctly inferred as a `bash` call (see "Multi-turn
+      Tool Loop" section), executed for real, and returned
+      `tool_output='Designlab1\n'` -- the machine's actual hostname,
+      confirmed against a direct `hostname` shell command. This is
+      genuine proof real execution occurs, not model speculation.
+- [ ] First real tool call confirmed end-to-end through the FULL
+      `python -m cli.shell` invocation specifically (not just the direct
+      provider+loop script above) -- still blocked by the pre-existing,
+      separate empty-content bug documented below: the orchestrator's own
+      planning step rephrases the task into a step description (e.g.
+      "The exact output of running hostname"), and several rephrasings
+      reliably trigger the empty-content quirk in the WORKER step before
+      the tool-call-parsing code path is ever reached. Reproduced across
+      4/4 full-CLI attempts this session, all landing on the empty-content
+      bug rather than exercising the (separately proven-working) loop.
+      This is not a regression from today's work -- the loop and inference
+      fix are proven correct in isolation; the full pipeline is just more
+      likely to hit the other, still-open bug first because the planner's
+      rephrasing is an extra opportunity for that bug's trigger phrasing.
+- [ ] EMPTY `content` string back from lfm2.5-thinking:latest -- separate,
+      still-open flakiness unrelated to parse_plan() or the multi-turn
+      loop. Live testing this session (see "Multi-turn Tool Loop" below)
+      found this is NOT simple flakiness: the same instruction phrasing
+      failed identically across repeated attempts (bounded retry, added
+      this session, does not recover it), while other phrasings of a
+      similar request succeeded, suggesting the trigger is closer to
+      "certain phrasings reliably fail" than "random sampling
+      occasionally fails". Suspected cause unchanged: this "thinking"
       model sometimes exhausts its output budget inside the `<think>`
-      reasoning block before emitting the final JSON `content`, which is
-      unrelated to tool-calling/capability parsing. Not investigated
-      further this session -- out of scope for the parse_plan() fix.
+      reasoning block before emitting the final JSON `content`. Untried
+      next lever: Ollama's per-request `"think": false` control, not
+      attempted this session -- out of scope, but promising given
+      `done_reason=stop` + non-empty `thinking` + empty `content` is
+      exactly the signature that control targets.
 
 ## Orchestrator Correctness
 
@@ -271,6 +295,115 @@ command in TESTING_GUIDE.md.
       confirmed the model's actual step description/count is now
       preserved with `used_fallback=False`, instead of collapsing to
       NanoOrchestrator's generic template as it did before this fix.
+
+## Multi-turn Tool Loop
+
+- [x] `tasker/tools/executor.py` -- `execute_tool()` real dispatch for
+      BASH, GIT, FILE_READ, FILE_WRITE, CODE_SEARCH (argv-based
+      `asyncio.create_subprocess_exec`, never `shell=True`). LINTER/
+      TEST_RUNNER deliberately left unimplemented (no linter/test
+      framework configured anywhere in this project). BASH/FILE_WRITE/GIT
+      hard-gated to `ComputeLocation.LOCAL_HARDWARE`; small BASH denylist
+      as defense-in-depth only (documented as not a security boundary);
+      30s timeout + 8000-char output cap; path containment under `cwd`
+      for FILE_READ/FILE_WRITE. See SDD 5.7a for the full security
+      posture rationale.
+- [x] `tasker/tools/loop.py` -- `run_tool_loop()` drives `provider.
+      execute()` through multiple turns: execute, run any requested tool
+      calls for real, thread the assistant's own turn
+      (`WorkerResult.raw_assistant_message`, new field) and the tool
+      result (`format_tool_result_message()`) into history, re-invoke.
+      Terminates cleanly at `max_turns=5` (default) with a WARNING, never
+      raises. Usage/cost/duration accumulate across turns; every turn's
+      *executed* tool results survive into the final result (design
+      review caught that returning only the last turn's would silently
+      discard everything that actually ran, since the last turn typically
+      requests none). DEFERRED (no concurrency slot) gets a bounded retry
+      with backoff before giving up, since bailing after real tool side
+      effects already happened is worse than a short wait.
+- [x] `tasker/workers/providers/ollama.py::_build_messages()` fixed to
+      only append `task.instruction` as a fresh user turn when
+      `context["messages"]` is empty -- a continuation turn's history
+      already ends correctly (e.g. with a tool result), and re-appending
+      the original instruction would duplicate it as a second user
+      question. First-turn behavior (all existing tests) unchanged.
+- [x] `format_tool_result_message()` gained an optional `tool_call_id`
+      param, threaded through for NATIVE protocol (index-matched to the
+      same synthesized `call_{i}` ids `OllamaProvider` already invents).
+      Not confirmed live whether Ollama's `/api/chat` actually enforces
+      id-based pairing -- included as cheap insurance either way.
+- [x] `cli/shell.py::_run_task()` calls `run_tool_loop()` in place of a
+      single `provider.execute()` per step.
+- [x] `build_synthesize_prompt()` (`tasker/orchestrator/_parse.py`)
+      enriched to append real `tool_output` per step after the existing
+      `Step N: {output}` prose line, so synthesis stays grounded even if
+      a step's final prose is itself empty.
+- [x] **Root cause found for why live end-to-end proof initially failed:**
+      `ToolCallNormalizer._extract_lfm25()` set `tool_name=""` whenever
+      the model's JSON call omitted the `{"name", "arguments"}` envelope.
+      Live testing found `lfm2.5-thinking:latest` does this *consistently*
+      (not flakily) for single-tool tasks -- e.g. emitting bare
+      `{"command": "hostname"}` instead of `{"name": "bash", "arguments":
+      {"command": "hostname"}}`, reproduced identically across 3+ separate
+      prompts. Fixed: `ToolCallNormalizer.extract()`/`extract_tool_calls()`
+      gained an optional `tools: list[ToolDefinition]` param (threaded
+      from `task.tools` in `OllamaProvider.execute()`); when an item has
+      neither `name` nor `arguments`, `_infer_tool_from_flat_object()`
+      matches the flat dict's keys against each offered tool's JSON
+      Schema (`required` subset check + no extra keys) and infers the
+      tool name only on a unique match -- ambiguous or unmatched cases
+      are left unresolved (`tool_name=""`, same as before) rather than
+      guessed. `anthropic.py`/`openai_provider.py` (always NATIVE) are
+      unaffected since `_extract_native()` never reads `tools`.
+- [x] Live end-to-end proof: direct provider+loop script (bypassing the
+      orchestrator's planner) instructed to run `hostname` via the `bash`
+      tool -- model's flat-object response correctly inferred as `bash`,
+      executed for real, returned the machine's actual hostname
+      (`'Designlab1\n'`), matching a direct `hostname` shell invocation.
+      This is the first confirmed real (non-fabricated) tool execution in
+      the project's history.
+- [x] Security gating live-verified: constructing an `OLLAMA_CLOUD`
+      worker and requesting `bash` returns a clear `.error`
+      ("restricted to LOCAL_HARDWARE workers"), never executes.
+- [x] 46 new unit tests: `tests/unit/test_tool_executor.py` (25),
+      `tests/unit/test_tool_loop.py` (11, including one integration test
+      using the real `OllamaProvider` with only HTTP mocked, specifically
+      to catch a system-message-duplication bug the design review found
+      that a fully-isolated loop-only test would have missed), plus
+      `TestOllamaProviderMultiTurn`/`TestFormatToolResultMessage` (7) in
+      `test_provider_ollama.py`, `TestBuildSynthesizePrompt` (3) in
+      `test_orchestrator_parse.py`, and `TestLfm25FlatObjectInference` (7)
+      in `test_tool_normalizer.py`. Full suite: 437/437 -> 494/494.
+- [ ] **Known, not closed by this work:** the loop only helps tool calls
+      that are *successfully parsed*. When a model's response is fully
+      empty (nothing parses into any call at all), there is nothing for
+      the loop to execute -- see the empty-content item above, still
+      open. The full CLI pipeline (`python -m cli.shell`) has not yet
+      been observed completing a real tool execution end-to-end in a
+      single run, because the planner's own rephrasing of the task is an
+      additional opportunity to trigger that separate bug before the
+      (proven-working) loop code path is reached.
+- [ ] Model doesn't reliably conclude after seeing a real tool result --
+      observed live: after a real `hostname` execution was fed back,
+      `lfm2.5-thinking:latest` re-emitted the same tool call again instead
+      of answering, repeating until `max_turns` cut it off. Not
+      investigated further this session; likely a separate small-model
+      multi-turn behavior limitation, not a bug in the loop itself (the
+      loop's job -- executing real calls and feeding results back
+      correctly -- was independently confirmed via the mocked unit tests).
+- [ ] Empty-content bounded retry (`OllamaProvider._EMPTY_CONTENT_MAX_
+      RETRIES`, added this session) does not recover the specific
+      empty-content case -- confirmed live, 3/3 identical retries all
+      still empty for the same prompt. Kept as a safe, tested, no-harm
+      mitigation for genuinely sampling-dependent cases, but it is not a
+      fix for the phrasing-dependent case documented above.
+- [ ] `LINTER`/`TEST_RUNNER` tool execution -- not implemented; no linter
+      or test framework is configured anywhere in this project.
+- [ ] Anthropic/OpenAI/Fugu providers are not wired through
+      `run_tool_loop()` -- `cli/shell.py`'s `provider_map` only registers
+      `OllamaProvider`. `run_tool_loop()`'s coupling to `OllamaProvider`'s
+      `format_tool_result_message()` would need generalizing if/when
+      those providers need a multi-turn loop of their own.
 
 ## Phase 8 -- Setup Wizard, Readiness Checker, TUI
 

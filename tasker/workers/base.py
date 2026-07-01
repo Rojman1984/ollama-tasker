@@ -437,3 +437,12 @@ class WorkerResult:
     duration_ms: int
     reason: str | None = None
     fallback_hint: FallbackHint | None = None
+    raw_assistant_message: dict | None = None
+    """
+    The assistant turn exactly as sent to the model, for replay into the
+    next turn's message history by a multi-turn tool loop (see
+    tasker/tools/loop.py). Populated by providers that support tool
+    calling; None for providers/results that don't participate in a
+    tool loop. Not part of any to_dict/from_dict contract -- WorkerResult
+    is not serialized anywhere.
+    """

@@ -78,10 +78,25 @@ def build_plan_prompt(
 
 def build_synthesize_prompt(original_task: str, results: list[WorkerResult]) -> str:
     outputs = "\n\n".join(
-        f"Step {i + 1}: {r.output or '(no output)'}"
+        f"Step {i + 1}: {r.output or '(no output)'}" + _format_tool_results(r)
         for i, r in enumerate(results)
     )
     return f"Original task: {original_task}\n\nWorker outputs:\n{outputs}"
+
+
+def _format_tool_results(result: WorkerResult) -> str:
+    """
+    Real tool output, appended after a step's prose so synthesis stays
+    grounded even when that prose is itself empty (see the multi-turn
+    tool loop, tasker/tools/loop.py) -- without this, a step whose model
+    output was lost (e.g. inside a reasoning model's <think> block) would
+    still show real tool output as "(no output)" to the synthesizer.
+    """
+    executed = [tr for tr in result.tool_results if tr.tool_output is not None]
+    if not executed:
+        return ""
+    lines = "".join(f"\n  [tool: {tr.tool_name}] -> {tr.tool_output}" for tr in executed)
+    return lines
 
 
 def build_retry_prompt(plan: ExecutionPlan, failed_step: WorkerResult) -> str:

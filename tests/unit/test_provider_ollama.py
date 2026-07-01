@@ -25,7 +25,7 @@ from tasker.workers.base import (
     WorkerStatus,
     WorkerTask,
 )
-from tasker.workers.providers.ollama import OllamaProvider
+from tasker.workers.providers.ollama import OllamaProvider, format_tool_result_message
 
 
 # ------------------------------------------------------------------ #
@@ -57,14 +57,18 @@ def _manifest(
     )
 
 
-def _task(instruction: str = "say hello", tools: list | None = None) -> WorkerTask:
+def _task(
+    instruction: str = "say hello",
+    tools: list | None = None,
+    context: dict | None = None,
+) -> WorkerTask:
     return WorkerTask(
         task_id="t-001",
         step_index=0,
         role=AgentRole.WORKER,
         instruction=instruction,
         tools=tools or [],
-        context={},
+        context=context if context is not None else {},
         routing_policy=RoutingPolicy.COST_OPTIMIZED,
         privacy_tier=__import__("tasker.workers.base", fromlist=["PrivacyTier"]).PrivacyTier.LOCAL_ONLY,
     )
@@ -98,6 +102,39 @@ def _make_get(status: int, response: dict):
     async def _get(url: str) -> tuple[int, dict]:
         return status, response
     return _get
+
+
+def _thinking_empty_response(
+    thinking: str = "reasoned to an answer but never emitted it",
+    done_reason: str = "stop",
+) -> dict:
+    """A response matching the 'answer lost inside <think>' signature."""
+    return {
+        "model": "lfm2.5-thinking:latest",
+        "message": {
+            "role": "assistant",
+            "content": "",
+            "thinking": thinking,
+        },
+        "prompt_eval_count": 50,
+        "eval_count": 20,
+        "done": True,
+        "done_reason": done_reason,
+    }
+
+
+def _make_post_sequence(responses: list[tuple[int, dict]], captured: list | None = None):
+    """Returns a different (status, response) pair on each successive call."""
+    calls = {"n": 0}
+
+    async def _post(url: str, payload: dict) -> tuple[int, dict]:
+        payload.pop("_timeout", None)
+        if captured is not None:
+            captured.append(payload)
+        i = min(calls["n"], len(responses) - 1)
+        calls["n"] += 1
+        return responses[i]
+    return _post
 
 
 def _provider(post_status=200, post_response=None, get_status=200, get_response=None,
@@ -186,6 +223,129 @@ class TestOllamaProviderExecuteLocal(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result.tool_results), 1)
         self.assertEqual(result.tool_results[0].tool_name, "bash")
         self.assertEqual(result.tool_results[0].tool_input["cmd"], "ls")
+
+
+class TestOllamaProviderEmptyContentRetry(unittest.IsolatedAsyncioTestCase):
+    """
+    Reasoning models (lfm2.5-thinking) sometimes emit a stop token right
+    after closing <think> without ever producing content. Confirmed live
+    on Designlab1 to be sampling-dependent, not deterministic. Provider
+    retries identical requests up to _EMPTY_CONTENT_MAX_RETRIES times
+    when it sees the signature: empty content + non-empty thinking +
+    done_reason == "stop".
+    """
+
+    async def test_retries_and_succeeds_on_second_attempt(self):
+        captured: list = []
+        post = _make_post_sequence(
+            [
+                (200, _thinking_empty_response()),
+                (200, _ok_response("recovered answer")),
+            ],
+            captured,
+        )
+        p = OllamaProvider(base_url="http://localhost:11434", _post_fn=post)
+        result = await p.execute(_task(), _manifest())
+        self.assertEqual(result.status, WorkerStatus.SUCCESS)
+        self.assertEqual(result.output, "recovered answer")
+        self.assertEqual(len(captured), 2)
+
+    async def test_exhausts_retries_and_returns_empty_content(self):
+        captured: list = []
+        # 1 initial attempt + _EMPTY_CONTENT_MAX_RETRIES retries, all empty
+        responses = [(200, _thinking_empty_response())] * 4
+        post = _make_post_sequence(responses, captured)
+        p = OllamaProvider(base_url="http://localhost:11434", _post_fn=post)
+        result = await p.execute(_task(), _manifest())
+        self.assertEqual(result.status, WorkerStatus.SUCCESS)
+        self.assertIsNone(result.output)
+        self.assertEqual(len(captured), 1 + p._EMPTY_CONTENT_MAX_RETRIES)
+
+    async def test_does_not_retry_when_thinking_absent(self):
+        """Empty content with no thinking field is a different failure mode -- not retried."""
+        captured: list = []
+        resp = _ok_response(content="")
+        post = _make_post_sequence([(200, resp)], captured)
+        p = OllamaProvider(base_url="http://localhost:11434", _post_fn=post)
+        await p.execute(_task(), _manifest())
+        self.assertEqual(len(captured), 1)
+
+    async def test_does_not_retry_when_done_reason_is_not_stop(self):
+        """done_reason=='length' means real truncation -- retrying identically won't help."""
+        captured: list = []
+        resp = _thinking_empty_response(done_reason="length")
+        post = _make_post_sequence([(200, resp)], captured)
+        p = OllamaProvider(base_url="http://localhost:11434", _post_fn=post)
+        await p.execute(_task(), _manifest())
+        self.assertEqual(len(captured), 1)
+
+
+class TestOllamaProviderMultiTurn(unittest.IsolatedAsyncioTestCase):
+    """
+    Building blocks for tasker/tools/loop.py's multi-turn tool loop:
+    raw_assistant_message replay, continuation-turn message building, and
+    tool_call_id threading through format_tool_result_message.
+    """
+
+    async def test_raw_assistant_message_native_includes_tool_calls(self):
+        resp = _ok_response(
+            content="",
+            tool_calls=[{"function": {"name": "bash", "arguments": {"command": "ls"}}}],
+        )
+        p = _provider(post_response=resp)
+        result = await p.execute(_task(), _manifest())
+        self.assertEqual(result.raw_assistant_message["role"], "assistant")
+        self.assertEqual(result.raw_assistant_message["content"], "")
+        self.assertEqual(
+            result.raw_assistant_message["tool_calls"][0]["function"]["name"], "bash"
+        )
+
+    async def test_raw_assistant_message_lfm25_is_content_only(self):
+        resp = _ok_response(content='[{"name": "get_weather", "arguments": {"location": "Austin"}}]')
+        p = _provider(post_response=resp)
+        result = await p.execute(_task(), _lfm25_manifest())
+        self.assertEqual(
+            result.raw_assistant_message,
+            {"role": "assistant", "content": resp["message"]["content"]},
+        )
+        self.assertNotIn("tool_calls", result.raw_assistant_message)
+
+    async def test_build_messages_continuation_turn_does_not_duplicate_instruction(self):
+        captured: list = []
+        p = _provider(post_response=_ok_response("final answer"), captured_payloads=captured)
+        history = [
+            {"role": "user", "content": "List files in current directory"},
+            {"role": "assistant", "content": '[{"name": "bash", "arguments": {"command": "ls"}}]'},
+            {"role": "tool", "content": "file1.py\nfile2.py"},
+        ]
+        await p.execute(
+            _task(instruction="List files in current directory", context={"messages": history}),
+            _manifest(),
+        )
+        sent = captured[0]["messages"]
+        user_turns = [m for m in sent if m["role"] == "user"]
+        self.assertEqual(len(user_turns), 1)
+        self.assertEqual(sent, history)
+
+
+class TestFormatToolResultMessage(unittest.TestCase):
+
+    def test_omits_tool_call_id_by_default(self):
+        msg = format_tool_result_message("bash", "file1.py", role=None)
+        self.assertNotIn("tool_call_id", msg)
+        self.assertEqual(msg["role"], "tool")
+
+    def test_includes_tool_call_id_when_given(self):
+        msg = format_tool_result_message("bash", "file1.py", role="tool", tool_call_id="call_0")
+        self.assertEqual(msg["tool_call_id"], "call_0")
+
+    def test_respects_role_override(self):
+        msg = format_tool_result_message("bash", "file1.py", role="user")
+        self.assertEqual(msg["role"], "user")
+
+    def test_dict_result_serialized_to_json(self):
+        msg = format_tool_result_message("bash", {"stdout": "ok"}, role=None)
+        self.assertEqual(json.loads(msg["content"]), {"stdout": "ok"})
 
 
 class TestOllamaProviderProtocolRouting(unittest.IsolatedAsyncioTestCase):

@@ -9,14 +9,30 @@ fallback template, with no logging and no way for a caller to detect it.
 import json
 import unittest
 
-from tasker.orchestrator._parse import CAPABILITY_ALIASES, parse_plan
+from tasker.orchestrator._parse import CAPABILITY_ALIASES, build_synthesize_prompt, parse_plan
 from tasker.orchestrator.tier1_single import SingleLLMOrchestrator
 from tasker.workers.base import (
     Capability,
     ClassifierResult,
     ExecutionPlan,
+    ModelUsage,
     TaskType,
+    WorkerResult,
+    WorkerStatus,
+    WorkerToolResult,
 )
+
+
+def _result(output: str | None, tool_results: list | None = None) -> WorkerResult:
+    return WorkerResult(
+        task_id="t1",
+        worker_id="w1",
+        status=WorkerStatus.SUCCESS,
+        output=output,
+        tool_results=tool_results or [],
+        usage=ModelUsage(0, 0, 0.0),
+        duration_ms=0,
+    )
 
 
 def _classifier(task_type: TaskType = TaskType.CODING) -> ClassifierResult:
@@ -134,6 +150,35 @@ class TestSingleLLMOrchestratorUsedFallback(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(plan.used_fallback)
         self.assertGreater(len(plan.steps), 0)
         self.assertIn("not json", "\n".join(cm.output))
+
+
+class TestBuildSynthesizePrompt(unittest.TestCase):
+
+    def test_no_output_no_tool_results_shows_placeholder(self):
+        prompt = build_synthesize_prompt("task", [_result(None)])
+        self.assertIn("Step 1: (no output)", prompt)
+
+    def test_real_tool_output_included_even_when_prose_empty(self):
+        """The exact case this closes: a step whose model prose was lost
+        (e.g. inside a reasoning model's <think> block) should still
+        surface real, already-executed tool output to the synthesizer."""
+        tr = WorkerToolResult(
+            tool_name="bash", tool_input={"command": "ls"},
+            tool_output="file1.py\nfile2.py", error=None, duration_ms=5,
+        )
+        prompt = build_synthesize_prompt("task", [_result(None, [tr])])
+        self.assertIn("Step 1: (no output)", prompt)
+        self.assertIn("[tool: bash] -> file1.py\nfile2.py", prompt)
+
+    def test_unexecuted_tool_results_omitted(self):
+        """A tool_result with tool_output=None (never executed / errored)
+        must not show up as fabricated grounding."""
+        tr = WorkerToolResult(
+            tool_name="bash", tool_input={"command": "ls"},
+            tool_output=None, error="timed out", duration_ms=30000,
+        )
+        prompt = build_synthesize_prompt("task", [_result("some prose", [tr])])
+        self.assertNotIn("[tool: bash]", prompt)
 
 
 if __name__ == "__main__":

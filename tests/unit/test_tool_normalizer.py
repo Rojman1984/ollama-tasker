@@ -308,6 +308,77 @@ class TestLfm25ExtractToolCalls(unittest.TestCase):
         self.assertEqual(a, b)
 
 
+class TestLfm25FlatObjectInference(unittest.TestCase):
+    """
+    Live testing (Designlab1, lfm2.5-thinking:latest, Ollama 0.30.11)
+    found the model reliably drops the {"name","arguments"} envelope and
+    emits a bare flat object instead -- e.g. {"command": "ls"} rather
+    than {"name": "bash", "arguments": {"command": "ls"}}. Reproduced
+    identically across three separate prompts, not a one-off. When
+    `tools` is supplied, the flat object's keys are matched against each
+    offered tool's JSON Schema to recover the tool name.
+    """
+
+    def _bash_tool(self) -> ToolDefinition:
+        return ToolDefinition(
+            name="bash",
+            description="Execute a shell command",
+            parameters={"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
+        )
+
+    def test_flat_object_matches_unique_tool(self):
+        text = '[{"command": "hostname"}]'
+        results = ToolCallNormalizer.extract_tool_calls(text, ToolProtocol.LFM25, tools=[self._bash_tool()])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].tool_name, "bash")
+        self.assertEqual(results[0].tool_input, {"command": "hostname"})
+
+    def test_flat_object_without_array_wrapper(self):
+        text = '{"command": "date"}'
+        results = ToolCallNormalizer.extract_tool_calls(text, ToolProtocol.LFM25, tools=[self._bash_tool()])
+        self.assertEqual(results[0].tool_name, "bash")
+
+    def test_no_tools_given_leaves_name_empty(self):
+        """Without tools, there's nothing to infer against -- unchanged, prior behavior."""
+        text = '[{"command": "ls"}]'
+        results = ToolCallNormalizer.extract_tool_calls(text, ToolProtocol.LFM25)
+        self.assertEqual(results[0].tool_name, "")
+
+    def test_ambiguous_match_across_two_tools_left_unresolved(self):
+        other_tool = ToolDefinition(
+            name="run_shell",
+            description="Also takes a command",
+            parameters={"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
+        )
+        text = '[{"command": "ls"}]'
+        results = ToolCallNormalizer.extract_tool_calls(
+            text, ToolProtocol.LFM25, tools=[self._bash_tool(), other_tool],
+        )
+        self.assertEqual(results[0].tool_name, "")
+
+    def test_flat_object_missing_required_key_does_not_match(self):
+        text = '[{"unrelated_key": "value"}]'
+        results = ToolCallNormalizer.extract_tool_calls(text, ToolProtocol.LFM25, tools=[self._bash_tool()])
+        self.assertEqual(results[0].tool_name, "")
+
+    def test_well_formed_envelope_not_affected_by_inference(self):
+        """A properly-formed {"name","arguments"} call must not be re-inferred."""
+        text = '[{"name": "bash", "arguments": {"command": "ls"}}]'
+        results = ToolCallNormalizer.extract_tool_calls(text, ToolProtocol.LFM25, tools=[self._bash_tool()])
+        self.assertEqual(results[0].tool_name, "bash")
+        self.assertEqual(results[0].tool_input, {"command": "ls"})
+
+    def test_tool_with_no_required_params_never_matched(self):
+        """A tool with no required keys can't safely anchor inference -- too ambiguous."""
+        vague_tool = ToolDefinition(
+            name="vague", description="no required params",
+            parameters={"type": "object", "properties": {"command": {"type": "string"}}},
+        )
+        text = '[{"command": "ls"}]'
+        results = ToolCallNormalizer.extract_tool_calls(text, ToolProtocol.LFM25, tools=[vague_tool])
+        self.assertEqual(results[0].tool_name, "")
+
+
 # ------------------------------------------------------------------ #
 # format_tools
 # ------------------------------------------------------------------ #

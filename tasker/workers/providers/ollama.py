@@ -8,6 +8,7 @@ See SDD Section 5.6.1.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from collections.abc import Awaitable, Callable
 
@@ -26,6 +27,8 @@ from tasker.workers.base import (
 )
 from tasker.workers.providers.base import WorkerProviderBase
 
+logger = logging.getLogger(__name__)
+
 # Callable types for HTTP injection (allows mocking without libraries)
 _PostFn = Callable[[str, dict], Awaitable[tuple[int, dict]]]
 _GetFn = Callable[[str], Awaitable[tuple[int, dict]]]
@@ -35,9 +38,15 @@ def _build_messages(task: WorkerTask) -> list[dict]:
     messages: list[dict] = []
     if sp := task.context.get("system_prompt"):
         messages.append({"role": "system", "content": sp})
-    for msg in task.context.get("messages", []):
-        messages.append(msg)
-    messages.append({"role": "user", "content": task.instruction})
+    history = task.context.get("messages", [])
+    messages.extend(history)
+    # Only inject task.instruction as a fresh user turn on the first call
+    # (empty history). A multi-turn tool loop (tasker/tools/loop.py) passes
+    # a non-empty history that already ends with the right next message
+    # (e.g. a tool result) -- re-appending the original instruction there
+    # would duplicate it as if the user asked the same thing again.
+    if not history:
+        messages.append({"role": "user", "content": task.instruction})
     return messages
 
 
@@ -54,25 +63,36 @@ def _deferred(task: WorkerTask, worker: WorkerManifest) -> WorkerResult:
     )
 
 
-def format_tool_result_message(tool_name: str, result: str | dict, role: str | None) -> dict:
+def format_tool_result_message(
+    tool_name: str,
+    result: str | dict,
+    role: str | None,
+    tool_call_id: str | None = None,
+) -> dict:
     """
     Build the message dict to append to the next turn's context['messages']
     after a tool executes, respecting WorkerManifest.tool_result_role.
+    Consumed end-to-end by tasker/tools/loop.py's multi-turn tool loop.
 
     "tool" is the official role for tool results; Ollama has been observed
     to reject it for some LFM2-family models, requiring "user" as a
     workaround instead -- see SDD_ADDENDUM_7.5.md A.2b. role=None means
     "use the protocol default" ("tool" for LFM25, tested first).
 
-    Note: Ollama Tasker has no automatic multi-turn tool-execution loop
-    yet -- nothing currently re-invokes a worker with tool results
-    appended -- so this is not exercised end-to-end by OllamaProvider
-    itself. It exists as the provider-owned building block for whichever
-    orchestration layer eventually drives that loop, so tool_result_role
-    has one real, testable consumer rather than sitting unused.
+    tool_call_id: for NATIVE protocol, the synthesized call_{i} id from the
+    same turn's tool_calls[] (see OllamaProvider.execute), so the reply can
+    be paired with its request. Ollama's own tool_calls response never
+    includes an id itself (OllamaProvider invents call_{i} purely for
+    OpenAI-format normalization), so it's unconfirmed whether Ollama's
+    /api/chat enforces id-based pairing -- included when available as
+    cheap insurance, omitted (dict key absent) otherwise. Not used for
+    non-NATIVE protocols, which have no id concept.
     """
     content = result if isinstance(result, str) else json.dumps(result)
-    return {"role": role or "tool", "content": content}
+    msg = {"role": role or "tool", "content": content}
+    if tool_call_id is not None:
+        msg["tool_call_id"] = tool_call_id
+    return msg
 
 
 def _error(task: WorkerTask, worker: WorkerManifest, reason: str, elapsed: float) -> WorkerResult:
@@ -97,6 +117,16 @@ class OllamaProvider(WorkerProviderBase):
       returns DEFERRED immediately if no slot is available;
       raises OllamaQueueFullError on HTTP 429
     """
+
+    # Reasoning models (e.g. lfm2.5-thinking) occasionally emit a stop
+    # token immediately after closing their <think> block without ever
+    # producing post-think content, despite reasoning to a correct
+    # conclusion internally. Confirmed live (Designlab1, Ollama 0.30.11,
+    # lfm2.5-thinking:latest) to be sampling-dependent -- identical
+    # requests sometimes succeed, sometimes don't. See execute()'s retry
+    # loop and CLAUDE.md's "Current Session Notes" history for the
+    # investigation that led here.
+    _EMPTY_CONTENT_MAX_RETRIES = 2
 
     def __init__(
         self,
@@ -166,6 +196,7 @@ class OllamaProvider(WorkerProviderBase):
                 payload["tools"] = ollama_tools
 
             timeout = task.timeout_s or 120.0
+
             status, data = await self._post_fn(
                 f"{self._base_url}/api/chat",
                 {**payload, "_timeout": timeout},
@@ -180,6 +211,47 @@ class OllamaProvider(WorkerProviderBase):
 
             msg = data.get("message", {})
             content: str = msg.get("content") or ""
+
+            # See _EMPTY_CONTENT_MAX_RETRIES docstring: retry identical
+            # requests when the model's answer appears to have been lost
+            # inside its <think> block. Signature: empty content + non-empty
+            # thinking + a clean done_reason=="stop" (as opposed to e.g.
+            # "length", which would mean real truncation, not this quirk).
+            retries = 0
+            while (
+                content == ""
+                and msg.get("thinking")
+                and data.get("done_reason") == "stop"
+                and retries < self._EMPTY_CONTENT_MAX_RETRIES
+            ):
+                retries += 1
+                logger.warning(
+                    "OllamaProvider: %s returned empty content with non-empty "
+                    "thinking (done_reason=stop) -- retrying (%d/%d). instruction=%r",
+                    worker.model_id, retries, self._EMPTY_CONTENT_MAX_RETRIES,
+                    task.instruction[:80],
+                )
+                status, data = await self._post_fn(
+                    f"{self._base_url}/api/chat",
+                    {**payload, "_timeout": timeout},
+                )
+                if status == 429:
+                    raise OllamaQueueFullError(
+                        f"Ollama queue full (HTTP 429) for {worker.model_id}"
+                    )
+                if status != 200:
+                    return _error(task, worker, f"HTTP {status}", time.monotonic() - start)
+                msg = data.get("message", {})
+                content = msg.get("content") or ""
+
+            if content == "" and msg.get("thinking"):
+                logger.warning(
+                    "OllamaProvider: %s exhausted %d retries with empty content "
+                    "(thinking present, answer likely lost inside <think>). "
+                    "instruction=%r",
+                    worker.model_id, self._EMPTY_CONTENT_MAX_RETRIES,
+                    task.instruction[:80],
+                )
 
             if worker.tool_protocol == ToolProtocol.NATIVE:
                 raw_calls: list[dict] = msg.get("tool_calls") or []
@@ -205,7 +277,7 @@ class OllamaProvider(WorkerProviderBase):
                 # the model emits the call as text per the protocol's
                 # output format, parsed by extract_tool_calls().
                 tool_results = ToolCallNormalizer.extract_tool_calls(
-                    content, worker.tool_protocol
+                    content, worker.tool_protocol, tools=task.tools
                 )
             input_tok = data.get("prompt_eval_count", 0)
             output_tok = data.get("eval_count", 0)
@@ -213,6 +285,15 @@ class OllamaProvider(WorkerProviderBase):
                 input_tok * worker.cost_input / 1_000_000
                 + output_tok * worker.cost_output / 1_000_000
             )
+            # Replayable record of this turn's assistant message, for a
+            # multi-turn tool loop (tasker/tools/loop.py) to append to
+            # history verbatim on the next turn. "thinking" is deliberately
+            # dropped -- reasoning models shouldn't be fed their own prior
+            # <think> trace back as history (bloats context, encourages
+            # re-reasoning instead of answering).
+            raw_assistant_message: dict = {"role": "assistant", "content": content}
+            if worker.tool_protocol == ToolProtocol.NATIVE and raw_calls:
+                raw_assistant_message["tool_calls"] = raw_calls
             return WorkerResult(
                 task_id=task.task_id,
                 worker_id=worker.id,
@@ -221,6 +302,7 @@ class OllamaProvider(WorkerProviderBase):
                 tool_results=tool_results,
                 usage=ModelUsage(input_tok, output_tok, cost),
                 duration_ms=int((time.monotonic() - start) * 1000),
+                raw_assistant_message=raw_assistant_message,
             )
 
         finally:

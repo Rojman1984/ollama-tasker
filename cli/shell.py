@@ -71,6 +71,7 @@ async def _run_task(
         WorkerStatus,
         WorkerTask,
     )
+    from tasker.tools.loop import run_tool_loop
     from tasker.workers.providers.ollama import OllamaProvider
     from tasker.workers.registry import WorkerSelector
 
@@ -141,7 +142,7 @@ async def _run_task(
             print(f"  No provider for {worker.provider.value}")
             continue
         try:
-            result = await provider.execute(wt, worker)
+            result = await run_tool_loop(wt, worker, provider, cwd=Path.cwd())
             status_str = "ok" if result.status == WorkerStatus.SUCCESS else result.status.value
             print(f"  [{status_str}] {worker.model_id} ({result.duration_ms}ms)")
             results.append(result)
