@@ -15,7 +15,11 @@ See SDD Section 5.1.
 """
 from __future__ import annotations
 
+import logging
+
 from tasker.workers.base import ToolDefinition, ToolID
+
+logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
 # Network-capable tools — always stripped by SECURE mode
@@ -92,6 +96,105 @@ def secure_bundle(base_bundle: frozenset[ToolID]) -> frozenset[ToolID]:
     Strips all tools in NETWORK_TOOLS regardless of origin.
     """
     return base_bundle - NETWORK_TOOLS
+
+# --------------------------------------------------------------------------- #
+# Step-aware narrowing — offering a worker fewer, more relevant tools
+# --------------------------------------------------------------------------- #
+#
+# Live testing found that offering a small local model (lfm2.5-thinking,
+# 1.2B) the full 7-tool CODE_BUNDLE on every step reliably caused it to
+# lose its answer inside its <think> block and never emit a parseable
+# tool call -- reproduced identically across Q4, Q8, and full bf16
+# precision, so this is a prompt-complexity problem, not a quantization
+# one. Offering just the 1 tool a step actually needs was 100% reliable
+# in every test. PlanStep only carries `description` (free text) and
+# `required_capabilities` (too coarse -- e.g. Capability.CODE doesn't
+# distinguish "run tests" from "read a file" from "git diff"), so
+# narrowing is done deterministically via keyword matching on
+# `description`, not by asking a model to classify (proven unreliable
+# for this same reason).
+
+# Each tool maps to a list of "groups" -- a group is a set of substrings
+# that must ALL appear in the step description (any order/position) for
+# that group to match; a tool matches if ANY of its groups match. Live
+# testing found the planner paraphrases the same real intent multiple
+# ways across runs (e.g. "List files in current directory" / "Listing
+# files" / "List current directory files") -- a flat exact-phrase list
+# missed the paraphrases, so word-co-occurrence groups (not just fixed
+# phrases) are needed to keep up with that variance. Single-word groups
+# behave like a plain "OR" keyword.
+_TOOL_KEYWORDS: dict[ToolID, list[frozenset[str]]] = {
+    # Broadest net: no dedicated directory-listing/general-command tool
+    # exists, so "list files"/"hostname"-style steps must resolve here.
+    # Deliberately NOT including bare "run "/"execute"/"command" -- too
+    # generic, collides with "run tests"/"run git commit"-style steps.
+    ToolID.BASH: [
+        frozenset({"bash"}),
+        frozenset({"shell"}),
+        frozenset({"hostname"}),
+        frozenset({"ls "}),
+        frozenset({"list", "file"}),
+        frozenset({"list", "director"}),
+    ],
+    ToolID.FILE_READ: [
+        frozenset({"read", "file"}),
+        frozenset({"open", "file"}),
+        frozenset({"contents of"}),
+        frozenset({"view", "file"}),
+    ],
+    ToolID.FILE_WRITE: [
+        frozenset({"write", "file"}),
+        frozenset({"write to"}),
+        frozenset({"create", "file"}),
+        frozenset({"save", "file"}),
+        frozenset({"edit", "file"}),
+    ],
+    ToolID.GIT: [
+        frozenset({"git "}),
+        frozenset({"commit"}),
+        frozenset({"diff"}),
+        frozenset({"branch"}),
+        frozenset({"clone"}),
+        frozenset({"pull request"}),
+    ],
+    ToolID.LINTER: [
+        frozenset({"lint"}),
+        frozenset({"style check"}),
+    ],
+    ToolID.TEST_RUNNER: [
+        frozenset({"test"}),
+        frozenset({"pytest"}),
+    ],
+    ToolID.CODE_SEARCH: [
+        frozenset({"search"}),
+        frozenset({"find"}),
+        frozenset({"grep"}),
+        frozenset({"look for"}),
+        frozenset({"locate"}),
+    ],
+}
+
+
+def narrow_bundle_to_step(bundle: frozenset[ToolID], step_description: str) -> frozenset[ToolID]:
+    """
+    Return the subset of *bundle* relevant to *step_description*, matched
+    via _TOOL_KEYWORDS. If nothing matches, returns *bundle* unchanged
+    (today's behavior) and logs a WARNING -- unmatched phrasing should
+    stay visible/improvable rather than silently guess wrong.
+    """
+    text = step_description.lower()
+    matched = frozenset(
+        tool_id for tool_id, groups in _TOOL_KEYWORDS.items()
+        if any(all(word in text for word in group) for group in groups)
+    ) & bundle
+    if not matched:
+        logger.warning(
+            "narrow_bundle_to_step: no keyword match for step description "
+            "%r -- falling back to the full bundle (%d tools)",
+            step_description, len(bundle),
+        )
+        return bundle
+    return matched
 
 # --------------------------------------------------------------------------- #
 # ToolDefinition registry — minimal schemas for all known tools

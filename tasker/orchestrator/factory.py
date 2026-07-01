@@ -47,13 +47,19 @@ from tasker.workers.providers.base import WorkerProviderBase
 _ModelCall = Callable[[str, str], Awaitable[str]]
 
 
-def _build_orchestrator_manifest(model_id: str) -> WorkerManifest:
-    """Ad-hoc manifest for the local orchestrator model (not in worker registry)."""
+def _build_orchestrator_manifest(
+    model_id: str,
+    compute_location: ComputeLocation = ComputeLocation.LOCAL_HARDWARE,
+) -> WorkerManifest:
+    """Ad-hoc manifest for the orchestrator model (not in worker registry).
+    compute_location=OLLAMA_CLOUD lets planning use a stronger model via
+    Ollama's own cloud (e.g. gpt-oss:120b-cloud) while the worker stays
+    local -- same OllamaProvider/endpoint either way, see SDD 5.6.1."""
     return WorkerManifest(
         id=f"orchestrator-{model_id}",
         provider=ProviderType.OLLAMA,
         model_id=model_id,
-        compute_location=ComputeLocation.LOCAL_HARDWARE,
+        compute_location=compute_location,
         capabilities={Capability.TOOL_USE},
         tool_protocol=ToolProtocol.NATIVE,
         context_window=32768,
@@ -70,8 +76,13 @@ def _build_orchestrator_manifest(model_id: str) -> WorkerManifest:
 def _make_call_model(
     provider: WorkerProviderBase,
     manifest: WorkerManifest,
+    privacy_tier: PrivacyTier = PrivacyTier.LOCAL_ONLY,
 ) -> _ModelCall:
-    """Wrap provider.execute() as a (system_prompt, user_prompt) -> str coroutine."""
+    """Wrap provider.execute() as a (system_prompt, user_prompt) -> str coroutine.
+    privacy_tier must be OLLAMA_CLOUD_OK (not the narrower default
+    LOCAL_ONLY) for an OLLAMA_CLOUD-routed manifest, or the call would be
+    hard-blocked by the project's own privacy-tier enforcement (SDD 11.1)
+    despite the provider itself supporting the cloud call."""
     async def call_model(system_prompt: str, user_prompt: str) -> str:
         task = WorkerTask(
             task_id=str(uuid.uuid4()),
@@ -81,7 +92,7 @@ def _make_call_model(
             tools=[],
             context={"system_prompt": system_prompt},
             routing_policy=RoutingPolicy.PRIVATE,
-            privacy_tier=PrivacyTier.LOCAL_ONLY,
+            privacy_tier=privacy_tier,
             timeout_s=120.0,
         )
         result = await provider.execute(task, manifest)
@@ -108,8 +119,15 @@ def build_orchestrator(
     if ollama_provider is None:
         return NanoOrchestrator()
 
-    manifest = _build_orchestrator_manifest(model_id)
-    call_model = _make_call_model(ollama_provider, manifest)
+    if config.profile.orchestrator_compute_location == "ollama_cloud":
+        compute_location = ComputeLocation.OLLAMA_CLOUD
+        privacy_tier = PrivacyTier.OLLAMA_CLOUD_OK
+    else:
+        compute_location = ComputeLocation.LOCAL_HARDWARE
+        privacy_tier = PrivacyTier.LOCAL_ONLY
+
+    manifest = _build_orchestrator_manifest(model_id, compute_location)
+    call_model = _make_call_model(ollama_provider, manifest, privacy_tier)
 
     if tier == 1:
         return SingleLLMOrchestrator(model_id, call_model)

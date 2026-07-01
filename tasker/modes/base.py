@@ -144,6 +144,7 @@ class HardwareProfile:
     description: str
     orchestrator_tier_max: int
     orchestrator_model: str
+    orchestrator_compute_location: str   # "local" | "ollama_cloud"
     ollama_plan: OllamaPlan
     max_concurrent_local: int
     max_concurrent_ollama_cloud: int
@@ -164,6 +165,7 @@ class HardwareProfile:
             description=data.get("description", ""),
             orchestrator_tier_max=int(orch.get("tier_max", 0)),
             orchestrator_model=str(orch.get("model", "qwen3:1.7b")),
+            orchestrator_compute_location=str(orch.get("compute_location", "local")),
             ollama_plan=plan,
             max_concurrent_local=int(pool.get("max_concurrent_local", 1)),
             max_concurrent_ollama_cloud=int(pool.get("max_concurrent_ollama_cloud", 0)),

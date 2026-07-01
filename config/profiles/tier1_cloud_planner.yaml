@@ -1,0 +1,46 @@
+# Tier 1 -- Ollama-Cloud-routed planner
+# Same hardware/worker footprint as tier1_tasker.yaml (local Q4 worker
+# does all tool execution), but the orchestrator (planning + synthesis)
+# is routed to a much stronger model via Ollama's own cloud instead of
+# the local 1.2B model. See docs/SDD.md 5.3 and CLAUDE.md's Current
+# Session Notes for why: live testing found the tiny local model's
+# planning output (capability strings, step phrasing) is unreliable in
+# ways a stronger model should avoid, and planning is a low-frequency,
+# high-value call (once per task, not once per tool call) where the
+# small added latency/cost is worth it.
+#
+# Requires `ollama signin` before use -- this machine had no active
+# Ollama Cloud session as of the session this profile was added
+# (confirmed via a direct API call returning "Unauthorized").
+hardware_profile: tier1_cloud_planner
+description: "TASKER-P1/Designlab1 -- local Q4 worker, Ollama-Cloud planner"
+
+orchestrator:
+  tier_max: 1
+  provider: single_llm
+  model: gpt-oss:120b-cloud
+  compute_location: ollama_cloud
+  load_strategy: sequential
+  context_limit: 131072
+
+classifier:
+  provider: rule_based
+  fallback: orchestrator
+
+worker_pool:
+  max_concurrent_local: 1
+  max_concurrent_ollama_cloud: 1
+  unload_between_tasks: true
+
+ollama:
+  plan: pro
+  base_url: "http://localhost:11434"
+  session_throttle_at: 0.90
+  weekly_throttle_at: 0.85
+  fallback_on_exhaustion: local_then_direct_cloud
+
+mode_constraints:
+  cowork:
+    behavior: sequential_only
+  research:
+    behavior: single_worker

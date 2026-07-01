@@ -40,6 +40,7 @@ def _profile(name: str = "tier1_local_minimal", tier_max: int = 1, unload: bool 
         description="test profile",
         orchestrator_tier_max=tier_max,
         orchestrator_model="lfm2.5-thinking:latest",
+        orchestrator_compute_location="local",
         ollama_plan=OllamaPlan.PRO,
         max_concurrent_local=1,
         max_concurrent_ollama_cloud=1,

@@ -35,12 +35,17 @@ from tasker.workers.providers.base import WorkerProviderBase
 # Helpers
 # --------------------------------------------------------------------------- #
 
-def _profile(tier_max: int = 1, model: str = "qwen3:1.7b") -> HardwareProfile:
+def _profile(
+    tier_max: int = 1,
+    model: str = "qwen3:1.7b",
+    compute_location: str = "local",
+) -> HardwareProfile:
     return HardwareProfile(
         name="test",
         description="test profile",
         orchestrator_tier_max=tier_max,
         orchestrator_model=model,
+        orchestrator_compute_location=compute_location,
         ollama_plan=OllamaPlan.PRO,
         max_concurrent_local=1,
         max_concurrent_ollama_cloud=1,
@@ -66,8 +71,12 @@ def _mode(tier_max: int = 1) -> TaskerMode:
     )
 
 
-def _config(profile_tier: int = 1, mode_tier: int = 1) -> ExecutionConfig:
-    profile = _profile(profile_tier)
+def _config(
+    profile_tier: int = 1,
+    mode_tier: int = 1,
+    compute_location: str = "local",
+) -> ExecutionConfig:
+    profile = _profile(profile_tier, compute_location=compute_location)
     mode = _mode(mode_tier)
     return ExecutionConfig(
         mode=mode,
@@ -206,6 +215,47 @@ class TestCallModelWiring(unittest.IsolatedAsyncioTestCase):
         orchestrator = build_orchestrator(config, {ProviderType.OLLAMA: _BrokenProvider()})
         with self.assertRaises(RuntimeError):
             await orchestrator._call_model("sys", "usr")
+
+
+# --------------------------------------------------------------------------- #
+# Ollama-Cloud-routed orchestrator (planner) model
+# --------------------------------------------------------------------------- #
+
+class TestBuildOrchestratorCloudRouting(unittest.IsolatedAsyncioTestCase):
+
+    async def test_local_default_behaves_as_before(self):
+        """Regression: orchestrator_compute_location='local' (the default)
+        must produce identical manifest wiring to today's behavior."""
+        fake = _FakeProvider()
+        config = _config(profile_tier=1, mode_tier=1, compute_location="local")
+        orchestrator = build_orchestrator(config, {ProviderType.OLLAMA: fake})
+        self.assertIsInstance(orchestrator, SingleLLMOrchestrator)
+        await orchestrator._call_model("sys", "usr")
+        task, worker = fake.calls[-1]
+        self.assertEqual(worker.compute_location, ComputeLocation.LOCAL_HARDWARE)
+        self.assertEqual(task.privacy_tier, PrivacyTier.LOCAL_ONLY)
+
+    async def test_ollama_cloud_routes_manifest_and_privacy_tier(self):
+        fake = _FakeProvider()
+        config = _config(profile_tier=1, mode_tier=1, compute_location="ollama_cloud")
+        orchestrator = build_orchestrator(config, {ProviderType.OLLAMA: fake})
+        self.assertIsInstance(orchestrator, SingleLLMOrchestrator)
+        await orchestrator._call_model("sys", "usr")
+        task, worker = fake.calls[-1]
+        self.assertEqual(worker.compute_location, ComputeLocation.OLLAMA_CLOUD)
+        self.assertEqual(task.privacy_tier, PrivacyTier.OLLAMA_CLOUD_OK)
+
+    def test_ollama_cloud_still_resolves_ollama_provider_type(self):
+        """No new provider type needed -- cloud routing still only ever
+        needs provider_registry[ProviderType.OLLAMA]."""
+        config = _config(profile_tier=1, mode_tier=1, compute_location="ollama_cloud")
+        result = build_orchestrator(config, {ProviderType.OLLAMA: _FakeProvider()})
+        self.assertIsInstance(result, SingleLLMOrchestrator)
+
+    def test_ollama_cloud_without_ollama_provider_falls_back_to_nano(self):
+        config = _config(profile_tier=1, mode_tier=1, compute_location="ollama_cloud")
+        result = build_orchestrator(config, {})
+        self.assertIsInstance(result, NanoOrchestrator)
 
 
 if __name__ == "__main__":

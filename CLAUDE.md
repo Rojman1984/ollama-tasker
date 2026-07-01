@@ -347,155 +347,134 @@ python -m unittest tests.unit.test_orchestrator_nano -v
 
 *(Update this section at the end of every Cowork or Code session)*
 
-**Last worked on:** Building the multi-turn tool-execution loop —
-closes out the "known open issue, out of scope" note carried since the
-LFM25 session (`tool_result_role` unvalidated because nothing ever
-re-invoked a worker with a tool result appended). Started as an
-investigation into the empty-content flakiness noted last session; that
-investigation surfaced a much bigger, pre-existing gap (see below), which
-became this session's real focus per explicit user direction.
+**Last worked on:** Investigating why the multi-turn tool loop (previous
+session) still couldn't demonstrate real end-to-end CLI execution led to
+a live quantization/prompt-complexity investigation, which then became
+two concrete fixes: **step-aware tool subsetting** and an **Ollama-Cloud-
+routed orchestrator (planner) model**. Both implemented, tested, and
+live-verified this session.
 
-**What was actually broken (discovered, not assumed):** no tool call
-requested by a worker LLM was ever executed anywhere in the codebase.
-`ToolCallNormalizer.extract()` parsed a request into a `WorkerToolResult`
-with `tool_output=None`, but nothing downstream ran it — `cli/shell.py`
-marked a step `[ok]` purely on HTTP status, and `build_synthesize_prompt()`
-only read `WorkerResult.output`, never `tool_results`. A worker could
-request `bash("ls")` and the system would report success while `ls`
-never ran; the synthesizer then produced plausible-sounding prose about
-what the command "would" show. Confirmed live before any fix: asking the
-CLI to list files via bash never ran `ls` — it just guessed. Also
-confirmed: despite `CLAUDE.md` describing `core/` as "adopted from Parity
-Project, do not rewrite," every file in `core/` is a literal 6-line stub
-with zero implementation — there was no existing execution primitive to
-build on; everything below is written fresh.
+**Quantization investigation (diagnostic, no code changes from this
+part):** pulled and live-tested `lfm2.5-thinking` at Q8_0 and full bf16
+against the exact prompt that reliably failed at Q4. Finding: **quantization
+was never the bottleneck.** All three precisions failed identically once
+offered the full 7-tool `CODE_BUNDLE` — even bf16 (the best this model can
+do) hit the same empty-content signature. `"think": false` was also tried
+live and made things *worse* (11/12 attempts across both models had the
+model's entire response budget consumed by reasoning with nothing after
+`</think>`, vs. 1/12 with default think behavior). The one thing that was
+100% reliable in every test, across every precision, was offering just the
+1 tool a step actually needed — that became this session's real fix.
 
-**The fix — two new modules, both under `tasker/tools/` (not
-`tasker/orchestrator/`, since "the orchestrator never calls tools
-directly" is a hard rule, constraint #5 above):**
+**Fix 1 — step-aware tool subsetting
+(`tasker/tools/bundles.py::narrow_bundle_to_step()`):** deterministic,
+keyword-group-based narrowing of the tools offered per step, following
+the existing `secure_bundle()` pattern. Explicitly NOT LLM-classified —
+proven unreliable for this same small model (see `_infer_tool_from_flat_object`
+from last session). `PlanStep` only carries `description` (free text) and
+`required_capabilities` (too coarse — `Capability.CODE` doesn't distinguish
+"run tests" from "read a file"), so matching is keyword-group-based on
+`description`: a match requires ALL of a group's substrings present (any
+order), not a fixed phrase — needed after live testing showed the planner
+paraphrases the same real intent multiple ways per run ("List files in
+current directory" / "Listing files" / "List current directory files").
+No match → falls back to the full bundle (today's behavior) + logs a
+WARNING, so unmatched phrasing stays visible/improvable rather than
+silently guessing wrong. Wired into `cli/shell.py::_run_task()`'s step
+loop (was: tools computed once, constant, before the loop).
 
-- **`tasker/tools/executor.py`** — `execute_tool()` runs one tool call
-  for real (argv-based `asyncio.create_subprocess_exec`, never
-  `shell=True`) for `BASH`, `GIT`, `FILE_READ`, `FILE_WRITE`,
-  `CODE_SEARCH`. `LINTER`/`TEST_RUNNER` deliberately left unimplemented —
-  no linter or test framework is configured anywhere in this project.
-  Security posture (this is a local dev CLI, but `COWORK_BUNDLE` pairs
-  `bash` with network tools under `privacy_tier: any_cloud`, so a
-  cloud-routed worker could otherwise be tricked into driving local
-  execution): `BASH`/`FILE_WRITE`/`GIT` are hard-gated to
-  `ComputeLocation.LOCAL_HARDWARE`; a small BASH denylist is a documented
-  speed bump, not a security boundary; 30s timeout + 8000-char output cap
-  on every call; `FILE_READ`/`FILE_WRITE` path-contained under `cwd`.
-  Full rationale in `docs/SDD.md` §5.7a.
-- **`tasker/tools/loop.py`** — `run_tool_loop()` drives
-  `provider.execute()` through turns: execute → run any requested tools
-  for real → thread the assistant's own turn (`WorkerResult.
-  raw_assistant_message`, new field) and the tool result
-  (`format_tool_result_message()`) into history → re-invoke. Terminates
-  at `max_turns=5` with a WARNING, never raises. Every turn's *executed*
-  tool results survive into the final result (not just the last turn's —
-  a design-review-caught bug: the last turn typically requests none,
-  since it's the final answer, so returning only it would silently
-  discard everything that actually ran). DEFERRED gets bounded retry with
-  backoff before giving up. `cli/shell.py` now calls this instead of a
-  single `provider.execute()` per step.
-
-**Design review caught three real bugs in the original design before any
-code was written** (see the plan file / this conversation's design-review
-pass): (1) the loop as first sketched wouldn't have fixed the reported
-empty-content case at all, since an empty response parses to zero tool
-calls — nothing for the loop to execute; (2) returning only the last
-turn's `tool_results` would have silently discarded every tool that
-actually ran; (3) naively persisting a `role:"system"` entry into the
-running message history would make `ToolCallNormalizer.inject_tools()`
-re-append the "List of tools..." suffix onto an already-suffixed system
-message every turn, growing unboundedly. All three are fixed and covered
-by regression tests — (3) specifically by an integration test using the
-real `OllamaProvider` (HTTP mocked only), since a fully-isolated loop or
-provider test would each miss the interaction.
-
-**The actual reason live end-to-end proof initially failed (found via
-live testing, then fixed):** `ToolCallNormalizer._extract_lfm25()` set
-`tool_name=""` whenever the model's JSON call omitted the
-`{"name","arguments"}` envelope. Live testing found `lfm2.5-thinking:latest`
-does this *consistently* for single-tool tasks — e.g. emitting bare
-`{"command": "hostname"}` instead of the spec's wrapped form — reproduced
-identically across 3+ separate prompts, not flakiness. Fixed:
-`ToolCallNormalizer.extract()`/`extract_tool_calls()` gained an optional
-`tools` param (threaded from `task.tools`); `_infer_tool_from_flat_object()`
-matches the flat dict's keys against each offered tool's JSON Schema and
-infers the name only on a unique match, leaving ambiguous/unmatched cases
-as `tool_name=""` (unchanged from before) rather than guessing.
+**Fix 2 — Ollama-Cloud-routed orchestrator model:** lets the *planning*
+role use a stronger model via Ollama's own cloud
+(`ComputeLocation.OLLAMA_CLOUD`, same `OllamaProvider`/endpoint as local
+calls) while the *worker* role stays on the local Q4 model, per explicit
+user preference. **Explicitly rejected a third-party OpenAI-compatible
+router (OpenRouter) after the user corrected that direction** — see
+memory `feedback_cloud_models_via_ollama`. Real gaps found and fixed in
+`tasker/orchestrator/factory.py`: `_build_orchestrator_manifest()` and
+`_make_call_model()` were hardcoded to `ComputeLocation.LOCAL_HARDWARE`/
+`PrivacyTier.LOCAL_ONLY` — both would have hard-blocked a cloud call via
+the project's own privacy-tier enforcement even though `OllamaProvider`
+itself already supports `OLLAMA_CLOUD`. Now both accept params, and
+`build_orchestrator()` branches on a new `HardwareProfile.
+orchestrator_compute_location` field (`"local"` default, `"ollama_cloud"`
+opt-in). No new provider class needed — still only ever resolves
+`provider_registry[ProviderType.OLLAMA]`. New additive profile
+`config/profiles/tier1_cloud_planner.yaml`: local Q4 worker unchanged,
+orchestrator routed to `gpt-oss:120b-cloud` (OpenAI's actual open-weight
+120B release, hosted on Ollama Cloud — confirmed live via `ollama show`
+to have a real 131072-token context window; `context_limit` set to match
+rather than copying the local profile's 4096 CPU-RAM-driven value, per
+explicit user request to "open up the context frame for cloud models").
 
 **Live verification, Designlab1:**
-- **Real tool execution proven end-to-end:** a direct provider+loop
-  script (bypassing the orchestrator's planner) instructed to run
-  `hostname` via the `bash` tool got the model's flat-object response
-  correctly inferred as `bash`, executed for real, and returned
-  `tool_output='Designlab1\n'` — the machine's actual hostname, confirmed
-  against a direct `hostname` shell invocation. First confirmed
-  non-fabricated tool execution in this project's history.
-- **Security gate confirmed live:** an `OLLAMA_CLOUD` worker requesting
-  `bash` gets a clear `.error`, never executes.
-- **Full `python -m cli.shell` pipeline still not observed completing a
-  real tool call in one run** (4/4 attempts this session): the
-  orchestrator's own planning step rephrases the task before the worker
-  ever sees it, and several of those rephrasings reliably trigger the
-  *separate*, pre-existing empty-content bug (unchanged from last
-  session) before the loop's (proven-working) code path is reached. Not
-  a regression — the loop and inference fix are proven correct in
-  isolation; the full pipeline just has one more opportunity to hit the
-  other bug first.
-- **New minor finding, not investigated further:** after a real tool
-  result was fed back, the model sometimes re-issued the identical tool
-  call again instead of answering, repeating until `max_turns` cut it
-  off gracefully. Likely a small-model multi-turn limitation, not a loop
-  bug — the loop's own job (execute + feed back correctly) is separately
-  confirmed via mocked unit tests.
-- **Empty-content bounded retry (`OllamaProvider._EMPTY_CONTENT_MAX_
-  RETRIES=2`, added this session) does not recover the empty-content
-  case** — confirmed live, 3/3 identical retries still empty for the same
-  prompt. Kept as a safe, tested, no-harm mitigation; not a fix for the
-  phrasing-dependent failure. Untried next lever: Ollama's per-request
-  `"think": false` control — `done_reason=stop` + non-empty `thinking` +
-  empty `content` is exactly the signature that control targets.
+- **Tool subsetting:** the exact prompt that reliably failed last session
+  (`"Use the bash tool to list the files in the current directory"`), on
+  Q4, through the full CLI pipeline: 0 of 3 completed runs hit the
+  no-keyword-match fallback across 3 different planner paraphrases; one
+  run completed with the exact real directory listing as the final
+  answer. The other two hit `max_turns` (the already-documented "model
+  doesn't conclude after a real tool result" quirk from last session, not
+  a narrowing failure — both still executed real tools throughout).
+- **Cloud planner:** this machine had no active Ollama Cloud session at
+  session start (confirmed via a direct `:cloud` API call returning
+  `"Unauthorized"`) — user completed `ollama signin`'s browser flow mid-
+  session (same pattern as the earlier `gh auth login` step). Confirmed
+  `gpt-oss:20b-cloud` and `gpt-oss:120b-cloud` both reachable with real
+  responses. A real planning call through `SingleLLMOrchestrator` wired
+  to `tier1_cloud_planner` produced a clean, valid 3-step plan
+  (`used_fallback=False`, no unrecognized capability strings) — visibly
+  better structured than typical local Q4 planning output. A full
+  `python -m cli.shell --mode code` run using this profile (cloud
+  planner + local Q4 worker) completed with the correct, real directory
+  listing as its final answer.
+- **New, real, pre-existing bug found (not introduced or fixed this
+  session):** the cloud planner's richer plans assign `REASONING`/
+  `THINKING` capabilities the local worker doesn't declare, so
+  `WorkerSelector` falls through to `nemotron-3-ultra-cloud` for those
+  steps — which fails instantly, because `worker_registry.yaml`'s
+  `model_id: "nemotron-3-ultra"` is missing the `:cloud` suffix Ollama
+  Cloud's actual tags require (confirmed: bare `nemotron-3-ultra` returns
+  `"model 'nemotron-3-ultra' not found"`). Likely affects other
+  cloud-routed registry entries too (glm-5.2, glm-5.1, minimax-m3,
+  kimi-k2.7-code) — not individually verified, out of scope this session.
 
-**Tests:** 46 new (25 `test_tool_executor.py`, 11 `test_tool_loop.py`
-including the system-message-duplication integration test, 7 across
-`test_provider_ollama.py`'s new `TestOllamaProviderMultiTurn`/
-`TestFormatToolResultMessage`, 3 `TestBuildSynthesizePrompt`, 7
-`TestLfm25FlatObjectInference`). Full suite: 437/437 → 494/494.
+**Tests:** 26 new (18 `test_tool_bundles.py`, 4 `TestBuildOrchestratorCloudRouting`
+in `test_orchestrator_factory.py`, plus 2 existing `HardwareProfile` test
+fixtures updated for the new required field). Full suite: 494/494 → 516/516.
 
-**Last file modified:** `tasker/tools/executor.py` (new),
-`tasker/tools/loop.py` (new), `tasker/tools/normalizer.py`,
-`tasker/workers/base.py`, `tasker/workers/providers/ollama.py`,
-`cli/shell.py`, `tasker/orchestrator/_parse.py`, `docs/SDD.md`,
-`tests/unit/test_tool_executor.py` (new), `tests/unit/test_tool_loop.py`
-(new), `tests/unit/test_provider_ollama.py`,
-`tests/unit/test_orchestrator_parse.py`, `tests/unit/test_tool_normalizer.py`,
+**Last file modified:** `tasker/tools/bundles.py`, `cli/shell.py`,
+`tasker/modes/base.py`, `tasker/orchestrator/factory.py`,
+`config/profiles/tier1_cloud_planner.yaml` (new),
+`tests/unit/test_tool_bundles.py` (new),
+`tests/unit/test_orchestrator_factory.py`, `tests/unit/test_setup_wizard.py`,
 `docs/TASKER_CHECKLIST.md`, `CLAUDE.md`.
 
 **Next task:** Phase 8.2 — Agentic Readiness Checker
 (`tasker/setup/readiness.py`, 3 probe rounds NATIVE→LFM25→JSON_EXTRACT,
 `tasker-setup --check-model <name>`, worker registry write on
 confirmation, `WorkerRole` assignment per B.4.6). Separately, still open:
-the empty-content bug itself (try `"think": false`); getting the full
-`cli.shell` pipeline to complete one real tool execution end-to-end (not
-just the direct provider+loop script); the model-doesn't-conclude-after-
-tool-result behavior; Phase 7.5.4 (`AmdApuBackend`, needs TASKER-P1); wire
-`ModeConfigurator.resolve_hardware_profile()` into `cli/shell.py`;
-generalize `run_tool_loop()` beyond `OllamaProvider` if/when
-Anthropic/OpenAI/Fugu need a multi-turn loop of their own.
+fix `worker_registry.yaml`'s missing `:cloud` suffixes (nemotron-3-ultra
+confirmed broken, others unverified); the empty-content bug itself remains
+unfixed (quantization and `think:false` both ruled out this session —
+still no confirmed lever); the model-doesn't-conclude-after-tool-result
+behavior; Tier 2's same-model-for-both-roles bug (`factory.py`, tier==2
+branch) plus `tier2_designlab.yaml`'s unread `planner_model`/
+`synthesizer_model` keys — the `orchestrator_compute_location` plumbing
+added this session would make this easier to fix now; wiring
+`OllamaCloudConcurrencyManager` to the orchestrator's `OllamaProvider`
+(cloud orchestrator calls currently proceed without slot-limiting); Phase
+7.5.4 (`AmdApuBackend`, needs TASKER-P1); wire
+`ModeConfigurator.resolve_hardware_profile()` into `cli/shell.py`.
 **Blockers:** None.
-**Open decisions:** `tool_result_role="user"` (the documented Ollama
-workaround) not separately live-tested — `"tool"` (the default) worked,
-so there was no failure forcing the workaround path; revisit if `"tool"`
-ever fails against a different model. AMD-APU tier-computation fallthrough
-still untested against real hardware — revisit once 7.5.4 lands on
-TASKER-P1. `worker_role` is still a schema addition only — no code
-assigns it yet; that's Phase 8.2's job per B.4.6's rules.
+**Open decisions:** Whether to make `tier1_cloud_planner` the default
+profile going forward, or keep it opt-in alongside `tier1_tasker` — not
+decided this session, both configs exist and work. `tool_result_role="user"`
+still not separately live-tested. AMD-APU tier-computation fallthrough
+still untested against real hardware.
 
-**Live model config (tier1_tasker):**
-- Orchestrator: `lfm2.5-thinking:latest` (local, 1.2B — was `qwen3:1.7b`, not installed)
-- Worker: `lfm2.5-thinking:latest` (local, 1.2B — `tool_protocol: lfm25`, was
-  incorrectly `native`; was `lfm2.5:latest`, not installed)
+**Live model config:**
+- `tier1_tasker` (default): orchestrator + worker both
+  `lfm2.5-thinking:latest` (local Q4, 1.2B).
+- `tier1_cloud_planner` (new, opt-in): orchestrator `gpt-oss:120b-cloud`
+  (Ollama Cloud), worker `lfm2.5-thinking:latest` (local Q4, unchanged).
+  Requires `ollama signin`.

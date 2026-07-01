@@ -405,6 +405,104 @@ command in TESTING_GUIDE.md.
       `format_tool_result_message()` would need generalizing if/when
       those providers need a multi-turn loop of their own.
 
+## Step-Aware Tool Subsetting + Ollama-Cloud Planner
+
+Follow-on to "Multi-turn Tool Loop" above: live testing there proved
+quantization was never the real bottleneck (Q4/Q8/bf16 all failed
+identically once offered the full 7-tool `CODE_BUNDLE`), and that
+offering just the 1 tool a step actually needed was 100% reliable in
+every test. This closes that gap, plus lets planning use a stronger
+model without touching the local worker.
+
+- [x] `tasker/tools/bundles.py::narrow_bundle_to_step()` -- deterministic,
+      keyword-group-based narrowing (no LLM classification -- proven
+      unreliable for this same small model). Groups require ALL member
+      substrings present (any order) to match, not just a fixed phrase,
+      after live testing showed the planner paraphrases the same real
+      intent multiple ways across runs ("List files in current
+      directory" / "Listing files" / "List current directory files").
+      Safe fallback: no match returns the full bundle unchanged + logs a
+      WARNING, rather than guessing wrong.
+- [x] `cli/shell.py::_run_task()` computes tools per-step now (was: once,
+      constant, before the loop).
+- [x] `tests/unit/test_tool_bundles.py` (18 tests) -- per-tool keyword
+      matches, the exact real step descriptions and paraphrases observed
+      live, multi-keyword overlap, no-match fallback (`assertLogs`),
+      bundle-intersection correctness.
+- [x] Live-verified on Designlab1, Q4 (`lfm2.5-thinking:latest`), the
+      exact prompt that reliably failed last session
+      (`"Use the bash tool to list the files in the current directory"`):
+      0 of 3 completed runs hit the no-keyword-match fallback across 3
+      different planner paraphrases; one run completed with the exact
+      real directory listing as the final synthesized answer. The other
+      two hit `max_turns` (the separately-documented "model doesn't
+      conclude after a real tool result" quirk from last session, not a
+      narrowing failure -- both still executed real tools throughout).
+- [x] `HardwareProfile.orchestrator_compute_location: str = "local"` (new
+      optional field, `"local"` | `"ollama_cloud"`, parsed from a
+      profile's `orchestrator.compute_location` YAML key).
+- [x] `tasker/orchestrator/factory.py` -- `_build_orchestrator_manifest()`
+      and `_make_call_model()` now accept `compute_location`/
+      `privacy_tier` params (default unchanged: `LOCAL_HARDWARE`/
+      `LOCAL_ONLY`); `build_orchestrator()` branches on
+      `orchestrator_compute_location`. No new provider needed --
+      `OllamaProvider` already handles `OLLAMA_CLOUD` via the same
+      endpoint (SDD 5.6.1); still only ever resolves
+      `provider_registry[ProviderType.OLLAMA]`. Explicit user preference:
+      route through Ollama's own cloud (`:cloud`-tagged models), not a
+      third-party OpenAI-compatible router.
+- [x] New `config/profiles/tier1_cloud_planner.yaml` -- local Q4 worker
+      unchanged, orchestrator routed to `gpt-oss:120b-cloud`
+      (OpenAI's actual open-weight 120B release, hosted on Ollama Cloud;
+      confirmed live via `ollama show` to have a real 131072-token
+      context window -- `context_limit` set to match, not copied from
+      the local profile's 4096 CPU-RAM-driven value).
+- [x] `tests/unit/test_orchestrator_factory.py` -- 4 new tests
+      (`TestBuildOrchestratorCloudRouting`): local-default regression,
+      `ollama_cloud` manifest/privacy-tier wiring, still resolves
+      `ProviderType.OLLAMA` (no new provider type), missing-provider
+      fallback to `NanoOrchestrator`.
+- [x] Live-verified end-to-end on Designlab1: `ollama signin` completed
+      (this machine had no active session at session start -- confirmed
+      via a direct `:cloud` API call returning `"Unauthorized"`);
+      `gpt-oss:20b-cloud` and `gpt-oss:120b-cloud` both confirmed
+      reachable with real responses. A real planning call through
+      `SingleLLMOrchestrator` wired to `tier1_cloud_planner` produced a
+      clean, valid 3-step plan (`used_fallback=False`, no unrecognized
+      capability strings) -- visibly better structured than typical local
+      Q4 planning output. A full `python -m cli.shell --mode code` run
+      using this profile (cloud planner + local Q4 worker) completed with
+      the correct, real directory listing as its final answer.
+- [ ] **New, real, pre-existing bug found (not introduced or fixed this
+      session):** the cloud planner's richer plans assign `REASONING`/
+      `THINKING` capabilities the local worker doesn't declare, causing
+      `WorkerSelector` to fall through to `nemotron-3-ultra-cloud` for
+      those steps -- which fails instantly, because
+      `worker_registry.yaml`'s `model_id: "nemotron-3-ultra"` is missing
+      the `:cloud` suffix Ollama Cloud's actual tags require (confirmed:
+      `nemotron-3-ultra` alone returns `"model 'nemotron-3-ultra' not
+      found"`; `ollama.com/search?c=cloud` lists it as `nemotron-3-ultra`
+      but the real pullable/callable tag pattern, per every other cloud
+      model checked this session, needs the suffix). Likely affects
+      other cloud-routed worker registry entries too (glm-5.2, glm-5.1,
+      minimax-m3, kimi-k2.7-code) -- not verified individually, out of
+      scope for this session's plan.
+- [ ] Tier 2 (`DualLLMOrchestrator`) still gets the *same* `model_id` for
+      both its planner and synthesizer roles (`factory.py`'s
+      `build_orchestrator()`, tier==2 branch) despite the constructor
+      supporting two distinct models, and `tier2_designlab.yaml`'s
+      `planner_model`/`synthesizer_model` keys are still silently never
+      read by `HardwareProfile.orchestrator_model` (only a single
+      `model` key is parsed). Noted again this session (first found
+      while investigating the cloud-planner design); still not fixed --
+      the `orchestrator_compute_location` plumbing added this session
+      would make fixing this more straightforward whenever it's tackled.
+- [ ] `OllamaCloudConcurrencyManager` is not wired to the orchestrator's
+      `OllamaProvider` instance in `cli/shell.py` -- cloud orchestrator
+      calls proceed without slot-limiting (no `DEFERRED` possible). Known
+      gap, not fixed this session (out of scope: this work was about
+      model *choice*, not concurrency).
+
 ## Phase 8 -- Setup Wizard, Readiness Checker, TUI
 
 ### Phase 8.1 -- Setup Wizard (headless)
