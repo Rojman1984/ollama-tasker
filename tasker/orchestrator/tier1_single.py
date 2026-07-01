@@ -61,7 +61,11 @@ class SingleLLMOrchestrator(OrchestratorBase):
         raw = await self._call_model(_PLAN_SYSTEM, build_plan_prompt(task, classifier_output, available_workers))
         plan = _parse_plan(task, raw)
         if plan is None:
+            # _parse_plan already logged a WARNING with the raw response --
+            # here we just mark the resulting plan so callers/tests can tell
+            # "the model's real plan" apart from "the generic Nano template".
             plan = await self._fallback.plan(task, classifier_output, available_workers)
+            plan.used_fallback = True
         return plan
 
     async def synthesize(

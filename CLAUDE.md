@@ -347,107 +347,111 @@ python -m unittest tests.unit.test_orchestrator_nano -v
 
 *(Update this section at the end of every Cowork or Code session)*
 
-**Last worked on:** Phase 8.1 — headless setup wizard (`tasker/setup/`)
-and the `tasker-setup` CLI entry point, per `docs/SDD_ADDENDUM_PHASE8.md`.
-Explicitly did **not** start Phase 8.2 (readiness checker) or any TUI code
-this session — `tasker/tui/app.py` is a one-line stub only.
+**Last worked on:** Hardening `tasker/orchestrator/_parse.py`'s
+`parse_plan()` — this closes out the "known open issue, out of scope"
+note that had been carried across the LFM25, tool-bundle-wiring, and
+Phase 8.1 sessions (previously tracked in `docs/TASKER_CHECKLIST.md`'s
+Phase 7.5 section and in this file's own "Next task"/"still open"
+notes). **RESOLVED, not just documented.**
 
-**Mid-session detour, done first per an explicit interrupt:** appended two
-new sections to `docs/SDD_ADDENDUM_PHASE8.md` — B.4.6 (Role Assignment in
-Readiness Report: a new `WorkerRole` enum distinct from `AgentRole`) and a
-new B.6 (Model-Agnostic Design Principle, including a preview of a future
-DAEMON mode). Existing B.6–B.10 renumbered to B.7–B.11 (headings only, no
-other content touched). Added `WorkerRole` enum
-(`BACKGROUND_AGENT`/`EXECUTION_WORKER`/`REASONING_WORKER`/`ORCHESTRATOR`)
-and `WorkerManifest.worker_role: list[WorkerRole]` (defaults to `[]`) to
-`tasker/workers/base.py`, serialized in `to_dict()`/`from_dict()`, with new
-round-trip tests. This field is unused by anything yet — the Phase 8.2
-readiness checker is what will populate it.
+**The bug:** `parse_plan()` built each step's capability set with a bare
+set comprehension (`{Capability(c) for c in item.get("capabilities", ...)}`)
+inside the function's single outer `try` block. Any one invalid capability
+string anywhere in the model's plan raised `ValueError`, which propagated
+out of the whole parsing loop and was caught by the blanket
+`except (..., ValueError)`, discarding the ENTIRE plan — including every
+correctly-parsed step — in favor of `NanoOrchestrator`'s generic
+single/double-step template, silently and with no logging.
 
-**Provenance note on `docs/SDD_ADDENDUM_PHASE8.md` itself:** the file
-arrived owned by `root` with a Windows `Zone.Identifier` (`ZoneId=3`,
-i.e. downloaded from the internet) — unusual provenance for a repo file.
-Content was verified content-coherent with the actual current codebase
-(correct field names, correct existing function references matching real
-code) before treating it as legitimate reference material; most likely the
-user drafted/generated it in a browser session elsewhere and copied it in.
-Flagged to the user at the time; no injection-style content found.
+**The fix (`tasker/orchestrator/_parse.py`):** added
+`_resolve_step_capabilities()`, which resolves each step's raw capability
+strings independently: known near-misses (`CAPABILITY_ALIASES` — evidence-
+based, small: `"tool_execution"→TOOL_USE`, `"code_execution"→CODE`,
+`"search_web"→SEARCH`) are silently corrected with no warning; anything
+still unmatched is dropped from *that step only* and logged as a WARNING
+(bad string, step index, full raw response) — the rest of the plan
+(other steps, other capabilities) is untouched. A step left with zero
+valid capabilities still gets `{TOOL_USE}` via the pre-existing
+unconditional default. `parse_plan()` now only returns `None` — triggering
+a caller's fallback — when the response fails to parse as a valid plan
+structure at all (bad JSON, not a list, empty, missing keys); that path
+now also logs a WARNING with the raw response (previously silent).
+`ExecutionPlan` gained `used_fallback: bool = False` (serialized in
+`to_dict`/`from_dict`) so callers/tests can assert directly whether a plan
+is the model's real plan or Nano's template. `tier1_single.py`'s
+`SingleLLMOrchestrator.plan()` now sets `used_fallback = True` on the
+`ExecutionPlan` it gets back from `NanoOrchestrator` only when it actually
+falls back. `tier0_rules.py`/`tier2_dual.py`/`tier3_reasoning.py`/
+`tier4_cloud.py` were deliberately left untouched (not in scope; they call
+the same shared `parse_plan()` and already benefit from the per-step
+recovery, but only `tier1_single.py` — "the primary caller" — was asked
+to surface `used_fallback`).
 
-**New: `tasker/setup/environment.py`** — `is_wsl2()` (`/proc/version`
-contains "microsoft"/"wsl"), `check_python()`, `check_venv()` (warns, never
-blocks), `check_ollama_binary()`, `check_ollama_version()`,
-`check_ollama_service()` (WSL2 vs systemd vs no-systemd remediation
-messages, never auto-starts Ollama).
+**Tests:** new `tests/unit/test_orchestrator_parse.py` (9 tests): valid
+plan (no warnings, `used_fallback=False`); one bad capability among valid
+ones (plan preserved, WARNING with bad string + step index, still
+`used_fallback=False` — the core regression test); alias match (silent,
+no warning); all-steps-zero-valid-capabilities (each defaults to
+`TOOL_USE`, one warning per step); malformed/empty response (`None`,
+WARNING with raw response); and, via `SingleLLMOrchestrator`, the same
+malformed case showing `used_fallback=True`. Existing
+`test_orchestrator_single.py` tests unchanged and still pass. Full suite:
+428/428 → 437/437.
 
-**New: `tasker/setup/wizard.py`** — `StepStatus`/`WizardStepResult` (per
-B.3.3), `run_wizard()` (7 steps), `cli_main()`. Steps never abort early —
-even an ERROR/`can_continue=False` step (e.g. Ollama unreachable) still
-lets every later step run and report, so the user sees the full picture in
-one pass. Step 4 (GPU verification) is `SKIPPED`, not `ERROR`, for both
-"no GPU" and "no model loaded" — reuses `NvidiaBackend.verify_live()`
-directly rather than re-implementing `/api/ps` parsing. Step 5 deliberately
-reaches into `tasker.config.detect`'s private cache-writing helpers
-(`_CACHE_PATH`, `_build_cache_dict`, `_run_live_detection`) rather than
-duplicating the A.3.3 schema a second time. Step 6 flags
-`tool_protocol: native` workers whose `model_id` contains "lfm2.5" as
-needing `lfm25` instead (A.2b) — the *current* real registry already has
-none (already fixed in the LFM25 session), so this only fires on
-hypothetically-misconfigured entries; a lightweight VRAM-cross-check note
-also fires for `requires_gpu=true` workers, explicitly deferring the full
-A.3.4 margin-subtraction algorithm to Phase 7.5.6 rather than
-reimplementing it here.
+**Live verification against `lfm2.5-thinking:latest` on Designlab1:**
+reproduced the exact real-world bug repeatedly — the model returned
+invalid capability strings `"bash"`, `"ls"`, `"list_files"`, `"file_list"`,
+`"code review"`, `"bug detection"`, `"bug_fix"` across separate live
+calls for the prompt `"Use the bash tool to list the files in the current
+directory"` and a longer multi-step coding prompt. **Before this fix**,
+any one of these would have collapsed the plan to Nano's generic template
+(e.g. `"Answer the task"` or the CODING template's `"Analyze the coding
+task and plan the implementation"` / `"Implement the solution"`), losing
+the model's real step description entirely and with no log trace. **After
+the fix**, every one of these runs preserved the model's own real step
+description (e.g. `"Analyzing code for bugs"`, `"List files in current
+directory"`) with `used_fallback=False`, and each bad capability string
+was logged as a WARNING with its step index and the raw response. Ran the
+same `python -m cli.shell --mode code "Use the bash tool to list the
+files in the current directory"` command originally used to surface this
+bug: the WARNING now appears in the CLI's output where before there was
+only silent generic fallback.
 
-**Step 7 deliberately diverges from the addendum's own B.3.2 text:** B.3.2
-defines wizard Step 7 as "Model selector + agentic readiness" (→ B.4), but
-that's Phase 8.2 scope, explicitly excluded this session. This session's
-task instructions directly redefined Step 7 as a Summary step instead — implemented that way, documented as an intentional deviation (not a
-transcription error) in `wizard.py`'s module docstring.
+**Separate, still-open issue found (not fixed, out of scope for this
+session):** the full `cli.shell` invocation sometimes gets an *empty*
+`content` string back from `lfm2.5-thinking:latest` (not an invalid
+capability string — a totally empty response), which correctly triggers
+the genuinely-malformed-response path (`used_fallback=True`, WARNING
+logged — working as designed). A direct orchestrator→provider script
+(identical pipeline, bypassing only `cli/shell.py`'s print wrapper)
+reliably got non-empty content for the same prompt. Suspected cause: this
+"thinking" model sometimes exhausts its output budget inside the
+`<think>` reasoning block before emitting the final JSON `content` —
+unrelated to capability parsing. Logged in `docs/TASKER_CHECKLIST.md`
+under "Orchestrator Correctness" / the Phase 7.5 CLI-wiring note; not
+investigated further.
 
-`pyproject.toml`: added `textual>=0.70.0`; `tasker` entry point now points
-to `tasker.tui.app:main` (stub) instead of `cli.shell:main`; added
-`tasker-cli` (→ `cli.shell:main`, preserves the old default entry point
-under a new name — nothing about `cli/shell.py` itself changed);
-`tasker-setup` added.
-
-400/428 → 428/428: 28 new unit tests this session (13 in
-`test_environment.py`, 13 in `test_setup_wizard.py`, 2 new
-`WorkerManifest.worker_role` round-trip tests). All mocked — no live
-Ollama/subprocess/network calls, no writes to the real `.tasker/` cache
-during tests (confirmed via a temp-path-swap test and by checking the real
-cache file's mtime was untouched after the run).
-
-**Live headless run on Designlab1 (this machine), exactly as requested:**
-all 7 steps ran and printed cleanly, no unhandled exceptions. GPU step
-correctly showed `nvidia (NVIDIA GeForce GTX 1050 Ti, 4096MB)`. Worker
-registry step listed all 9 registered workers with protocol/availability.
-Step 4 correctly `SKIPPED` (no model loaded at run time). Full output
-recorded in `docs/TASKER_CHECKLIST.md`. **Did not** run on TASKER-P1 — no
-access to that machine from this session; left unchecked in the checklist
-rather than fabricated.
-
-**Last file modified:** `docs/SDD_ADDENDUM_PHASE8.md`,
-`tasker/workers/base.py`, `tasker/setup/__init__.py` (new),
-`tasker/setup/environment.py` (new), `tasker/setup/wizard.py` (new),
-`tasker/tui/__init__.py` (new), `tasker/tui/app.py` (new),
-`pyproject.toml`, `docs/TASKER_CHECKLIST.md`, `CLAUDE.md`,
-`tests/unit/test_environment.py` (new), `tests/unit/test_setup_wizard.py`
-(new), `tests/unit/test_worker_manifest.py`.  
+**Last file modified:** `tasker/orchestrator/_parse.py`,
+`tasker/orchestrator/tier1_single.py`, `tasker/workers/base.py`,
+`tests/unit/test_orchestrator_parse.py` (new), `docs/TASKER_CHECKLIST.md`,
+`CLAUDE.md`.
 **Next task:** Phase 8.2 — Agentic Readiness Checker
 (`tasker/setup/readiness.py`, 3 probe rounds NATIVE→LFM25→JSON_EXTRACT,
 `tasker-setup --check-model <name>`, worker registry write on
-confirmation, `WorkerRole` assignment per B.4.6). Separately, still open
-from prior sessions: Phase 7.5.4 (`AmdApuBackend`, needs TASKER-P1); wire
-`ModeConfigurator.resolve_hardware_profile()` into `cli/shell.py`; harden
-`parse_plan()`'s capability-string handling; build the multi-turn
-tool-result loop to unblock `tool_result_role` testing.  
-**Blockers:** None.  
-**Open decisions:** `tool_result_role` default (`"tool"`) still unvalidated
-— needs the multi-turn loop. AMD-APU tier-computation fallthrough still
-untested against real hardware — revisit once 7.5.4 lands on TASKER-P1.
-`worker_role` is a schema addition only this session — no code assigns it
-yet; that's Phase 8.2's job per B.4.6's rules.  
+confirmation, `WorkerRole` assignment per B.4.6). Separately, still open:
+Phase 7.5.4 (`AmdApuBackend`, needs TASKER-P1); wire
+`ModeConfigurator.resolve_hardware_profile()` into `cli/shell.py`; build
+the multi-turn tool-result loop to unblock `tool_result_role` testing; the
+newly-found empty-`content` flakiness in `cli.shell`'s live model calls
+(see above).
+**Blockers:** None.
+**Open decisions:** `tool_result_role` default (`"tool"`) still
+unvalidated — needs the multi-turn loop. AMD-APU tier-computation
+fallthrough still untested against real hardware — revisit once 7.5.4
+lands on TASKER-P1. `worker_role` is still a schema addition only — no
+code assigns it yet; that's Phase 8.2's job per B.4.6's rules.
 
-**Live model config (tier1_tasker):**  
-- Orchestrator: `lfm2.5-thinking:latest` (local, 1.2B — was `qwen3:1.7b`, not installed)  
+**Live model config (tier1_tasker):**
+- Orchestrator: `lfm2.5-thinking:latest` (local, 1.2B — was `qwen3:1.7b`, not installed)
 - Worker: `lfm2.5-thinking:latest` (local, 1.2B — `tool_protocol: lfm25`, was
   incorrectly `native`; was `lfm2.5:latest`, not installed)

@@ -9,6 +9,7 @@ See SDD Section 5.3.
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 
 from tasker.workers.base import (
@@ -22,6 +23,18 @@ from tasker.workers.base import (
     WorkerManifest,
     WorkerResult,
 )
+
+logger = logging.getLogger(__name__)
+
+# Near-miss capability strings caught in live end-to-end CLI testing (not
+# speculative) -- models occasionally emit these instead of the exact
+# Capability enum value. Silently normalized, no warning: this is expected
+# tolerance, not an error condition. Keep small and evidence-based.
+CAPABILITY_ALIASES: dict[str, Capability] = {
+    "tool_execution": Capability.TOOL_USE,
+    "code_execution": Capability.CODE,
+    "search_web": Capability.SEARCH,
+}
 
 # --------------------------------------------------------------------------- #
 # System prompts
@@ -84,15 +97,55 @@ def build_retry_prompt(plan: ExecutionPlan, failed_step: WorkerResult) -> str:
 # Parsers
 # --------------------------------------------------------------------------- #
 
+def _resolve_step_capabilities(raw_caps, step_index: int, raw_response: str) -> set[Capability]:
+    """
+    Resolve a step's raw capability strings to Capability enum members.
+
+    A string that fails to match the enum is first checked against
+    CAPABILITY_ALIASES (silent normalization, no warning -- expected). If it
+    matches neither, it is dropped from this step's set and a WARNING is
+    logged with the bad string, the step index, and the raw model response --
+    but the rest of the plan (including other steps' capabilities) is left
+    untouched. If a step ends up with zero valid capabilities, the caller's
+    unconditional `caps.add(Capability.TOOL_USE)` provides the default.
+    """
+    resolved: set[Capability] = set()
+    for c in raw_caps:
+        try:
+            resolved.add(Capability(c))
+            continue
+        except ValueError:
+            pass
+        alias = CAPABILITY_ALIASES.get(c)
+        if alias is not None:
+            resolved.add(alias)
+            continue
+        logger.warning(
+            "parse_plan: step %d has unrecognized capability %r -- dropping it "
+            "from this step (plan otherwise preserved). Raw model response: %s",
+            step_index, c, raw_response,
+        )
+    return resolved
+
+
 def parse_plan(task: str, raw: str) -> ExecutionPlan | None:
-    """Parse a model's JSON plan response into an ExecutionPlan. Returns None on error."""
+    """
+    Parse a model's JSON plan response into an ExecutionPlan. Returns None
+    only when the response fails to parse as a valid plan structure at all
+    (not valid JSON, not a list, empty, or missing required keys) -- that is
+    the sole case that should trigger a caller's fallback to NanoOrchestrator.
+    An unrecognized capability string inside an otherwise-valid step is
+    handled per-step by _resolve_step_capabilities and never discards the
+    rest of the plan.
+    """
     try:
         data = json.loads(raw.strip())
         if not isinstance(data, list) or not data:
             return None
         steps = []
         for i, item in enumerate(data):
-            caps = {Capability(c) for c in item.get("capabilities", ["tool_use"])}
+            raw_caps = item.get("capabilities", ["tool_use"])
+            caps = _resolve_step_capabilities(raw_caps, i, raw)
             caps.add(Capability.TOOL_USE)
             steps.append(
                 PlanStep(
@@ -109,8 +162,14 @@ def parse_plan(task: str, raw: str) -> ExecutionPlan | None:
             original_task=task,
             steps=steps,
             dependency_graph={s.index: s.depends_on for s in steps},
+            used_fallback=False,
         )
-    except (json.JSONDecodeError, KeyError, ValueError):
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+        logger.warning(
+            "parse_plan: response failed to parse as a valid plan structure; "
+            "falling back to NanoOrchestrator template. Raw response: %s",
+            raw,
+        )
         return None
 
 

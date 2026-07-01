@@ -387,6 +387,11 @@ class ExecutionPlan:
     original_task: str
     steps: list[PlanStep]
     dependency_graph: dict[int, list[int]]  # step_index → [blocking step indices]
+    # True only when this plan is NanoOrchestrator's generic template standing
+    # in for a model's real plan because the model's response failed to parse
+    # at all. False for a plan produced by any orchestrator running as the
+    # primary tier (including NanoOrchestrator itself at Tier 0).
+    used_fallback: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -394,6 +399,7 @@ class ExecutionPlan:
             "original_task": self.original_task,
             "steps": [s.to_dict() for s in self.steps],
             "dependency_graph": {str(k): v for k, v in self.dependency_graph.items()},
+            "used_fallback": self.used_fallback,
         }
 
     @classmethod
@@ -403,6 +409,7 @@ class ExecutionPlan:
             original_task=data["original_task"],
             steps=[PlanStep.from_dict(s) for s in data["steps"]],
             dependency_graph={int(k): v for k, v in data["dependency_graph"].items()},
+            used_fallback=data.get("used_fallback", False),
         )
 
 

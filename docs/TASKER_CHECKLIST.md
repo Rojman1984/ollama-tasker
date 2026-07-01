@@ -208,31 +208,69 @@ command in TESTING_GUIDE.md.
       Confirmed live: task.tools had 7 entries (bash, code_search, file_read,
       file_write, git, linter, test_runner) for CODE mode, reaching
       OllamaProvider correctly.
-- [ ] First real tool call through harness confirmed end-to-end -- NOT
-      checked: `python -m cli.shell --mode code "Use the bash tool to list
-      the files in the current directory"` fell back to a generic "Answer
-      the task" plan step in 4/4 runs, never reaching the real instruction.
-      Root cause (separate, pre-existing bug, not LFM25/this session's
-      wiring fix): SingleLLMOrchestrator.plan() asks the model for a JSON
-      plan; lfm2.5-thinking:latest sometimes returns a capability string
-      outside the Capability enum (observed: "bash" instead of "tool_use"),
-      which makes tasker/orchestrator/_parse.py's parse_plan() fail and
-      silently fall back to NanoOrchestrator's hardcoded single-step
-      "Answer the task" template -- the worker never sees the real task text
-      when this happens. Confirmed directly: calling the orchestrator's
-      planning prompt against the real model reproduced the exact invalid
-      "bash" capability string and the exact fallback description. When the
-      planning step *does* succeed (confirmed once via a direct
-      orchestrator->provider script, bypassing cli/shell.py's print
-      wrapper but using the identical pipeline), the real task reached the
-      worker and LFM25 fired a real, correctly-parsed tool call end-to-end
-      (picked the wrong tool, test_runner instead of bash, but the
-      protocol mechanics -- inject_tools, JSON response, extract_tool_calls,
-      WorkerResult.tool_results -- all worked correctly). So: LFM25 itself
-      is validated working; the harness-level "first real tool call"
-      milestone is blocked on hardening parse_plan()/the planning prompt to
-      stop silently discarding the user's task on a capability-string
-      mismatch, not on anything in this session's changes.
+- [x] parse_plan() capability-string hardening (see "Orchestrator
+      Correctness" section below) -- RESOLVED the silent-fallback bug
+      described in the (now-superseded) note that used to live here: a
+      single invalid capability string (observed live: "bash", "ls",
+      "list_files", "file_list", "code review", "bug detection", "bug_fix"
+      across repeated runs of lfm2.5-thinking:latest) no longer collapses
+      an otherwise-valid multi-step plan into NanoOrchestrator's generic
+      template. Per-step recovery + CAPABILITY_ALIASES + WARNING logging
+      implemented in tasker/orchestrator/_parse.py; ExecutionPlan gained
+      `used_fallback: bool`.
+- [ ] First real tool call through harness confirmed fully end-to-end via
+      `python -m cli.shell` itself -- separate, still-open flakiness
+      unrelated to parse_plan(): live testing while fixing the capability
+      bug showed the full `cli.shell` invocation sometimes gets an EMPTY
+      `content` string back from lfm2.5-thinking:latest (correctly
+      triggers the genuinely-malformed-response fallback path, now
+      logged/flagged via `used_fallback=True`, working as designed) even
+      though a direct orchestrator->provider script (identical pipeline,
+      bypassing only cli/shell.py's print wrapper) reliably gets non-empty
+      content back for the same prompt. Suspected cause: this "thinking"
+      model sometimes exhausts its output budget inside the `<think>`
+      reasoning block before emitting the final JSON `content`, which is
+      unrelated to tool-calling/capability parsing. Not investigated
+      further this session -- out of scope for the parse_plan() fix.
+
+## Orchestrator Correctness
+
+- [x] tasker/orchestrator/_parse.py::parse_plan() no longer discards an
+      entire valid plan because ONE step had an unrecognized capability
+      string. Per-step recovery: unrecognized strings are checked against
+      a small, evidence-based `CAPABILITY_ALIASES` dict (silent
+      normalization, no warning -- e.g. "tool_execution" -> TOOL_USE);
+      anything still unmatched is dropped from that step with a WARNING
+      log (bad string, step index, full raw response) while the rest of
+      the plan (other steps, other capabilities) is left untouched. A
+      step left with zero valid capabilities still gets `{TOOL_USE}` via
+      the existing unconditional default. Only a response that fails to
+      parse as valid plan JSON/structure at all (not valid JSON, not a
+      list, empty, or missing required keys) returns None and triggers
+      the caller's fallback to NanoOrchestrator -- that case now also
+      logs a WARNING with the raw response.
+- [x] `ExecutionPlan.used_fallback: bool` field added (default False,
+      serialized in to_dict/from_dict) so callers/tests can assert
+      whether a plan is the model's real plan or NanoOrchestrator's
+      generic template, instead of inferring it from step count.
+      `SingleLLMOrchestrator.plan()` (tier1_single.py) sets it True only
+      when it actually falls back.
+- [x] tests/unit/test_orchestrator_parse.py -- valid plan (no warnings,
+      used_fallback=False), one bad capability among valid ones (plan
+      preserved, WARNING logged, used_fallback=False), alias match
+      (silent, no warning), all-steps-zero-valid-capabilities (each
+      defaults to TOOL_USE, one warning per step), malformed/empty
+      response (None returned, WARNING logged, and via
+      SingleLLMOrchestrator: used_fallback=True). Existing
+      test_orchestrator_single.py tests unchanged and still passing.
+- [x] Live-verified against lfm2.5-thinking:latest on Designlab1 (see
+      CLAUDE.md Current Session Notes for the exact before/after step
+      counts and warning output) -- repeatedly reproduced the real-world
+      invalid capability strings ("bash", "ls", "list_files",
+      "file_list", "code review", "bug detection", "bug_fix") and
+      confirmed the model's actual step description/count is now
+      preserved with `used_fallback=False`, instead of collapsing to
+      NanoOrchestrator's generic template as it did before this fix.
 
 ## Phase 8 -- Setup Wizard, Readiness Checker, TUI
 
