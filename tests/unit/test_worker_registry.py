@@ -3,6 +3,8 @@ Unit tests -- WorkerRegistry (tasker/workers/registry.py)
 Phase 1 -- SDD Section 5.4
 """
 import unittest
+from pathlib import Path
+
 from tasker.workers.registry import WorkerRegistry
 from tasker.workers.base import (
     Capability,
@@ -12,6 +14,10 @@ from tasker.workers.base import (
     ProviderType,
     ToolProtocol,
     WorkerManifest,
+)
+
+_REAL_REGISTRY_YAML = (
+    Path(__file__).parent.parent.parent / "config" / "workers" / "worker_registry.yaml"
 )
 
 
@@ -112,6 +118,58 @@ class TestWorkerRegistry(unittest.TestCase):
 
     def test_health_check_missing_worker(self):
         self.assertFalse(self.registry.health_check("missing"))
+
+
+class TestRealWorkerRegistryYaml(unittest.TestCase):
+    """
+    Regression coverage against the REAL config/workers/worker_registry.yaml
+    (not a synthetic fixture) -- Ollama Cloud requires a ":cloud" suffix on
+    model_id to route to cloud infrastructure rather than being interpreted
+    as a local model pull request. Confirmed live: a bare model_id (e.g.
+    "nemotron-3-ultra") returns {"error": "model '...' not found"}, while
+    the ":cloud"-suffixed form returns a real response. All 5
+    compute_location: ollama_cloud entries were missing this suffix and
+    were fixed in the same change that added this test -- this guards
+    against that specific class of bug silently reappearing.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.registry = WorkerRegistry.load_from_yaml(_REAL_REGISTRY_YAML)
+
+    def test_registry_file_loads_at_least_one_worker(self):
+        # Sanity check that the file actually parsed -- load_from_yaml
+        # silently swallows per-entry errors, so an empty result here
+        # would otherwise mask every other assertion in this class.
+        self.assertGreater(len(self.registry.list_all()), 0)
+
+    def test_every_ollama_cloud_worker_has_cloud_suffix(self):
+        cloud_workers = [
+            m for m in self.registry.list_all()
+            if m.compute_location == ComputeLocation.OLLAMA_CLOUD
+        ]
+        self.assertGreater(
+            len(cloud_workers), 0,
+            "expected at least one ollama_cloud worker in the real registry -- "
+            "if this fails, the test itself may need updating, not the registry",
+        )
+        for m in cloud_workers:
+            self.assertTrue(
+                m.model_id.endswith(":cloud"),
+                f"worker {m.id!r} has compute_location=OLLAMA_CLOUD but "
+                f"model_id={m.model_id!r} is missing the required ':cloud' suffix",
+            )
+
+    def test_local_and_direct_cloud_workers_do_not_require_cloud_suffix(self):
+        # The suffix is Ollama-Cloud-specific -- local_hardware/direct_cloud
+        # (Anthropic/OpenAI/Fugu) entries must be untouched by this fix.
+        non_ollama_cloud = [
+            m for m in self.registry.list_all()
+            if m.compute_location != ComputeLocation.OLLAMA_CLOUD
+        ]
+        self.assertGreater(len(non_ollama_cloud), 0)
+        for m in non_ollama_cloud:
+            self.assertFalse(m.model_id.endswith(":cloud"))
 
 
 if __name__ == "__main__":

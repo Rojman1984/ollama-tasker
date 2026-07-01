@@ -23,7 +23,7 @@ workers:
 
   - id: nemotron-3-ultra-cloud
     provider: ollama
-    model_id: "nemotron-3-ultra"
+    model_id: "nemotron-3-ultra:cloud"
     compute_location: ollama_cloud
     capabilities: [tool_use, reasoning, thinking, code]
     tool_protocol: native
@@ -36,7 +36,7 @@ workers:
 
   - id: glm-5.2-cloud
     provider: ollama
-    model_id: "glm-5.2"
+    model_id: "glm-5.2:cloud"
     compute_location: ollama_cloud
     capabilities: [tool_use, thinking, reasoning]
     tool_protocol: native
@@ -49,7 +49,7 @@ workers:
 
   - id: glm-5.1-cloud
     provider: ollama
-    model_id: "glm-5.1"
+    model_id: "glm-5.1:cloud"
     compute_location: ollama_cloud
     capabilities: [tool_use, code, thinking]
     tool_protocol: native
@@ -62,7 +62,7 @@ workers:
 
   - id: minimax-m3-cloud
     provider: ollama
-    model_id: "minimax-m3"
+    model_id: "minimax-m3:cloud"
     compute_location: ollama_cloud
     capabilities: [tool_use, vision, thinking, long_context]
     tool_protocol: native
@@ -75,7 +75,7 @@ workers:
 
   - id: kimi-k2.7-code-cloud
     provider: ollama
-    model_id: "kimi-k2.7-code"
+    model_id: "kimi-k2.7-code:cloud"
     compute_location: ollama_cloud
     capabilities: [tool_use, code, vision, thinking]
     tool_protocol: native
