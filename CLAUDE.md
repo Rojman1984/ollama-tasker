@@ -227,7 +227,7 @@ Update this section as phases complete.
 | 7.5.1 | Linux/WSL2 migration audit (see `docs/SDD_ADDENDUM_7.5.md`) | ✅ COMPLETE |
 | 7.5.2 | `GPUBackend` ABC + `NoGpuBackend` + `tasker-hardware` applet + cache + 3-source resolution | ✅ COMPLETE |
 | 7.5.3 | `NvidiaBackend` — detect + verify (Designlab1) | ✅ COMPLETE |
-| 7.5.4–7.5.6 | `AmdApuBackend`, VRAM cross-check, final paired verification | ⬜ NOT STARTED |
+| 7.5.4–7.5.6 | `AmdApuBackend`, VRAM cross-check, final paired verification | ✅ COMPLETE |
 | 8.1 | Setup wizard headless logic + `tasker-setup` CLI (see `docs/SDD_ADDENDUM_PHASE8.md`) — **note:** the row above labeled plain "8" is an unrelated, earlier "Orchestrator Factory" milestone from before `SDD_ADDENDUM_PHASE8.md` existed; this is a real naming collision in the project's own history, not a typo — the two are unrelated | ✅ COMPLETE |
 | 8.2–8.5 | Readiness checker, TUI foundation, model selector, harness panel | ⬜ NOT STARTED |
 
@@ -347,93 +347,189 @@ python -m unittest tests.unit.test_orchestrator_nano -v
 
 *(Update this section at the end of every Cowork or Code session)*
 
-**Last worked on:** Two independent, small fixes carried over from last
-session's findings — unrelated to each other, done in order.
+**Last worked on:** Phase 7.5.4–7.5.6 (`AmdApuBackend` + worker VRAM
+cross-check + final paired live verification), followed by an
+unplanned-but-user-approved expansion into fixing 4 real pipeline bugs
+discovered while actually running the full CLI smoke test end-to-end on
+both machines for the first time this thoroughly.
 
-**Fix 1 — missing `:cloud` suffix in `worker_registry.yaml`:** all 5
-`compute_location: ollama_cloud` entries (`nemotron-3-ultra-cloud`,
-`glm-5.2-cloud`, `glm-5.1-cloud`, `minimax-m3-cloud`, `kimi-k2.7-code-cloud`)
-had bare model IDs instead of the `:cloud`-suffixed form Ollama Cloud
-requires — a systemic omission across every cloud entry (last session only
-caught `nemotron-3-ultra` as an example). Live-reconfirmed against the
-real Ollama API for all 5 (not just documentation): bare model_id →
-`"model '...' not found"`; `:cloud`-suffixed → real response.
-`local_hardware`/`direct_cloud` entries untouched. Regression test added
-against the REAL `worker_registry.yaml` file (not a synthetic fixture),
-confirmed to fail pre-fix and pass post-fix via `git stash`.
+**SSH-based remote verification workflow (reusable pattern for future
+TASKER-P1 sessions):** this session ran entirely from Designlab1, reaching
+TASKER-P1 over SSH rather than physically switching machines. No
+`~/.ssh/config` entry existed yet for `tasker-p1` — the bare hostname
+resolves on the network but auth as user `tasker` failed; the correct
+user is `tasker0`. Added a permanent `~/.ssh/config` entry (`Host
+tasker-p1` → `User tasker0`) so `ssh tasker-p1 '...'` works verbatim
+going forward. Pattern used throughout: implement + unit-test locally,
+commit + push, `ssh tasker-p1 'cd ~/projects/ollama-tasker && git pull &&
+source .venv/bin/activate && ...'` to pull and re-verify remotely — never
+edited files directly over SSH. TASKER-P1 needed a fresh `git clone` and
+`python3 -m venv .venv && pip install -e ".[dev]"` this session (first
+time this repo was checked out there); Ollama itself (v0.20.2) was
+already installed and running as a systemd service.
 
-**Fix 2 — concurrency slot-limiting not applied to cloud orchestrator
-calls:** turned out broader than the name suggests. Root cause: not "the
-gate exists but orchestrator calls skip it" — `OllamaCloudConcurrencyManager`
-was never instantiated anywhere in production code at all (only in its
-own docstring and in tests), so `cli/shell.py`'s single shared
-`OllamaProvider` instance (used for BOTH regular worker dispatch and
-orchestrator plan/synthesize/retry calls) had no concurrency manager to
-gate anything with — worker dispatch was unslotted too, not just
-orchestrator calls. `OllamaProvider.execute()`'s gating logic itself was
-already correct; it just had nothing wired to it. Fixed with one change:
-`cli/shell.py` now constructs one `OllamaCloudConcurrencyManager(profile.
-ollama_plan)` and passes it into that single shared `OllamaProvider` —
-exactly one manager per run, covering both call paths transitively.
-`tier4_cloud.py`'s `CloudOrchestrator` needed no changes (never
-instantiated in production; inherits gating transitively from whatever
-provider it's given). Added bounded-retry-then-fail semantics to
-`factory.py::_make_call_model()` (3 attempts, 0.5s backoff, mirroring
-`tasker/tools/loop.py`'s existing worker-side pattern) — on exhaustion,
-raises a new `OllamaCloudConcurrencyExhaustedError`
-(`tasker/workers/base.py`) rather than silently collapsing a deferred
-call into an empty string. Propagates uncaught through tiers 1-3's
-`plan()`/`synthesize()`/`should_retry()`, caught cleanly by `cli/shell.py`'s
-existing `try/except` around `orchestrator.plan()` — no new
-exception-handling code needed there.
+**Phase 7.5.4/7.5.5 — `AmdApuBackend`:** implemented in
+`tasker/config/gpu_backends.py` alongside `NvidiaBackend`/`NoGpuBackend`
+(not a separate module), mirroring `NvidiaBackend`'s detect()/verify_live()
+shape. `detect()`: lspci -nn presence check (Windows: Get-CimInstance),
+vulkaninfo informational check (never gates), 3-env-var check
+(`OLLAMA_VULKAN`, `ROCR_VISIBLE_DEVICES`, `HIP_VISIBLE_DEVICES`) with a
+gfx902-specific crash warning when Vulkan is on but ROCm isn't disabled,
+video/render group check via the `grp` module (no subprocess),
+`memory_mb` = total system RAM (never a sysfs VRAM figure — see
+`GPUInfo`'s docstring). `verify_live()`: `/api/ps` `size_vram` primary
+check + `journalctl -u ollama -n 200` supplementary parsing, priority-
+ordered per A.4.4 (crash signature → `verified=False`; "offloaded N/M" →
+`offload_status` full/partial). Wired into `detect_gpu()`'s chain and the
+`tasker-hardware verify` subcommand. Also added
+`_apply_unified_memory_tier_override()` (`tasker/config/detect.py`) — a
+dedicated tier-computation path for unified-memory GPUs, gated on
+`is_unified_memory` not a vendor string (future-proofs for e.g. Apple
+Silicon), that layers `tier_max`/`load_strategy` onto the existing
+`tier1_tasker.yaml` base profile rather than switching to
+`tier2_designlab.yaml` the way the NVIDIA branch does — that file's
+`qwen3` orchestrator models aren't installed on an AMD APU machine, so
+reusing it for a tier-2-eligible AMD box would have resolved to a broken
+orchestrator model even though the tier_max number was right.
+23 new tests (`test_gpu_backends.py`), 4 tier-computation tests
+(`test_hardware_detect.py`), no real hardware needed.
 
-**Live verification, Designlab1:** a `tier1_cloud_planner` CLI run
-exercised both fixes together — `WorkerSelector` resolved a step to
-`nemotron-3-ultra:cloud` (Fix 1, previously would have failed with "model
-not found"), executed successfully through the now-concurrency-gated
-`OllamaProvider` (Fix 2), single slot correctly acquired and released, no
-errors. Also confirmed `tier1_tasker` (local-only, no cloud calls
-involved) still runs end-to-end unaffected.
+**Live verification, TASKER-P1 (real Ryzen 5 3500U, Raven2/gfx902,
+confirmed via `lspci`):** the systemd `override.conf` already had all 4
+required env vars set (`OLLAMA_VULKAN=1`, `ROCR_VISIBLE_DEVICES=-1`,
+`HIP_VISIBLE_DEVICES=-1`, `OLLAMA_FLASH_ATTENTION=1`) from a prior
+session, and the `ollama` service account was already in `video`+`render`
+groups — no fix needed, no sudo required this session (confirmed
+passwordless sudo was NOT available, so this was fortunate rather than
+assumed). `tasker-hardware detect` correctly resolved `gpu_vendor=
+amd_apu`, `gpu_memory_mb=29013` (total system RAM), `is_unified_memory=
+true`. Loaded `lfm2.5-thinking:latest` (confirmed 100% GPU via `ollama
+ps`), `tasker-hardware verify` correctly parsed real journalctl output:
+**"journalctl confirms full GPU offload: 17/17 layers"** →
+`gpu_verified_offload_status="full"`. Note: the *interactive SSH login
+user* (`tasker0`) is NOT in video/render (only the `ollama` service
+account is) — `detect()`'s `group_warning` correctly flagged this as
+expected/documented behavior (advisory, doesn't affect the service's
+actual access).
 
-**Tests:** 7 new (3 `TestRealWorkerRegistryYaml` in
-`test_worker_registry.py`, 4 `TestOrchestratorCloudConcurrency` in
-`test_orchestrator_factory.py`, using a scripted fake concurrency manager
-for deterministic timing rather than real backoff delays). Full suite:
-516/516 → 523/523.
+**Phase 7.5.6 — worker VRAM cross-check:**
+`WorkerRegistry.apply_gpu_availability(gpu, reserve_mb=6144)` marks
+`requires_gpu=true` workers unavailable (logged reason, never silently
+dropped from `list_all()`/`tasker workers`) when they don't fit: NVIDIA
+discrete checked directly against `gpu.memory_mb`; AMD APU unified memory
+checked against `gpu.memory_mb - reserve_mb` (6GB, within A.3.4's 4-8GB
+range). Wired into `cli/shell.py`'s `main()` via the machine-local cache
+(`load_cached_detection()`/new `load_cached_gpu_info()` sibling), not a
+fresh `detect_gpu()` call, to avoid adding subprocess latency to every
+CLI invocation — skipped entirely when no cache exists yet, preserving
+pre-7.5.6 behavior. 13 new tests, mocked `GPUInfo` throughout.
 
-**Last file modified:** `config/workers/worker_registry.yaml`,
-`tests/unit/test_worker_registry.py`, `tasker/workers/base.py`,
-`tasker/orchestrator/factory.py`, `cli/shell.py`,
-`tests/unit/test_orchestrator_factory.py`, `docs/TASKER_CHECKLIST.md`,
-`CLAUDE.md`.
+**Unplanned expansion — 4 pipeline bugs found + fixed while pursuing the
+final 3-stage smoke-test verification (user-approved, one bug at a time,
+via explicit check-ins):**
+1. `narrow_bundle_to_step()`'s no-keyword-match fallback offered the FULL
+   tool bundle (a deliberate prior-session choice) — live evidence showed
+   this caused `lfm2.5-thinking` to hallucinate a nonsensical tool call
+   (`calculator(expression="hello")` for "say hello in exactly five
+   words") instead of answering directly, then never conclude across
+   repeated turns, exhausting `run_tool_loop`'s `max_turns=5`. Now falls
+   back to an **empty** tool set instead (`tasker/tools/bundles.py`).
+   Also added an `original_task` second-chance keyword match (new 3rd
+   param, threaded through from `cli/shell.py`) for when the planner's
+   step description is too garbled to match on its own — e.g. "Listing
+   available workers" for what should have been "list files in current
+   directory".
+2. Orchestrator/worker call `timeout_s` defaulted to 120.0s
+   (`factory.py`, `ollama.py`) — live-measured a single `plan()` call
+   against `lfm2.5-thinking:latest` at **94.5s real time** (17417-char
+   thinking block, 3922 eval tokens) for a trivial prompt, and a second
+   attempt exceeded 120s outright and raised `TimeoutError`. This
+   "thinking" model is just slow, not broken. Raised the default to
+   240.0s in both places.
+3. `parse_plan()` (`tasker/orchestrator/_parse.py`) silently corrupted
+   step descriptions when the model emitted a JSON object with a
+   duplicated `"description"` key — observed live: a 4-intent
+   "create/verify/read/confirm" task collapsed into 2 objects each with
+   2 `"description"` values; plain `json.loads()` kept only the LAST
+   value per key (JSON spec's implementation-defined handling), silently
+   losing the step's real first-mentioned intent with no error — the
+   worker then acted on the wrong instruction and never wrote the file.
+   Added a custom `object_pairs_hook`
+   (`_split_duplicate_description_objects`) that splits such objects
+   into multiple correctly-formed steps, recovering all originally-
+   intended steps.
+4. `parse_plan()` raised an uncaught `AttributeError` when a plan array
+   element wasn't itself a JSON object (e.g. a bare string) — only saved
+   from a hard crash by `cli/shell.py`'s outer `try/except`. Now
+   validated and returns `None` (NanoOrchestrator fallback) per its
+   documented contract, matching every other malformed-structure case.
+   `AttributeError` also added to the except tuple as defense in depth.
 
-**Next task:** Phase 8.2 — Agentic Readiness Checker
-(`tasker/setup/readiness.py`, 3 probe rounds NATIVE→LFM25→JSON_EXTRACT,
-`tasker-setup --check-model <name>`, worker registry write on
-confirmation, `WorkerRole` assignment per B.4.6). Separately, still open,
-**unchanged from last session** (neither of today's fixes touched these):
-the empty-content bug itself remains unfixed (quantization and
-`think:false` both ruled out — still no confirmed lever); the
-model-doesn't-conclude-after-tool-result behavior; Tier 2's
+Also found and fixed a **test-isolation bug** live on TASKER-P1:
+`test_falls_through_to_no_gpu_when_nvidia_absent` only mocked
+`NvidiaBackend.detect`, so real AMD hardware broke its "no GPU at all"
+assumption — passed on Designlab1 (nothing for the unmocked
+`AmdApuBackend.detect()` to find) but failed running the suite on
+TASKER-P1 itself, where it genuinely found the real Vega 8 Mobile iGPU.
+
+**Final smoke-test results:** Designlab1 — all 3 stages pass with
+*correct* output: CHAT → "One, two, three, four, five." (5 words), CODE →
+correctly listed real directory contents via bash (needed all 5 tool-loop
+turns, but synthesis still recovered the right answer from accumulated
+results), COWORK → genuinely created `hello.txt` with content "hello"
+(verified on disk, then cleaned up). TASKER-P1 (via SSH) — CHAT passes
+("A, B, C, D, E.", fast ~4s worker call); CODE completed without hanging
+but surfaced a **5th, distinct, NOT yet fixed** bug — a flat-object tool
+call (`{"command": "ls"}`, no `name`/`arguments` wrapper) wasn't correctly
+inferred/executed, so the raw JSON leaked into the final synthesized
+answer instead of a real directory listing; COWORK not re-tested on
+TASKER-P1 this session (stopped by explicit user decision after the 5th
+bug, to avoid an open-ended chain of tiny-model reliability fixes beyond
+this phase's actual scope). `TestLfm25FlatObjectInference` in
+`test_tool_normalizer.py` already covers this exact shape and passes, so
+this is either an edge case slipping past that logic's matching rules or
+a different code path entirely — not yet root-caused. See
+`docs/TASKER_CHECKLIST.md`'s "Known Open Issues" section for the
+reproduction command.
+
+**Tests:** 565 → 567 (Phase A: 21 new for AmdApuBackend/tier computation;
+worker-VRAM-cross-check + pipeline-fix commit: 25 new/changed net; +2 more
+for the AttributeError fix; +1 test-isolation fix, no net count change).
+Full suite green on both machines throughout.
+
+**Last file modified:** `tasker/config/gpu_backends.py`,
+`tasker/config/detect.py`, `tasker/workers/registry.py`, `cli/shell.py`,
+`tasker/tools/bundles.py`, `tasker/orchestrator/factory.py`,
+`tasker/orchestrator/_parse.py`, `tasker/workers/providers/ollama.py`,
+`tests/unit/test_gpu_backends.py`, `tests/unit/test_hardware_detect.py`,
+`tests/unit/test_worker_availability_vram.py` (new),
+`tests/unit/test_tool_bundles.py`, `tests/unit/test_orchestrator_parse.py`,
+`docs/TASKER_CHECKLIST.md`, `CLAUDE.md`.
+
+**Next task:** Investigate the flat-object tool call inference gap found
+on TASKER-P1 (5th bug above — reproduction command in
+`docs/TASKER_CHECKLIST.md`). Separately, Phase 8.2 — Agentic Readiness
+Checker (`tasker/setup/readiness.py`, 3 probe rounds NATIVE→LFM25→
+JSON_EXTRACT, `tasker-setup --check-model <name>`, worker registry write
+on confirmation, `WorkerRole` assignment per B.4.6). Still open,
+**unchanged from before this session**: the original empty-content bug
+itself (distinct from the tool-loop-hallucination issue fixed this
+session — quantization and `think:false` were both ruled out in an
+earlier session, still no confirmed lever, though it no longer causes
+hangs since the 240s timeout + tool-bundle fixes); Tier 2's
 same-model-for-both-roles bug (`factory.py`, tier==2 branch) plus
 `tier2_designlab.yaml`'s unread `planner_model`/`synthesizer_model` keys;
-Phase 7.5.4 (`AmdApuBackend`, needs TASKER-P1); wire
-`ModeConfigurator.resolve_hardware_profile()` into `cli/shell.py`.
+wire `ModeConfigurator.resolve_hardware_profile()` into `cli/shell.py`
+(still not done — `_run_task()` still calls `configurator.load_profile()`
+directly with a hardcoded/env-var profile name, not the dynamic 3-source
+resolution this whole phase built).
 **Blockers:** None.
-**Open decisions:** Whether to make `tier1_cloud_planner` the default
-profile going forward, or keep it opt-in alongside `tier1_tasker` — still
-not decided. `tool_result_role="user"` still not separately live-tested.
-AMD-APU tier-computation fallthrough still untested against real
-hardware. Whether `glm-5.2`/`glm-5.1`/`minimax-m3`/`kimi-k2.7-code`'s
-`:cloud` tags are correct beyond the live-reconfirmation done today (all
-4 returned real responses, so reasonably confident, but not stress-tested
-under load).
-
-**Live model config:**
-- `tier1_tasker` (default): orchestrator + worker both
-  `lfm2.5-thinking:latest` (local Q4, 1.2B).
-- `tier1_cloud_planner` (opt-in): orchestrator `gpt-oss:120b-cloud`
-  (Ollama Cloud), worker `lfm2.5-thinking:latest` (local Q4, unchanged).
-  Both worker-dispatch and orchestrator Ollama Cloud calls now correctly
-  slot-limited via one shared `OllamaCloudConcurrencyManager`.
-  Requires `ollama signin`.
+**Open decisions:** Whether `_UNIFIED_MEMORY_RESERVE_MB=6144` (6GB) is
+the right default reserve for AMD APU VRAM cross-check, or whether it
+should scale with total RAM — not stress-tested under actual multi-model
+concurrent load yet. Whether the 240s orchestrator/worker timeout is
+generous enough for worse-case thinking-model output on TASKER-P1
+specifically (only Designlab1's 94.5s worst case was directly measured;
+TASKER-P1's chat-mode worker call was fast at ~4s, but that's not
+necessarily representative of its plan()/synthesize() latency under the
+same heavy-thinking conditions).

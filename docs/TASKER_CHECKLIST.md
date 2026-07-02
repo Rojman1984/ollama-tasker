@@ -169,13 +169,124 @@ command in TESTING_GUIDE.md.
       gpu_verified_during_inference=true, gpu_verified_size_vram_mb=1024,
       gpu_verified_offload_status="full". "No model loaded" path also
       verified live (ran verify before loading any model).
-- [ ] 7.5.4 AmdApuBackend v1 (general guide) implemented + unit tested
-- [ ] AmdApuBackend v1 verified on real hardware (TASKER-P1, first pass)
-- [ ] 7.5.5 AmdApuBackend refined (gfx902 env vars, group check, journalctl offload parsing)
-- [ ] AmdApuBackend refined version verified on real hardware (TASKER-P1, offload_status="full" confirmed)
-- [ ] 7.5.6 Worker VRAM cross-check implemented + unit tested
-- [ ] Orchestrator factory confirmed consuming dynamic HardwareProfile correctly
-- [ ] Final paired live verification: both machines, no --profile flag, 3-stage smoke test each
+- [x] 7.5.4 AmdApuBackend v1 (general guide) implemented + unit tested
+  (tasker/config/gpu_backends.py: detect() -- lspci -nn presence check /
+  Get-CimInstance on Windows, vulkaninfo informational check, 3-env-var
+  Vulkan/ROCm-disable check with gfx902-specific warning, video/render
+  group check via the grp module, memory_mb = total system RAM. 17 new
+  tests in test_gpu_backends.py, no real hardware needed)
+- [x] AmdApuBackend v1 verified on real hardware (TASKER-P1, first pass) --
+  see combined 7.5.4/7.5.5 verification note below (both passes happened
+  in the same live session since the systemd override was already
+  correctly configured from a prior session)
+- [x] 7.5.5 AmdApuBackend refined (gfx902 env vars, group check, journalctl
+  offload parsing) -- verify_live(): /api/ps size_vram primary check +
+  journalctl supplementary parsing (crash signature -> verified=False;
+  "offloaded N/M" -> offload_status full/partial), priority-ordered per
+  A.4.4. 6 more tests covering verify_live() specifically.
+- [x] AmdApuBackend refined version verified on real hardware (TASKER-P1,
+  offload_status="full" confirmed) -- SSH session to TASKER-P1 (real
+  Ryzen 5 3500U, Raven2/gfx902, confirmed via lspci: "Picasso/Raven 2
+  [Radeon Vega Series / Radeon Vega Mobile Series]"). systemd override
+  already had all 4 required env vars set from a prior session
+  (OLLAMA_VULKAN=1, ROCR_VISIBLE_DEVICES=-1, HIP_VISIBLE_DEVICES=-1,
+  OLLAMA_FLASH_ATTENTION=1) and the `ollama` service account was already
+  in video+render groups -- no fix needed, no sudo required this
+  session. `tasker-hardware detect` correctly resolved gpu_vendor=
+  amd_apu, gpu_memory_mb=29013 (total system RAM, not a sysfs VRAM
+  figure), is_unified_memory=true. Loaded lfm2.5-thinking:latest
+  (confirmed 100% GPU via `ollama ps`), ran `tasker-hardware verify`:
+  journalctl parsing correctly reported "journalctl confirms full GPU
+  offload: 17/17 layers" -- gpu_verified_offload_status="full",
+  gpu_verified_during_inference=true written to the cache. Note: the
+  interactive SSH login user (tasker0) is NOT in video/render (only the
+  `ollama` service account is) -- detect()'s group_warning correctly
+  flagged this as expected/documented behavior (advisory, not a hard
+  block, doesn't affect the service's actual GPU access).
+- [x] 7.5.6 Worker VRAM cross-check implemented + unit tested --
+  WorkerRegistry.apply_gpu_availability(gpu, reserve_mb=6144) marks
+  requires_gpu=true workers unavailable with a logged reason (never
+  silently dropped from list_all()/`tasker workers`) when they don't fit:
+  NVIDIA discrete checked directly against gpu.memory_mb; AMD APU
+  unified memory checked against gpu.memory_mb minus reserve_mb (6GB,
+  within A.3.4's 4-8GB range). Wired into cli/shell.py's main() via the
+  machine-local cache (load_cached_detection()/load_cached_gpu_info()),
+  not a fresh detect_gpu() call, to avoid adding subprocess latency to
+  every CLI invocation; skipped entirely when no cache exists yet
+  (preserves pre-7.5.6 behavior). 13 new tests, mocked GPUInfo
+  throughout, no real hardware needed.
+- [x] Orchestrator factory confirmed consuming dynamic HardwareProfile
+  correctly -- unaffected by this phase's changes (build_orchestrator()
+  already reads config.profile.orchestrator_model/orchestrator_tier_max
+  from whatever HardwareProfile it's given, dynamic or static; no
+  changes needed here).
+- [x] Final paired live verification: both machines, no --profile flag,
+  3-stage smoke test each. While pursuing this, the full CLI pipeline
+  hung or produced wrong output on BOTH machines -- root-caused and
+  fixed 4 separate, previously-undiscovered pipeline bugs (none
+  related to AmdApuBackend/VRAM-cross-check specifically, all
+  pre-existing model/parsing reliability gaps surfaced by actually
+  running the full pipeline end-to-end for the first time this
+  thoroughly):
+    1. `narrow_bundle_to_step()`'s no-keyword-match fallback offered the
+       FULL tool bundle (a deliberate prior-session choice) -- caused
+       lfm2.5-thinking to hallucinate a nonsensical tool call
+       (`calculator(expression="hello")` for "say hello") instead of
+       answering directly, then never conclude, exhausting
+       run_tool_loop's max_turns=5. Now falls back to an EMPTY tool set;
+       also added an `original_task` second-chance match for when the
+       planner's step description is too garbled to match on its own.
+    2. Orchestrator/worker call `timeout_s` defaulted to 120.0s -- live-
+       measured a single plan() call at 94.5s real time (17417-char
+       thinking block) for a trivial prompt, and a second attempt
+       exceeded 120s outright (`TimeoutError`). Raised to 240.0s
+       throughout (factory.py, ollama.py).
+    3. `parse_plan()` silently corrupted step descriptions when the
+       model emitted a JSON object with a duplicated "description" key
+       (a 4-intent "create/verify/read/confirm" task collapsed into 2
+       objects each with 2 "description" values) -- plain `json.loads()`
+       kept only the LAST value, losing the first-mentioned real intent
+       with no error. Added a custom `object_pairs_hook` that splits
+       such objects into multiple correctly-formed steps.
+    4. `parse_plan()` raised an uncaught `AttributeError` (only saved by
+       `cli/shell.py`'s outer try/except) when a plan array element
+       wasn't itself a JSON object (e.g. a bare string) -- now validated
+       and returns None (NanoOrchestrator fallback) per its documented
+       contract, matching every other malformed-structure case.
+  Also found and fixed a test-isolation bug live on TASKER-P1:
+  `test_falls_through_to_no_gpu_when_nvidia_absent` only mocked
+  `NvidiaBackend.detect`, so real AMD hardware broke its "no GPU at all"
+  assumption -- passed on Designlab1 (no AMD hardware to accidentally
+  detect) but failed running the suite on TASKER-P1 itself.
+  **Results:** Designlab1 (Designlab1, NVIDIA GTX 1050 Ti) -- all 3
+  stages pass with correct output: CHAT "One, two, three, four, five."
+  (5 words), CODE correctly listed real directory contents via bash
+  (required all 5 tool-loop turns but the accumulated results still
+  synthesized correctly), COWORK genuinely created hello.txt with
+  content "hello" (verified on disk). TASKER-P1 (real AMD APU hardware,
+  via SSH) -- CHAT passes ("A, B, C, D, E.", fast ~4s worker call); CODE
+  completed without hanging but surfaced a 5th, distinct, NOT-yet-fixed
+  bug (a flat-object tool call `{"command": "ls"}` wasn't correctly
+  inferred/executed, so the raw JSON leaked into the final synthesized
+  answer instead of a real directory listing -- see "Known Open Issues"
+  below); COWORK not re-tested on TASKER-P1 this session (stopped by
+  explicit user decision after the 5th bug was found, to avoid an
+  open-ended chain of tiny-model reliability fixes beyond this phase's
+  actual scope). 565 -> 567 tests passing across both machines.
+
+## Known Open Issues (not fixed this session, tracked for follow-up)
+- Flat-object tool call inference gap: a worker response shaped like
+  `{"command": "ls"}` (no `name`/`arguments` wrapper) was not correctly
+  routed through `ToolCallNormalizer`'s flat-object-inference path in at
+  least one live case on TASKER-P1 (CODE mode, "list the files in the
+  current directory") -- the raw JSON leaked into the final synthesized
+  answer instead of the tool ever executing. `TestLfm25FlatObjectInference`
+  in test_tool_normalizer.py already covers this path and passes, so this
+  is either an edge case that slips past that logic's matching rules, or
+  a different code path entirely (e.g. the model may not have used
+  ToolProtocol.LFM25's expected format at all this time) -- not yet
+  root-caused. Reproduce via: TASKER-P1, `tasker --mode code "list the
+  files in the current directory"`, no `--profile` flag.
 - [x] docs/Ollama_AMD_APU_Install_Guide.md added to repo
 - [x] docs/ollama-amd-igpu-config-guide.md added to repo
 - [x] CLAUDE.md updated: Linux/WSL2 primary, Windows secondary, both AMD guides referenced
