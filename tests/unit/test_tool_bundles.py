@@ -93,27 +93,70 @@ class TestNarrowBundleToStepEdgeCases(unittest.TestCase):
         )
         self.assertEqual(result, {ToolID.GIT, ToolID.TEST_RUNNER})
 
-    def test_no_match_falls_back_to_full_bundle(self):
+    def test_no_match_falls_back_to_empty_bundle(self):
+        # Live evidence (Designlab1, lfm2.5-thinking:latest): falling back
+        # to the FULL bundle on no-match caused the model to hallucinate an
+        # irrelevant tool call (calculator("hello") for a "say hello"
+        # prompt) and then never conclude -- offering nothing is safer than
+        # offering something with no keyword signal behind it.
         with self.assertLogs("tasker.tools.bundles", level="WARNING") as cm:
             result = narrow_bundle_to_step(CODE_BUNDLE, "Think about the problem carefully")
-        self.assertEqual(result, CODE_BUNDLE)
+        self.assertEqual(result, frozenset())
         self.assertIn("no keyword match", "\n".join(cm.output))
 
     def test_matched_keyword_outside_bundle_excluded(self):
         """A keyword match for a tool not present in the given bundle must
-        not leak in -- narrowing intersects with the caller's bundle."""
+        not leak in -- narrowing intersects with the caller's bundle, and
+        an empty intersection is treated the same as no match at all."""
         narrow_bundle = frozenset({ToolID.BASH})
         result = narrow_bundle_to_step(narrow_bundle, "Run git commit")
-        self.assertEqual(result, narrow_bundle)  # falls back: no match within this bundle
+        self.assertEqual(result, frozenset())
 
     def test_case_insensitive_matching(self):
         result = narrow_bundle_to_step(CODE_BUNDLE, "RUN THE BASH COMMAND")
         self.assertEqual(result, {ToolID.BASH})
 
-    def test_empty_description_falls_back_to_full_bundle(self):
+    def test_empty_description_falls_back_to_empty_bundle(self):
         with self.assertLogs("tasker.tools.bundles", level="WARNING"):
             result = narrow_bundle_to_step(CODE_BUNDLE, "")
-        self.assertEqual(result, CODE_BUNDLE)
+        self.assertEqual(result, frozenset())
+
+
+class TestNarrowBundleToStepOriginalTaskFallback(unittest.TestCase):
+    """
+    Live-observed: the planner-generated step_description can be garbled
+    or vague (e.g. "Listing available workers") even when the user's
+    original request has a clear keyword signal (e.g. "list the files in
+    the current directory") -- original_task is a second chance before
+    giving up to an empty bundle.
+    """
+
+    def test_garbled_step_description_falls_back_to_original_task_match(self):
+        result = narrow_bundle_to_step(
+            CODE_BUNDLE, "Listing available workers",
+            original_task="list the files in the current directory",
+        )
+        self.assertEqual(result, {ToolID.BASH})
+
+    def test_step_description_match_takes_priority_over_original_task(self):
+        result = narrow_bundle_to_step(
+            CODE_BUNDLE, "Run git commit",
+            original_task="list the files in the current directory",
+        )
+        self.assertEqual(result, {ToolID.GIT})
+
+    def test_neither_matches_falls_back_to_empty_bundle(self):
+        with self.assertLogs("tasker.tools.bundles", level="WARNING") as cm:
+            result = narrow_bundle_to_step(
+                CODE_BUNDLE, "Think about it", original_task="Ponder deeply",
+            )
+        self.assertEqual(result, frozenset())
+        self.assertIn("original task", "\n".join(cm.output))
+
+    def test_no_original_task_given_behaves_as_before(self):
+        with self.assertLogs("tasker.tools.bundles", level="WARNING"):
+            result = narrow_bundle_to_step(CODE_BUNDLE, "Think about it")
+        self.assertEqual(result, frozenset())
 
 
 if __name__ == "__main__":

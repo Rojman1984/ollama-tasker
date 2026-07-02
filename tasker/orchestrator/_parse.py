@@ -143,6 +143,51 @@ def _resolve_step_capabilities(raw_caps, step_index: int, raw_response: str) -> 
     return resolved
 
 
+def _split_duplicate_description_objects(pairs: list[tuple[str, object]]) -> dict | list[dict]:
+    """
+    object_pairs_hook for json.loads(): small local models occasionally
+    cram multiple logical plan steps into a single JSON object by
+    repeating the "description" key instead of using separate array
+    elements -- observed live (Designlab1, lfm2.5-thinking:latest) on a
+    4-intent "create, verify, read, confirm" task collapsed into 2 objects
+    each with 2 "description" values. Plain json.loads() silently keeps
+    only the LAST value per duplicate key (per the JSON spec's
+    implementation-defined handling), which corrupted the step's real,
+    first-mentioned intent ("Create 'hello.txt'...") into its second,
+    unrelated one ("Verify file existence...") with no error or warning --
+    the worker then acted on the wrong instruction and never wrote the file.
+
+    Splits an object into multiple objects whenever "description" repeats:
+    each repeat starts a new object, and every other key (role,
+    capabilities -- never observed duplicated) is carried forward into
+    every split-out object via setdefault, since the model only stated
+    those once for what it intended as several steps. Returns a plain
+    dict when no duplicate "description" was found (the common case,
+    behavior unchanged); returns a list of dicts when a split occurred --
+    parse_plan() flattens these back into the top-level steps array.
+    """
+    _SPLIT_KEY = "description"
+    seen_split_key = False
+    groups: list[dict] = [{}]
+    for key, value in pairs:
+        if key == _SPLIT_KEY and seen_split_key:
+            groups.append({})
+        if key == _SPLIT_KEY:
+            seen_split_key = True
+        groups[-1][key] = value
+    if len(groups) == 1:
+        return groups[0]
+    shared: dict = {}
+    for g in groups:
+        for k, v in g.items():
+            if k != _SPLIT_KEY:
+                shared[k] = v
+    for g in groups:
+        for k, v in shared.items():
+            g.setdefault(k, v)
+    return groups
+
+
 def parse_plan(task: str, raw: str) -> ExecutionPlan | None:
     """
     Parse a model's JSON plan response into an ExecutionPlan. Returns None
@@ -151,14 +196,22 @@ def parse_plan(task: str, raw: str) -> ExecutionPlan | None:
     the sole case that should trigger a caller's fallback to NanoOrchestrator.
     An unrecognized capability string inside an otherwise-valid step is
     handled per-step by _resolve_step_capabilities and never discards the
-    rest of the plan.
+    rest of the plan. A step object with a duplicated "description" key is
+    split into multiple steps by _split_duplicate_description_objects
+    rather than silently losing its first-mentioned intent.
     """
     try:
-        data = json.loads(raw.strip())
+        data = json.loads(raw.strip(), object_pairs_hook=_split_duplicate_description_objects)
         if not isinstance(data, list) or not data:
             return None
+        flat_items: list[dict] = []
+        for item in data:
+            if isinstance(item, list):
+                flat_items.extend(item)
+            else:
+                flat_items.append(item)
         steps = []
-        for i, item in enumerate(data):
+        for i, item in enumerate(flat_items):
             raw_caps = item.get("capabilities", ["tool_use"])
             caps = _resolve_step_capabilities(raw_caps, i, raw)
             caps.add(Capability.TOOL_USE)

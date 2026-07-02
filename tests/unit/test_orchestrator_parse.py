@@ -122,6 +122,65 @@ class TestParsePlan(unittest.TestCase):
         self.assertIsNone(plan)
 
 
+class TestParsePlanDuplicateDescriptionKey(unittest.TestCase):
+    """
+    Live-observed (Designlab1, lfm2.5-thinking:latest): the model crammed
+    a 4-intent "create, verify, read, confirm" task into 2 JSON objects,
+    each repeating the "description" key twice. Plain json.loads() would
+    silently keep only the LAST value, corrupting the step's real first
+    intent with no error -- parse_plan() must instead split such an
+    object into separate steps, recovering both descriptions.
+    """
+
+    def test_duplicate_description_key_splits_into_two_steps(self):
+        # json.dumps() can't produce duplicate keys (dict keys are
+        # unique) -- hand-crafted raw JSON, verbatim shape observed live.
+        raw = (
+            '[{"description": "Create the file", "role": "worker", '
+            '"capabilities": ["tool_use"], "description": "Verify it exists"}]'
+        )
+        plan = parse_plan("create then verify a file", raw)
+        self.assertIsInstance(plan, ExecutionPlan)
+        self.assertEqual(len(plan.steps), 2)
+        self.assertEqual(plan.steps[0].description, "Create the file")
+        self.assertEqual(plan.steps[1].description, "Verify it exists")
+
+    def test_split_steps_inherit_shared_role_and_capabilities(self):
+        raw = (
+            '[{"description": "Create the file", "role": "verifier", '
+            '"capabilities": ["code"], "description": "Verify it exists"}]'
+        )
+        plan = parse_plan("create then verify a file", raw)
+        self.assertEqual(plan.steps[0].role, plan.steps[1].role)
+        self.assertIn(Capability.CODE, plan.steps[0].required_capabilities)
+        self.assertIn(Capability.CODE, plan.steps[1].required_capabilities)
+
+    def test_two_step_array_each_with_duplicate_key_yields_four_steps(self):
+        # The exact shape observed live: 2 array elements, each internally
+        # duplicated -- should recover all 4 originally-intended steps.
+        raw = (
+            '[{"description": "Create hello.txt", "role": "worker", '
+            '"capabilities": ["tool_use"], "description": "Verify it exists"},'
+            '{"description": "Read hello.txt", "role": "worker", '
+            '"capabilities": ["tool_use"], "description": "Confirm contents"}]'
+        )
+        plan = parse_plan("create then read back a file", raw)
+        self.assertEqual(len(plan.steps), 4)
+        self.assertEqual(
+            [s.description for s in plan.steps],
+            ["Create hello.txt", "Verify it exists", "Read hello.txt", "Confirm contents"],
+        )
+        self.assertEqual([s.index for s in plan.steps], [0, 1, 2, 3])
+
+    def test_no_duplicate_key_behaves_exactly_as_before(self):
+        raw = json.dumps([
+            {"description": "analyze", "role": "thinker", "capabilities": ["tool_use"]},
+        ])
+        plan = parse_plan("task", raw)
+        self.assertEqual(len(plan.steps), 1)
+        self.assertEqual(plan.steps[0].description, "analyze")
+
+
 class TestSingleLLMOrchestratorUsedFallback(unittest.IsolatedAsyncioTestCase):
 
     async def test_valid_plan_used_fallback_false(self):

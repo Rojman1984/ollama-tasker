@@ -139,7 +139,7 @@ async def _run_task(
             continue
 
         step_tools = get_definitions(
-            narrow_bundle_to_step(config.mode.tool_bundle, step.description)
+            narrow_bundle_to_step(config.mode.tool_bundle, step.description, task)
         )
         wt = WorkerTask(
             task_id=str(uuid.uuid4()),
@@ -407,6 +407,18 @@ def _first_positional() -> str | None:
 def main() -> None:
     if _REGISTRY_YAML.exists():
         registry = WorkerRegistry.load_from_yaml(_REGISTRY_YAML)
+        # Phase 7.5.6 (SDD_ADDENDUM_7.5.md A.3.4): cross-check requires_gpu
+        # workers against the cached hardware detection, if one exists for
+        # this machine. Deliberately uses the cache (not a fresh detect_gpu()
+        # call) to avoid adding a subprocess-call cost to every CLI
+        # invocation (A.3.1's caching rationale) -- if no cache has been
+        # written yet (`tasker-hardware detect` never run), the cross-check
+        # is skipped entirely and workers keep their YAML-declared
+        # `available` value, same as before this feature existed.
+        from tasker.config.detect import load_cached_detection, load_cached_gpu_info
+
+        if load_cached_detection() is not None:
+            registry.apply_gpu_availability(load_cached_gpu_info())
     else:
         registry = WorkerRegistry()
     store = CheckpointStore(_DEFAULT_STORE_DIR)

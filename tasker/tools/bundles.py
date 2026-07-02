@@ -175,25 +175,54 @@ _TOOL_KEYWORDS: dict[ToolID, list[frozenset[str]]] = {
 }
 
 
-def narrow_bundle_to_step(bundle: frozenset[ToolID], step_description: str) -> frozenset[ToolID]:
-    """
-    Return the subset of *bundle* relevant to *step_description*, matched
-    via _TOOL_KEYWORDS. If nothing matches, returns *bundle* unchanged
-    (today's behavior) and logs a WARNING -- unmatched phrasing should
-    stay visible/improvable rather than silently guess wrong.
-    """
-    text = step_description.lower()
-    matched = frozenset(
+def _match_keywords(bundle: frozenset[ToolID], text: str) -> frozenset[ToolID]:
+    text = text.lower()
+    return frozenset(
         tool_id for tool_id, groups in _TOOL_KEYWORDS.items()
         if any(all(word in text for word in group) for group in groups)
     ) & bundle
+
+
+def narrow_bundle_to_step(
+    bundle: frozenset[ToolID], step_description: str, original_task: str | None = None,
+) -> frozenset[ToolID]:
+    """
+    Return the subset of *bundle* relevant to *step_description*, matched
+    via _TOOL_KEYWORDS. If nothing matches and *original_task* is given,
+    retry against the original user request -- the planner-generated
+    step_description can be garbled or vague (e.g. "Listing available
+    workers" for a step that should say "list files in the current
+    directory", observed live on Designlab1 for exactly this task) even
+    when the user's own original wording carries a clear keyword signal.
+    If nothing matches either, returns an EMPTY set (not the full bundle)
+    and logs a WARNING -- unmatched phrasing should stay visible/
+    improvable, but live-verified evidence (Designlab1, this machine,
+    lfm2.5-thinking:latest) shows falling back to the full bundle is
+    actively harmful, not just imprecise: offered CHAT's 3-tool bundle for
+    a plain "say hello in exactly five words" prompt with no relevant
+    tool, the model hallucinated a plausible-looking but nonsensical call
+    (`calculator(expression="hello")`) rather than answering directly,
+    then failed to conclude across repeated turns once fed the resulting
+    error -- exhausting run_tool_loop's max_turns. A step with no keyword
+    match anywhere is, by definition, one this narrowing has no signal
+    for; offering nothing forces the model to just answer, which every
+    precedent in this project shows it's reliable at, whereas offering
+    irrelevant tools is not.
+    """
+    matched = _match_keywords(bundle, step_description)
+    if not matched and original_task:
+        matched = _match_keywords(bundle, original_task)
     if not matched:
         logger.warning(
             "narrow_bundle_to_step: no keyword match for step description "
-            "%r -- falling back to the full bundle (%d tools)",
-            step_description, len(bundle),
+            "%r%s -- offering no tools for this step (was: full %d-tool "
+            "bundle, changed after live evidence of hallucinated tool "
+            "calls on unmatched steps)",
+            step_description,
+            " or original task" if original_task else "",
+            len(bundle),
         )
-        return bundle
+        return frozenset()
     return matched
 
 # --------------------------------------------------------------------------- #

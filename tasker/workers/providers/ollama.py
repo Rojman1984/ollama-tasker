@@ -195,7 +195,11 @@ class OllamaProvider(WorkerProviderBase):
             if ollama_tools:
                 payload["tools"] = ollama_tools
 
-            timeout = task.timeout_s or 120.0
+            # 240s default: live-measured against lfm2.5-thinking:latest, a
+            # single call routinely takes 90-120+s (heavy <think> output
+            # even for trivial prompts) -- see factory.py's _make_call_model
+            # for the measurement that motivated raising this from 120s.
+            timeout = task.timeout_s or 240.0
 
             status, data = await self._post_fn(
                 f"{self._base_url}/api/chat",
@@ -315,7 +319,7 @@ class OllamaProvider(WorkerProviderBase):
 
     async def _default_post(self, url: str, payload: dict) -> tuple[int, dict]:
         import aiohttp
-        timeout_s = payload.pop("_timeout", 120.0)
+        timeout_s = payload.pop("_timeout", 240.0)
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 url,

@@ -136,7 +136,14 @@ def _make_call_model(
             context={"system_prompt": system_prompt},
             routing_policy=RoutingPolicy.PRIVATE,
             privacy_tier=privacy_tier,
-            timeout_s=120.0,
+            # 240s, not 120s: live-measured on Designlab1 against
+            # lfm2.5-thinking:latest, a single plan() call took 94.5s real
+            # time (17417-char thinking block, 3922 eval tokens) for a
+            # trivially simple task, and a second attempt exceeded 120s
+            # outright and raised TimeoutError. This "thinking" model
+            # family is just slow, not broken -- 120s had too little
+            # margin against its observed worst case.
+            timeout_s=240.0,
         )
         result = await _execute_with_deferred_retry(provider, task, manifest)
         if result.status == WorkerStatus.DEFERRED:

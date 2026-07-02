@@ -280,6 +280,40 @@ def detect_hardware_profile(
     return profile
 
 
+def _read_matching_cache(path: Path) -> dict | None:
+    """Shared by load_cached_detection()/load_cached_gpu_info(): read the
+    cache file, return its dict only if it exists, parses, and its recorded
+    hostname matches this machine -- else None (missing/unreadable/mismatch
+    all fall through to live detection rather than silently applying
+    another machine's data, A.3.1 rationale)."""
+    if not path.exists():
+        return None
+    try:
+        with path.open(encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (json.JSONDecodeError, OSError):
+        return None
+    if data.get("hostname") != platform.node():
+        return None
+    return data
+
+
+def _gpu_from_cache_dict(data: dict) -> GPUInfo | None:
+    gpu_vendor = data.get("gpu_vendor", "none")
+    if gpu_vendor == "none":
+        return None
+    return GPUInfo(
+        vendor=gpu_vendor,
+        name=data.get("gpu_name"),
+        memory_mb=data.get("gpu_memory_mb"),
+        is_unified_memory=bool(data.get("gpu_is_unified_memory", False)),
+        vulkan_enabled=data.get("amd_vulkan_enabled"),
+        rocm_disabled=data.get("amd_rocm_disabled"),
+        vulkan_warning=data.get("amd_vulkan_warning"),
+        group_warning=data.get("amd_group_warning"),
+    )
+
+
 def load_cached_detection(*, _cache_path: Path | None = None) -> HardwareProfile | None:
     """
     Machine-local cache (source 2 of the A.3.1 resolution order).
@@ -289,38 +323,32 @@ def load_cached_detection(*, _cache_path: Path | None = None) -> HardwareProfile
     mismatch falls through to live detection rather than silently applying
     another machine's profile (A.3.1 rationale).
     """
-    path = _cache_path or _CACHE_PATH
-    if not path.exists():
-        return None
-    try:
-        with path.open(encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (json.JSONDecodeError, OSError):
+    data = _read_matching_cache(_cache_path or _CACHE_PATH)
+    if data is None:
         return None
 
-    if data.get("hostname") != platform.node():
-        return None
-
-    gpu_vendor = data.get("gpu_vendor", "none")
-    gpu: GPUInfo | None = None
-    if gpu_vendor != "none":
-        gpu = GPUInfo(
-            vendor=gpu_vendor,
-            name=data.get("gpu_name"),
-            memory_mb=data.get("gpu_memory_mb"),
-            is_unified_memory=bool(data.get("gpu_is_unified_memory", False)),
-            vulkan_enabled=data.get("amd_vulkan_enabled"),
-            rocm_disabled=data.get("amd_rocm_disabled"),
-            vulkan_warning=data.get("amd_vulkan_warning"),
-            group_warning=data.get("amd_group_warning"),
-        )
-
+    gpu = _gpu_from_cache_dict(data)
     name = _suggest_profile_name(
         cpu_cores=int(data.get("cpu_cores", 0)),
         ram_gb=float(data.get("ram_gb", 0.0)),
         gpu=gpu,
     )
     return load_yaml_profile(name)
+
+
+def load_cached_gpu_info(*, _cache_path: Path | None = None) -> GPUInfo | None:
+    """
+    GPU portion of the machine-local cache, for callers that need a
+    GPUInfo directly (e.g. WorkerRegistry.apply_gpu_availability(), Phase
+    7.5.6 -- SDD_ADDENDUM_7.5.md A.3.4) rather than a full HardwareProfile.
+    Same hostname-scoping / missing-cache handling as
+    load_cached_detection() -- also returns None if the cache exists but
+    records no GPU (gpu_vendor == "none").
+    """
+    data = _read_matching_cache(_cache_path or _CACHE_PATH)
+    if data is None:
+        return None
+    return _gpu_from_cache_dict(data)
 
 
 def _build_cache_dict(

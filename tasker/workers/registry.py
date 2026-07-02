@@ -6,10 +6,12 @@ See SDD Sections 5.4 and 5.5.
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import yaml
 
+from tasker.config.gpu_backends import GPUInfo
 from tasker.workers.base import (
     Capability,
     ComputeLocation,
@@ -19,6 +21,15 @@ from tasker.workers.base import (
     TaskerPolicyError,
     WorkerManifest,
 )
+
+logger = logging.getLogger(__name__)
+
+# Phase 7.5.6 (SDD_ADDENDUM_7.5.md A.3.4): AMD APU / unified-memory reserve.
+# gpu.memory_mb for a unified-memory GPU is TOTAL SYSTEM RAM (see GPUInfo
+# docstring in tasker.config.gpu_backends) -- the full pool is never actually
+# available to one process, so subtract a reserve before comparing against a
+# worker's declared vram_mb. 6GB sits in A.3.4's recommended 4-8GB range.
+_UNIFIED_MEMORY_RESERVE_MB = 6_144
 
 _LATENCY_RANK: dict[LatencyClass, int] = {
     LatencyClass.FAST: 0,
@@ -62,6 +73,53 @@ class WorkerRegistry:
 
     def get(self, worker_id: str) -> WorkerManifest | None:
         return self._workers.get(worker_id)
+
+    def apply_gpu_availability(
+        self, gpu: GPUInfo | None, *, reserve_mb: int = _UNIFIED_MEMORY_RESERVE_MB,
+    ) -> None:
+        """
+        Cross-check every requires_gpu=True worker against the resolved
+        GPUInfo's usable memory (SDD_ADDENDUM_7.5.md A.3.4). A worker that
+        doesn't fit is marked available=False with a logged reason -- never
+        silently dropped, still visible via list_all()/`tasker workers`.
+
+          - gpu is None (no GPU detected): every requires_gpu=True worker is
+            marked unavailable.
+          - NVIDIA (discrete, is_unified_memory=False): checked directly
+            against gpu.memory_mb -- true dedicated VRAM.
+          - AMD APU (unified memory, is_unified_memory=True): gpu.memory_mb
+            is TOTAL SYSTEM RAM, not a dedicated pool -- reserve_mb is
+            subtracted before comparing against the worker's declared
+            vram_mb, since the full pool is never actually available to one
+            process.
+
+        Workers with requires_gpu=False are never touched by this method.
+        """
+        for worker in self._workers.values():
+            if not worker.requires_gpu:
+                continue
+
+            if gpu is None:
+                worker.available = False
+                logger.warning(
+                    "Worker '%s' marked unavailable -- requires_gpu=True "
+                    "but no GPU was detected on this machine.", worker.id,
+                )
+                continue
+
+            usable_mb = gpu.memory_mb or 0
+            if gpu.is_unified_memory:
+                usable_mb = max(0, usable_mb - reserve_mb)
+
+            required_mb = worker.vram_mb or 0
+            if required_mb > usable_mb:
+                worker.available = False
+                logger.warning(
+                    "Worker '%s' marked unavailable -- requires %d MB VRAM, "
+                    "only %d MB usable on this %s GPU%s.",
+                    worker.id, required_mb, usable_mb, gpu.vendor,
+                    " (unified memory, reserve applied)" if gpu.is_unified_memory else "",
+                )
 
     @classmethod
     def load_from_yaml(cls, path: Path) -> WorkerRegistry:
