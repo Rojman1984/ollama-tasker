@@ -210,6 +210,19 @@ def parse_plan(task: str, raw: str) -> ExecutionPlan | None:
                 flat_items.extend(item)
             else:
                 flat_items.append(item)
+        # A plan array element that isn't itself a JSON object (e.g. the
+        # model emitted a bare string) is a malformed-structure case, same
+        # as missing keys or non-list top-level JSON -- return None and let
+        # the caller fall back to NanoOrchestrator, rather than raising an
+        # uncaught AttributeError out of the .get()/[...] calls below.
+        # Live-observed on TASKER-P1 (weaker hardware, different sampling).
+        if not all(isinstance(item, dict) for item in flat_items):
+            logger.warning(
+                "parse_plan: response failed to parse as a valid plan structure; "
+                "falling back to NanoOrchestrator template. Raw response: %s",
+                raw,
+            )
+            return None
         steps = []
         for i, item in enumerate(flat_items):
             raw_caps = item.get("capabilities", ["tool_use"])
@@ -232,7 +245,7 @@ def parse_plan(task: str, raw: str) -> ExecutionPlan | None:
             dependency_graph={s.index: s.depends_on for s in steps},
             used_fallback=False,
         )
-    except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError, AttributeError):
         logger.warning(
             "parse_plan: response failed to parse as a valid plan structure; "
             "falling back to NanoOrchestrator template. Raw response: %s",

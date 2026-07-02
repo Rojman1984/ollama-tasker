@@ -122,6 +122,25 @@ class TestParsePlan(unittest.TestCase):
         self.assertIsNone(plan)
 
 
+class TestParsePlanNonObjectArrayElements(unittest.TestCase):
+    """
+    Live-observed on TASKER-P1: a plan array element that isn't itself a
+    JSON object (e.g. a bare string) must return None (triggering the
+    NanoOrchestrator fallback), not raise an uncaught AttributeError out
+    of item.get()/item["description"].
+    """
+
+    def test_bare_string_array_element_returns_none(self):
+        with self.assertLogs("tasker.orchestrator._parse", level="WARNING") as cm:
+            plan = parse_plan("task", '["just a plain string", {"description": "ok"}]')
+        self.assertIsNone(plan)
+        self.assertIn("failed to parse", "\n".join(cm.output))
+
+    def test_all_bare_strings_returns_none(self):
+        plan = parse_plan("task", '["one", "two", "three"]')
+        self.assertIsNone(plan)
+
+
 class TestParsePlanDuplicateDescriptionKey(unittest.TestCase):
     """
     Live-observed (Designlab1, lfm2.5-thinking:latest): the model crammed
