@@ -111,7 +111,12 @@ class TestNoGpuBackend(unittest.TestCase):
 class TestDetectGpuChain(unittest.TestCase):
 
     def test_falls_through_to_no_gpu_when_nvidia_absent(self):
-        with mock.patch.object(NvidiaBackend, "detect", return_value=None):
+        # Must also mock AmdApuBackend -- on a machine with real AMD
+        # hardware (e.g. TASKER-P1), an unmocked AmdApuBackend.detect()
+        # returns a genuine GPUInfo, breaking this test's "no GPU at all"
+        # assumption. Caught live running the suite on TASKER-P1.
+        with mock.patch.object(NvidiaBackend, "detect", return_value=None), \
+             mock.patch.object(AmdApuBackend, "detect", return_value=None):
             self.assertIsNone(detect_gpu())
 
     def test_nvidia_wins_chain_when_present(self):
