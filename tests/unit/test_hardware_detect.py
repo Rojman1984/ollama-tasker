@@ -222,6 +222,61 @@ class TestNvidiaTierComputation(unittest.TestCase):
 
 
 # ------------------------------------------------------------------ #
+# Phase 7.5.4-7.5.6 -- AMD APU (unified-memory) tier computation, via
+# _apply_unified_memory_tier_override() layered on top of the CPU/RAM-
+# selected base profile. See SDD_ADDENDUM_7.5.md A.4.4/A.6.
+# ------------------------------------------------------------------ #
+
+class TestAmdApuTierComputation(unittest.TestCase):
+
+    def test_vulkan_enabled_16gb_plus_resolves_tier_max_2(self):
+        gpu = GPUInfo(
+            vendor="amd_apu", name="Vega 8 Mobile", memory_mb=32768,
+            is_unified_memory=True, vulkan_enabled=True, rocm_disabled=True,
+        )
+        profile = detect_hardware_profile(
+            _cpu_fn=lambda: 6, _ram_fn=lambda: 32.0, _gpu_detect_fn=lambda: gpu,
+        )
+        self.assertEqual(profile.orchestrator_tier_max, 2)
+        self.assertFalse(profile.unload_between_tasks)   # resident
+
+    def test_vulkan_enabled_under_16gb_resolves_tier_max_1(self):
+        gpu = GPUInfo(
+            vendor="amd_apu", name="Vega 8 Mobile", memory_mb=8192,
+            is_unified_memory=True, vulkan_enabled=True, rocm_disabled=True,
+        )
+        profile = detect_hardware_profile(
+            _cpu_fn=lambda: 6, _ram_fn=lambda: 8.0, _gpu_detect_fn=lambda: gpu,
+        )
+        self.assertEqual(profile.orchestrator_tier_max, 1)
+        self.assertTrue(profile.unload_between_tasks)    # sequential
+
+    def test_vulkan_disabled_resolves_tier_max_1_regardless_of_ram(self):
+        gpu = GPUInfo(
+            vendor="amd_apu", name="Vega 8 Mobile", memory_mb=32768,
+            is_unified_memory=True, vulkan_enabled=False, rocm_disabled=False,
+        )
+        profile = detect_hardware_profile(
+            _cpu_fn=lambda: 6, _ram_fn=lambda: 32.0, _gpu_detect_fn=lambda: gpu,
+        )
+        self.assertEqual(profile.orchestrator_tier_max, 1)
+        self.assertTrue(profile.unload_between_tasks)    # sequential
+
+    def test_amd_apu_tier2_still_uses_tasker_p1_orchestrator_model(self):
+        # Must not silently pick up tier2_designlab.yaml's NVIDIA-oriented
+        # qwen3 models -- those aren't installed on an AMD APU machine.
+        gpu = GPUInfo(
+            vendor="amd_apu", name="Vega 8 Mobile", memory_mb=32768,
+            is_unified_memory=True, vulkan_enabled=True, rocm_disabled=True,
+        )
+        profile = detect_hardware_profile(
+            _cpu_fn=lambda: 6, _ram_fn=lambda: 32.0, _gpu_detect_fn=lambda: gpu,
+        )
+        expected = load_yaml_profile("tier1_tasker")
+        self.assertEqual(profile.orchestrator_model, expected.orchestrator_model)
+
+
+# ------------------------------------------------------------------ #
 # Phase 7.5.2 -- load_cached_detection
 # ------------------------------------------------------------------ #
 

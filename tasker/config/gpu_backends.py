@@ -4,20 +4,25 @@ tasker.config.gpu_backends
 GPUBackend abstract base, GPUInfo data model, and the detection chain.
 
 Phase 7.5.2 implemented the ABC, the data model, and NoGpuBackend.
-Phase 7.5.3 (this revision) adds NvidiaBackend (detect + verify_live).
-AmdApuBackend (7.5.4) is still a future extension point -- detect_gpu()
-is structured so it only needs to uncomment one block when implemented.
+Phase 7.5.3 added NvidiaBackend (detect + verify_live).
+Phase 7.5.4-7.5.6 (this revision) adds AmdApuBackend (detect + verify_live),
+Vulkan-based since AMD integrated graphics has no practical ROCm support.
 
 See SDD_ADDENDUM_7.5.md A.4.
 """
 from __future__ import annotations
 
 import logging
+import os
+import platform
+import re
 import shutil
 import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Literal
+
+import psutil
 
 logger = logging.getLogger(__name__)
 
@@ -231,6 +236,298 @@ class NvidiaBackend(GPUBackend):
         return result
 
 
+class AmdApuBackend(GPUBackend):
+    """
+    AMD integrated GPU (APU) detection via Vulkan (Mesa RADV). See A.4.4.
+
+    AMD APUs are not practically supported by ROCm (see
+    docs/Ollama_AMD_APU_Install_Guide.md Section 1 and
+    docs/ollama-amd-igpu-config-guide.md Section 1) -- the correct path is
+    Ollama's Vulkan compute backend, controlled by three env vars this
+    backend inspects but does not set (setting them is an operator/systemd
+    concern, not this backend's -- see the two AMD guides for the fix).
+
+    detect() is fast and side-effect-free (lspci/CIM query, env var reads,
+    grp module lookups -- no running-Ollama dependency). verify_live() is a
+    separate, slower method requiring a running Ollama with a loaded model,
+    called only by `tasker-hardware verify`.
+    """
+
+    def detect(self) -> GPUInfo | None:
+        try:
+            if platform.system() == "Windows":
+                present, name = self._windows_amd_present()
+            else:
+                if shutil.which("lspci") is None:
+                    return None
+                present, name = self._linux_amd_present()
+
+            if not present:
+                return None
+
+            self._vulkan_tooling_check()  # informational only, logged
+
+            vulkan_enabled = os.environ.get("OLLAMA_VULKAN") == "1"
+            rocm_disabled = (
+                os.environ.get("ROCR_VISIBLE_DEVICES") == "-1"
+                and os.environ.get("HIP_VISIBLE_DEVICES") == "-1"
+            )
+
+            if vulkan_enabled and not rocm_disabled:
+                vulkan_warning = (
+                    "OLLAMA_VULKAN=1 is set but ROCR_VISIBLE_DEVICES/"
+                    "HIP_VISIBLE_DEVICES are not both '-1' -- on gfx902-class "
+                    "chips (e.g. TASKER-P1's Ryzen 5 3500U) this risks a "
+                    "silent runner crash via ROCm enumeration during GPU "
+                    "discovery. See docs/ollama-amd-igpu-config-guide.md "
+                    "Section 4."
+                )
+            elif not vulkan_enabled:
+                vulkan_warning = (
+                    "OLLAMA_VULKAN is not set to '1' -- Ollama will fall "
+                    "back to CPU-only inference on this AMD GPU. See "
+                    "docs/Ollama_AMD_APU_Install_Guide.md."
+                )
+            else:
+                vulkan_warning = None
+
+            group_warning = self._group_membership_warning()
+
+            # TOTAL SYSTEM RAM, not a sysfs VRAM figure -- see GPUInfo
+            # docstring / SDD_ADDENDUM_7.5.md A.4.2 for why the small BIOS
+            # UMA carve-out at /sys/class/drm/card*/device/mem_info_vram_total
+            # is not representative of the true usable pool under Vulkan/GTT.
+            memory_mb = psutil.virtual_memory().total // (1024 * 1024)
+
+            return GPUInfo(
+                vendor="amd_apu",
+                name=name or "AMD Integrated Graphics",
+                memory_mb=memory_mb,
+                is_unified_memory=True,
+                vulkan_enabled=vulkan_enabled,
+                rocm_disabled=rocm_disabled,
+                vulkan_warning=vulkan_warning,
+                group_warning=group_warning,
+            )
+        except Exception:
+            logger.debug("AmdApuBackend.detect() failed", exc_info=True)
+            return None
+
+    def _linux_amd_present(self) -> tuple[bool, str | None]:
+        """lspci -nn, vendor ID 1002 on a VGA/Display controller line."""
+        try:
+            result = subprocess.run(
+                ["lspci", "-nn"], capture_output=True, text=True, timeout=5,
+            )
+        except Exception:
+            return False, None
+        if result.returncode != 0:
+            return False, None
+        for line in result.stdout.splitlines():
+            lowered = line.lower()
+            if ("vga" in lowered or "display" in lowered) and "[1002:" in line:
+                name = line.split("]: ", 1)[-1].strip() if "]: " in line else line.strip()
+                return True, name
+        return False, None
+
+    def _windows_amd_present(self) -> tuple[bool, str | None]:
+        """Get-CimInstance Win32_VideoController, "AMD"/"Radeon" in name."""
+        try:
+            result = subprocess.run(
+                [
+                    "powershell", "-NoProfile", "-Command",
+                    "Get-CimInstance Win32_VideoController | "
+                    "Select-Object -ExpandProperty Name",
+                ],
+                capture_output=True, text=True, timeout=10,
+            )
+        except Exception:
+            return False, None
+        if result.returncode != 0:
+            return False, None
+        for line in result.stdout.splitlines():
+            stripped = line.strip()
+            if stripped and ("amd" in stripped.lower() or "radeon" in stripped.lower()):
+                return True, stripped
+        return False, None
+
+    def _vulkan_tooling_check(self) -> None:
+        """Informational only -- never gates detect()'s return value."""
+        if platform.system() == "Windows":
+            return
+        if shutil.which("vulkaninfo") is None:
+            return
+        try:
+            result = subprocess.run(
+                ["vulkaninfo", "--summary"], capture_output=True, text=True, timeout=5,
+            )
+            if "amd" not in result.stdout.lower():
+                logger.debug("vulkaninfo --summary did not list an AMD device")
+        except Exception:
+            logger.debug("vulkaninfo --summary check failed", exc_info=True)
+
+    def _group_membership_warning(self) -> str | None:
+        """
+        Linux-only, informational. Current user's membership in 'video' and
+        'render' groups via the grp module (no subprocess) -- both the
+        interactive shell user and the ollama service account need these
+        for /dev/dri access (docs/ollama-amd-igpu-config-guide.md Section 3).
+        Any lookup failure (including a group not existing on this system)
+        is swallowed -- this check is advisory, never a hard block.
+        """
+        if platform.system() == "Windows":
+            return None
+        try:
+            import grp
+
+            current_gids = set(os.getgroups())
+            current_gids.add(os.getgid())
+
+            video_gid = grp.getgrnam("video").gr_gid
+            render_gid = grp.getgrnam("render").gr_gid
+
+            missing = []
+            if video_gid not in current_gids:
+                missing.append("video")
+            if render_gid not in current_gids:
+                missing.append("render")
+
+            if missing:
+                return (
+                    f"Current user is not a member of required group(s): "
+                    f"{', '.join(missing)}. See "
+                    "docs/ollama-amd-igpu-config-guide.md Section 3."
+                )
+            return None
+        except (KeyError, OSError, AttributeError):
+            return None
+
+    def verify_live(self, ollama_base_url: str) -> VerifyResult:
+        """
+        Primary: GET {base_url}/api/ps, size_vram field -- same pattern as
+        NvidiaBackend.verify_live(). Linux supplementary: journalctl -u
+        ollama -n 200 --no-pager, parsed in priority order for the gfx902
+        crash signature / offload status -- when found, takes priority over
+        the /api/ps-derived result since it can explain a "not engaged"
+        state authoritatively. See A.4.4.
+        """
+        api_result = self._check_api_ps(ollama_base_url)
+        journal_result = self._check_journalctl()
+        return journal_result if journal_result is not None else api_result
+
+    def _check_api_ps(self, ollama_base_url: str) -> VerifyResult:
+        import json as _json
+        import urllib.error
+        import urllib.request
+
+        url = ollama_base_url.rstrip("/") + "/api/ps"
+        try:
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                data = _json.loads(resp.read())
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            return VerifyResult(
+                verified=False,
+                size_vram_mb=None,
+                offload_status="unknown",
+                message=f"Could not reach Ollama at {ollama_base_url} ({exc}).",
+            )
+
+        models = data.get("models") or []
+        if not models:
+            return VerifyResult(
+                verified=False,
+                size_vram_mb=None,
+                offload_status="unknown",
+                message=(
+                    "No model currently loaded in Ollama -- load a model "
+                    "first, then run tasker-hardware verify"
+                ),
+            )
+
+        model = models[0]
+        size_vram = model.get("size_vram") or 0
+        size_total = model.get("size") or 0
+        model_name = model.get("name", "unknown")
+
+        if size_vram <= 0:
+            return VerifyResult(
+                verified=False,
+                size_vram_mb=None,
+                offload_status="unknown",
+                message=(
+                    f"Model '{model_name}' is loaded but size_vram is 0 -- "
+                    "GPU not engaged for this model."
+                ),
+            )
+
+        size_vram_mb = size_vram // (1024 * 1024)
+        offload_status: Literal["full", "partial", "unknown"] = (
+            "partial" if size_total and size_vram < size_total else "full"
+        )
+        return VerifyResult(
+            verified=True,
+            size_vram_mb=size_vram_mb,
+            offload_status=offload_status,
+            message=(
+                f"GPU engaged for model '{model_name}': {size_vram_mb} MB "
+                f"VRAM ({offload_status} offload)."
+            ),
+        )
+
+    def _check_journalctl(self) -> VerifyResult | None:
+        """Bounded, non-blocking, read-only. Returns None if unavailable or
+        nothing recognizable was found -- callers fall back to /api/ps."""
+        if platform.system() == "Windows":
+            return None
+        try:
+            result = subprocess.run(
+                ["journalctl", "-u", "ollama", "-n", "200", "--no-pager"],
+                capture_output=True, text=True, timeout=5,
+            )
+        except Exception:
+            return None
+        if result.returncode != 0 or not result.stdout:
+            return None
+
+        log = result.stdout
+        if "failure during gpu discovery" in log.lower() and "runner crashed" in log.lower():
+            return VerifyResult(
+                verified=False,
+                size_vram_mb=None,
+                offload_status="unknown",
+                message=(
+                    "journalctl shows 'failure during GPU discovery' / "
+                    "'runner crashed' -- this is the gfx902-class "
+                    "ROCm-enumeration crash. Ensure all four env vars are "
+                    "set: OLLAMA_VULKAN=1, ROCR_VISIBLE_DEVICES=-1, "
+                    "HIP_VISIBLE_DEVICES=-1, OLLAMA_FLASH_ATTENTION=1. See "
+                    "docs/ollama-amd-igpu-config-guide.md Section 4."
+                ),
+            )
+
+        matches = re.findall(r"offloaded (\d+)/(\d+) layers to GPU", log)
+        if matches:
+            n, m = (int(x) for x in matches[-1])
+            if n == m:
+                return VerifyResult(
+                    verified=True,
+                    size_vram_mb=None,
+                    offload_status="full",
+                    message=f"journalctl confirms full GPU offload: {n}/{m} layers.",
+                )
+            return VerifyResult(
+                verified=True,
+                size_vram_mb=None,
+                offload_status="partial",
+                message=(
+                    f"journalctl shows partial GPU offload: {n}/{m} layers. "
+                    "Consider reducing context length -- see "
+                    "docs/ollama-amd-igpu-config-guide.md Section 9."
+                ),
+            )
+        return None
+
+
 class NoGpuBackend(GPUBackend):
     """Final fallback in the detection chain -- always returns None."""
 
@@ -244,18 +541,13 @@ def detect_gpu() -> GPUInfo | None:
     -> NoGpuBackend. On a machine with both an AMD APU and a discrete NVIDIA
     card, NVIDIA wins -- a documented judgment call (A.4.3), not an
     oversight.
-
-    AmdApuBackend (7.5.4) doesn't exist yet -- this phase (7.5.3) wires
-    NvidiaBackend. 7.5.4 only needs to uncomment its block below; no other
-    change to this function should be needed.
     """
     result = NvidiaBackend().detect()
     if result is not None:
         return result
 
-    # from tasker.config.gpu_backends_amd import AmdApuBackend
-    # result = AmdApuBackend().detect()
-    # if result is not None:
-    #     return result
+    result = AmdApuBackend().detect()
+    if result is not None:
+        return result
 
     return NoGpuBackend().detect()

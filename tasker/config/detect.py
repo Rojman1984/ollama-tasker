@@ -26,14 +26,20 @@ from __future__ import annotations
 import json
 import platform
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
 import yaml
 
-from tasker.config.gpu_backends import GPUInfo, NvidiaBackend, VerifyResult, detect_gpu
+from tasker.config.gpu_backends import (
+    AmdApuBackend,
+    GPUInfo,
+    NvidiaBackend,
+    VerifyResult,
+    detect_gpu,
+)
 from tasker.modes.base import HardwareProfile
 from tasker.workers.base import TaskerConfigError
 
@@ -161,6 +167,13 @@ _CACHE_PATH = Path(".tasker") / "hardware_profile.json"
 # SDD_ADDENDUM_7.5.md A.4.2/A.4.3.
 _NVIDIA_RESIDENT_VRAM_THRESHOLD_MB = 4_096
 
+# Phase 7.5.4-7.5.6: AMD APU (unified-memory) tier threshold, distinct from
+# the NVIDIA discrete-VRAM one above. memory_mb for this vendor is TOTAL
+# SYSTEM RAM (GPUInfo docstring / A.4.2), so 16GB is a much higher bar than
+# the NVIDIA 4GB figure -- deliberately, since the same pool is shared with
+# the OS and any other resident model. See SDD_ADDENDUM_7.5.md A.4.4/A.6.
+_AMD_APU_TIER2_MEMORY_THRESHOLD_MB = 16_384
+
 
 def load_yaml_profile(name: str) -> HardwareProfile:
     """Read config/profiles/<name>.yaml and return a HardwareProfile."""
@@ -178,10 +191,12 @@ def _suggest_profile_name(cpu_cores: int, ram_gb: float, gpu: GPUInfo | None) ->
     the discrete-VRAM comparison for unified-memory (AMD APU) GPUs --
     comparing an APU's memory_mb (total system RAM, see GPUInfo docstring)
     against the discrete-card VRAM threshold would misclassify nearly every
-    modern APU machine as GPU-accelerated-tier2. AMD APU detection itself
-    isn't implemented until 7.5.4, so this branch is unreachable in
-    production this phase, but is written correctly now so it needs no
-    revisiting when AmdApuBackend lands.
+    modern APU machine as GPU-accelerated-tier2. AMD APU (unified-memory)
+    tier_max/load_strategy is instead computed by
+    _apply_unified_memory_tier_override() on top of whatever base profile
+    name this function returns -- see that function for why AMD APU doesn't
+    just select "tier2_designlab" the way NVIDIA does (wrong orchestrator
+    models for TASKER-P1).
     """
     if gpu is not None and gpu.vendor == "nvidia" and not gpu.is_unified_memory:
         if (gpu.memory_mb or 0) >= _NVIDIA_RESIDENT_VRAM_THRESHOLD_MB:
@@ -189,6 +204,36 @@ def _suggest_profile_name(cpu_cores: int, ram_gb: float, gpu: GPUInfo | None) ->
     if cpu_cores >= _TIER1_MIN_CORES and ram_gb >= _TIER1_MIN_RAM_GB:
         return "tier1_tasker"
     return "tier0_minimal"
+
+
+def _apply_unified_memory_tier_override(
+    profile: HardwareProfile, gpu: GPUInfo | None,
+) -> HardwareProfile:
+    """
+    AMD APU (and any future unified-memory backend -- gated on
+    is_unified_memory, not a vendor string, per A.4.4) computes tier_max/
+    load_strategy directly from live Vulkan engagement + total system RAM,
+    layered on top of the CPU/RAM-selected base profile (tier1_tasker.yaml
+    for TASKER-P1) rather than switching to tier2_designlab.yaml the way
+    the NVIDIA branch does -- that file's orchestrator models (qwen3:7b/4b)
+    aren't installed on an AMD APU machine, so reusing it would resolve to
+    a broken orchestrator model even though the tier_max number was right.
+
+      vulkan_enabled=True,  memory_mb >= 16GB -> tier_max=2, resident
+      vulkan_enabled=True,  memory_mb <  16GB -> tier_max=1, sequential
+      vulkan_enabled=False                    -> tier_max=1, sequential
+        (same as NoGpuBackend, regardless of physical hardware presence --
+        Ollama silently falls back to CPU without the env var)
+
+    No-op (returns profile unchanged) for any non-unified-memory GPU
+    (NVIDIA today) or no GPU at all -- those paths already got the right
+    tier_max via _suggest_profile_name()'s static-profile selection.
+    """
+    if gpu is None or not gpu.is_unified_memory:
+        return profile
+    if gpu.vulkan_enabled and (gpu.memory_mb or 0) >= _AMD_APU_TIER2_MEMORY_THRESHOLD_MB:
+        return replace(profile, orchestrator_tier_max=2, unload_between_tasks=False)
+    return replace(profile, orchestrator_tier_max=1, unload_between_tasks=True)
 
 
 def _run_live_detection(
@@ -215,6 +260,7 @@ def _run_live_detection(
     gpu = gpu_fn()
     name = _suggest_profile_name(cpu_cores, ram_gb, gpu)
     profile = load_yaml_profile(name)
+    profile = _apply_unified_memory_tier_override(profile, gpu)
     return cpu_cores, ram_gb, gpu, name, profile
 
 
@@ -358,6 +404,8 @@ def _cmd_verify(*, _cache_path: Path | None = None) -> None:
     verify_result: VerifyResult | None = None
     if gpu is not None and gpu.vendor == "nvidia":
         verify_result = NvidiaBackend().verify_live(profile.ollama_base_url)
+    elif gpu is not None and gpu.vendor == "amd_apu":
+        verify_result = AmdApuBackend().verify_live(profile.ollama_base_url)
 
     cache = _build_cache_dict(cpu_cores, ram_gb, gpu, profile, verify=verify_result)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -366,14 +414,8 @@ def _cmd_verify(*, _cache_path: Path | None = None) -> None:
     print(_format_report(cache, profile_name))
     print()
 
-    if gpu is not None and gpu.vendor == "nvidia":
+    if verify_result is not None:
         print(verify_result.message)
-    elif gpu is not None and gpu.vendor == "amd_apu":
-        print(
-            "Live GPU verification for AMD APU requires Phase 7.5.5 "
-            "(AmdApuBackend.verify_live()) -- not yet implemented this "
-            "phase. Static detection above is all that's available."
-        )
     else:
         print("No GPU detected -- nothing to verify.")
 
