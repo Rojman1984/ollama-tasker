@@ -231,7 +231,7 @@ Update this section as phases complete.
 | 8.1 | Setup wizard headless logic + `tasker-setup` CLI (see `docs/SDD_ADDENDUM_PHASE8.md`) — **note:** the row above labeled plain "8" is an unrelated, earlier "Orchestrator Factory" milestone from before `SDD_ADDENDUM_PHASE8.md` existed; this is a real naming collision in the project's own history, not a typo — the two are unrelated | ✅ COMPLETE |
 | 8.2–8.5 | Readiness checker, TUI foundation, model selector, harness panel | ⬜ NOT STARTED |
 | E2E 8.1 | Live cloud-path E2E validation (COWORK_PROMPT.md task list — a *third* use of the "8.1" label, distinct from both rows above) | ✅ COMPLETE |
-| E2E 8.2 | tier4_cloud.py reachability from current hardware profiles | ⬜ NOT STARTED |
+| E2E 8.2 | tier4_cloud.py reachability from current hardware profiles | ✅ COMPLETE |
 | E2E 8.3 | Tool-loop non-termination guard | ⬜ NOT STARTED |
 
 ---
@@ -350,11 +350,33 @@ python -m unittest tests.unit.test_orchestrator_nano -v
 
 *(Update this section at the end of every Cowork or Code session)*
 
-**Last worked on:** COWORK_PROMPT task 8.1 — live cloud-path E2E
-validation on Designlab1 (headless Cowork-supervised session). All four
-validation checkpoints confirmed with live evidence, full write-up with
-commands + trimmed output in `docs/TASKER_CHECKLIST.md` → "Phase 8.1 --
-Live Cloud-Path E2E Validation".
+**Last worked on:** COWORK_PROMPT tasks 8.1 (live cloud-path E2E
+validation) and 8.2 (tier4_cloud.py reachability), both on Designlab1
+(headless Cowork-supervised session). All four 8.1 validation checkpoints
+confirmed with live evidence; Tier 4 made reachable and confirmed live.
+Full write-ups in `docs/TASKER_CHECKLIST.md` → "Phase 8.1 -- Live
+Cloud-Path E2E Validation" and "Phase 8.2 -- tier4_cloud.py Reachability".
+
+**Task 8.2 summary:** Tier 4 was unreachable through three independent
+gates: (1) machine profiles cap tier_max at 2/1 — by design, kept;
+(2) no mode allowed tier 4 (max was cowork/research at 3) — a genuine SDD
+gap (the ladder defined Tier 4 but nothing could select it), fixed
+SDD-first: SDD 5.1 COWORK now "2–4", new SDD 5.3 "Tier 4 activation"
+paragraph (explicit config opt-in, never hardware detection; local
+orchestrator location degrades to Tier 3 per 10.3), cowork.yaml
+tier_max 3→4 (effective tier unchanged on both standard machines);
+(3) `build_orchestrator()` never constructed CloudOrchestrator — fixed:
+tier ≥ 4 + `orchestrator.compute_location: ollama_cloud` →
+`CloudOrchestrator` (which routes through `provider.execute()`, so 8.1's
+slot/budget wiring applies to Tier 4 orchestration calls automatically);
+local location degrades to Tier 3 with a WARNING. New opt-in profile
+`config/profiles/tier4_cloud_hybrid.yaml` (kimi-k2.7-code:cloud planner).
+Live-confirmed: `Planning with CloudOrchestrator...`, cloud plan (+3.4u),
+reasoning step on nemotron cloud, writing step on LOCAL lfm2.5, correct
+synthesis — the exact SDD 5.3 hybrid. +5 net factory tests incl.
+`TestTier4Reachability` driving the real shipped YAMLs
+(designlab×cowork→2, tasker-p1×cowork→1, tier4_cloud_hybrid×cowork→4,
+tier4_cloud_hybrid×chat→1). Suite 586 → 591, green.
 
 **Summary:** the unit-tested session layer was genuinely NOT wired into
 the live CLI path (exactly what 8.1 suspected): `OllamaSessionBudget` had
@@ -415,23 +437,29 @@ always route local. The kimi cloud planner follows the vocabulary. Not a
 bug (parse behaves as designed), but it means local-planner runs rarely
 route steps to cloud workers on their own.
 
-**Tests:** 567 → 586, full suite green throughout (also re-verified after
-every live-run-driven fix).
+**Tests:** 567 → 586 (task 8.1) → 591 (task 8.2), full suite green
+throughout (also re-verified after every live-run-driven fix).
 
-**Last files modified:** `cli/shell.py` (major),
+**Last files modified:** task 8.1 — `cli/shell.py` (major),
 `tasker/workers/providers/ollama.py`, `tasker/session/concurrency.py`,
 `tasker/orchestrator/tier2_dual.py`, `tier3_reasoning.py`,
 `tier4_cloud.py`, `config/profiles/tier2_designlab.yaml`,
 `config/profiles/tier2_designlab_cloud.yaml` (new),
 `tests/unit/test_cli_session_wiring.py` (new),
-`tests/unit/test_provider_ollama.py`, `tests/unit/test_orchestrator_tier{2,3,4}.py`,
-`docs/TASKER_CHECKLIST.md`, `docs/TESTING_GUIDE.md`, `CLAUDE.md`,
-`COWORK_PROMPT.md`.
+`tests/unit/test_provider_ollama.py`, `tests/unit/test_orchestrator_tier{2,3,4}.py`.
+Task 8.2 — `docs/SDD.md` (5.1 + 5.3 Tier 4 activation),
+`config/modes/cowork.yaml` (tier_max 4),
+`tasker/orchestrator/factory.py` (tier ≥ 4 → CloudOrchestrator),
+`config/profiles/tier4_cloud_hybrid.yaml` (new),
+`tests/unit/test_orchestrator_factory.py`. Both — `docs/TASKER_CHECKLIST.md`,
+`docs/TESTING_GUIDE.md`, `CLAUDE.md`, `COWORK_PROMPT.md`.
 
-**Next task:** COWORK_PROMPT task 8.2 — `tier4_cloud.py` reachability
-from current hardware profiles (verify profile→tier resolution can
-actually reach Tier 4, fix or document, regression test). Then 8.3 —
-tool-loop non-termination guard.
+**Next task:** COWORK_PROMPT task 8.3 — tool-loop non-termination guard:
+hard iteration cap + repeated-identical-call detection in
+`tasker/tools/loop.py` (`run_tool_loop` already has `max_turns=5`; 8.3
+adds detection of a worker re-issuing the identical tool call and unit
+tests for both guard conditions), so a runaway loop cannot burn Ollama
+Cloud budget.
 
 **Blockers:** None.
 

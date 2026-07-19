@@ -13,11 +13,15 @@ Fallback chain:
   tier_max == 0     → Tier 0
   tier_max == 1     → Tier 1 (SingleLLMOrchestrator)
   tier_max == 2     → Tier 2 (DualLLMOrchestrator, same model for both roles)
-  tier_max >= 3     → Tier 3 (ReasoningOrchestrator)
-
-Tier 4 (CloudOrchestrator) is wired by callers that explicitly register a
-cloud provider and pass tier_max >= 4.  The factory itself does not resolve
-cloud worker selection.
+  tier_max == 3     → Tier 3 (ReasoningOrchestrator)
+  tier_max >= 4     → Tier 4 (CloudOrchestrator) when the profile routes the
+                      orchestrator model to Ollama Cloud
+                      (orchestrator.compute_location: ollama_cloud);
+                      otherwise degrades to Tier 3 with a WARNING
+                      (SDD 5.3 "Tier 4 activation", SDD 10.3 chain).
+                      Before task 8.2 the factory never constructed
+                      CloudOrchestrator at all — Tier 4 was unreachable
+                      from every mode x profile combination.
 """
 from __future__ import annotations
 
@@ -32,6 +36,7 @@ from tasker.orchestrator.tier0_rules import NanoOrchestrator
 from tasker.orchestrator.tier1_single import SingleLLMOrchestrator
 from tasker.orchestrator.tier2_dual import DualLLMOrchestrator
 from tasker.orchestrator.tier3_reasoning import ReasoningOrchestrator
+from tasker.orchestrator.tier4_cloud import CloudOrchestrator
 from tasker.workers.base import (
     AgentRole,
     Capability,
@@ -190,5 +195,22 @@ def build_orchestrator(
     if tier == 2:
         return DualLLMOrchestrator(model_id, model_id, call_model, call_model)
 
-    # tier >= 3
+    if tier >= 4:
+        if compute_location == ComputeLocation.OLLAMA_CLOUD:
+            # Tier 4: the cloud model IS the orchestrator worker. Routed
+            # through provider.execute() directly (no call_model closure),
+            # so the 8.1 wiring applies automatically: concurrency slots
+            # and budget units are acquired/recorded per orchestration
+            # call via the shared OllamaProvider instance.
+            return CloudOrchestrator(
+                ollama_provider, manifest, privacy_tier=PrivacyTier.OLLAMA_CLOUD_OK
+            )
+        logger.warning(
+            "build_orchestrator: tier %d requested but the profile's "
+            "orchestrator compute_location is %r -- Tier 4 requires a "
+            "cloud-routed orchestrator model; degrading to Tier 3 (SDD 10.3).",
+            tier, config.profile.orchestrator_compute_location,
+        )
+
+    # tier == 3, or tier >= 4 degraded above
     return ReasoningOrchestrator(model_id, call_model)

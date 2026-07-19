@@ -990,3 +990,63 @@ model plan) is regression-tested at tiers 1-4 and the CLI prints
       the checkpoint's BudgetSnapshot is persisted. Real Ollama Cloud
       server-side limits are unaffected (they are enforced remotely); this
       only weakens local throttle fidelity between invocations.
+
+---
+
+## Phase 8.2 -- tier4_cloud.py Reachability (COWORK_PROMPT task numbering)
+
+**Verdict: Tier 4 was unreachable from every mode x profile combination**,
+through three independent gates, each confirmed by code reading + tests:
+
+1. **Profile gate (by design, kept):** standard machine profiles cap
+   `orchestrator.tier_max` at 2 (Designlab1) / 1 (TASKER-P1);
+   `effective_tier = min(mode, profile)` can therefore never exceed 2 on
+   either machine. This is the intended hardware ceiling for the *local*
+   tiers and was left unchanged.
+2. **Mode gate (SDD gap, fixed):** no mode allowed tier 4 -- max was 3
+   (cowork/research per SDD 5.1) -- so even a tier-4 profile resolved to 3.
+   The SDD defined Tier 4 in the ladder (5.3) but nothing could ever
+   select it. SDD updated first per dev rules: 5.1 COWORK now "2-4", new
+   5.3 "Tier 4 activation" paragraph (explicit configuration opt-in, never
+   hardware detection; local compute_location degrades to Tier 3 per
+   10.3). `config/modes/cowork.yaml` orchestrator_tier_max: 3 -> 4
+   (effective tier unchanged on both standard machine profiles).
+3. **Factory gate (bug, fixed):** `build_orchestrator()` returned
+   `ReasoningOrchestrator` for any tier >= 3 and never constructed
+   `CloudOrchestrator` (docstring deferred to "callers" that did not
+   exist). Now: tier >= 4 with `orchestrator.compute_location:
+   ollama_cloud` -> `CloudOrchestrator(ollama_provider, manifest,
+   OLLAMA_CLOUD_OK)`; tier >= 4 with a local orchestrator location
+   degrades to Tier 3 with a WARNING. Because CloudOrchestrator routes
+   plan/synthesize through `provider.execute()`, the Phase 8.1 wiring
+   (concurrency slots + budget units per orchestration call) applies to
+   Tier 4 automatically.
+
+- [x] New opt-in profile `config/profiles/tier4_cloud_hybrid.yaml`
+      (tier_max: 4, `kimi-k2.7-code:cloud`, compute_location:
+      ollama_cloud) -- the only shipped path to Tier 4.
+- [x] Regression tests (`tests/unit/test_orchestrator_factory.py`, +5 net):
+      `test_tier4_with_cloud_orchestrator_location_returns_cloud`,
+      `test_tier4_with_local_orchestrator_degrades_to_reasoning`
+      (replaces the old `test_tier4_falls_back_to_reasoning`, which
+      codified the unreachable behavior), and `TestTier4Reachability`
+      driving the REAL shipped YAMLs: (tier2_designlab x cowork) -> 2/Dual,
+      (tier1_tasker x cowork) -> 1/Single, (tier4_cloud_hybrid x cowork)
+      -> 4/Cloud, (tier4_cloud_hybrid x chat) -> 1 (mode ceiling holds).
+- [x] Live confirmation (Designlab1, 2026-07-19):
+
+```
+$ TASKER_PROFILE=tier4_cloud_hybrid tasker-cli --mode cowork "...91 prime?..."
+[cowork] Planning with CloudOrchestrator...
+  2 step(s), used_fallback=False
+  Step 0: Reason about whether 91 is prime ... [ok] nemotron-3-ultra-cloud (4755ms, budget 0.6%)
+  Step 1: State the answer in one sentence ... [ok] lfm2.5-local (32348ms, budget 0.6%)
+Synthesizing...
+**91 is not prime because it can be factored as 7 x 13.**
+```
+      Plan (+3.4u kimi L1), reasoning step on cloud (+14.3u nemotron L3),
+      writing step on LOCAL hardware, cloud synthesis (+3.8u) -- the
+      exact "cloud orchestrator, local workers" hybrid SDD 5.3 specifies,
+      with slot acquire/release + budget increments logged on every
+      orchestration call.
+- [x] Full suite green: **591 tests, OK** (was 586 after 8.1).

@@ -1,0 +1,39 @@
+# Tier 4 -- cloud-orchestrator hybrid (COWORK_PROMPT task 8.2).
+# Explicit opt-in profile: the orchestrator model runs on Ollama Cloud, so no
+# local hardware ceiling applies to it -- Tier 4 is configuration, never a
+# hardware-detection outcome (SDD 5.3 "Tier 4 activation"). Workers are still
+# selected normally (local preferred under HYBRID; cloud when capabilities
+# demand it). Usable from either machine.
+# Select with: TASKER_PROFILE=tier4_cloud_hybrid   (COWORK mode reaches 4)
+hardware_profile: tier4_cloud_hybrid
+description: "Cloud-orchestrator hybrid -- kimi-k2.7-code:cloud plans, local/cloud workers execute"
+
+orchestrator:
+  tier_max: 4
+  provider: cloud
+  model: kimi-k2.7-code:cloud
+  compute_location: ollama_cloud
+  load_strategy: resident
+  context_limit: 8192
+
+classifier:
+  provider: rule_based
+  fallback: orchestrator
+
+worker_pool:
+  max_concurrent_local: 1
+  max_concurrent_ollama_cloud: 3
+  unload_between_tasks: false
+
+ollama:
+  plan: pro
+  base_url: "http://localhost:11434"
+  session_throttle_at: 0.90
+  weekly_throttle_at: 0.85
+  fallback_on_exhaustion: local_then_direct_cloud
+
+mode_constraints:
+  cowork:
+    behavior: limited_parallel
+  research:
+    behavior: parallel_fetch

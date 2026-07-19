@@ -87,3 +87,18 @@ TASKER_BUDGET_PRELOAD=2750 tasker-cli --mode cowork "<same task as H5.3>"
 TASKER_BUDGET_PRELOAD=3050 tasker-cli --mode cowork "<same task as H5.3>"
 tasker-cli resume --last   # fresh process, preload unset -> completes plan
 ```
+
+### H5.5 Tier 4 reachability (Phase 8.2, COWORK_PROMPT numbering)
+```bash
+# Unit: resolution from real YAMLs + factory tier-4 construction/degrade
+python -m unittest tests.unit.test_orchestrator_factory.TestTier4Reachability -v
+python -m unittest tests.unit.test_orchestrator_factory.TestBuildOrchestratorTierSelection -v
+
+# Live: CloudOrchestrator plans via Ollama Cloud, workers hybrid local/cloud
+export TASKER_PROFILE=tier4_cloud_hybrid
+export OLLAMA_BASE_URL=http://127.0.0.1:11435
+export TASKER_LOG_LEVEL=INFO
+tasker-cli --mode cowork "Plan two steps. Step 1: a reasoning specialist reasons about whether 91 is prime. Step 2: a writer states the answer in one sentence."
+# Expect: "[cowork] Planning with CloudOrchestrator..." + slot/budget INFO
+# logs on the plan and synthesize calls themselves.
+```

@@ -285,7 +285,7 @@ New modules unique to the harness are listed in Section 5.
 |------|------------------|-------------|----------------|-------------|--------------|
 | CHAT | 0 (rule-based) or 1 | search, calculator, memory_read | COST_OPTIMIZED | sync stream | session |
 | CODE | 1 (single LLM) | bash, file_read, file_write, git, linter, test_runner, code_search | CAPABILITY_FIRST | CLI/REPL + diffs | project-aware |
-| COWORK | 2–3 (dual/reasoning) | ALL + checkpoint_write, task_state, progress_report | HYBRID | async + checkpoints | project + episodic |
+| COWORK | 2–4 (dual/reasoning/cloud) | ALL + checkpoint_write, task_state, progress_report | HYBRID | async + checkpoints | project + episodic |
 | RESEARCH | 2+ | web_search, retrieve, pdf_extract, citation_tracker | CAPABILITY_FIRST, long-ctx preferred | async + section streaming | research session |
 | SECURE | 0–1 (local only) | file ops, local search, local memory (no web) | PRIVATE (hard block) | mirrors base mode | local filesystem only |
 
@@ -330,7 +330,23 @@ New modules unique to the harness are listed in Section 5.
 | 1 | `SingleLLMOrchestrator` | qwen3:1.7b or llama3.2:3b | TASKER-P1 normal, sequential |
 | 2 | `DualLLMOrchestrator` | Planner: qwen3:7b, Synthesizer: qwen3:4b | Designlab1 (GPU) |
 | 3 | `ReasoningOrchestrator` | Full reasoning model resident | GPU server or future upgrade |
-| 4 | `CloudOrchestrator` | Fugu / Claude / OpenAI | Hybrid: cloud orchestrator, local workers |
+| 4 | `CloudOrchestrator` | Ollama Cloud model / Fugu / Claude / OpenAI | Hybrid: cloud orchestrator, local workers |
+
+**Tier 4 activation (added for COWORK_PROMPT task 8.2):** Tier 4 is an
+explicit configuration opt-in, never a hardware-detection outcome. Because the
+Tier 4 orchestrator model runs remotely, the local hardware ceiling that
+justifies `tier_max` 0–3 does not physically constrain it — but the resolution
+rule stays uniform: `effective_tier = min(mode.orchestrator_tier_max,
+profile.orchestrator_tier_max)`. To reach Tier 4 a hardware profile must
+declare `orchestrator.tier_max: 4` **and** route the orchestrator model to the
+cloud (`orchestrator.compute_location: ollama_cloud` in the current
+Ollama-Cloud-first phase; direct-cloud providers once they are wired into the
+CLI provider map). A tier ≥ 4 request whose orchestrator compute location is
+local degrades to Tier 3 per the Section 10.3 chain. COWORK is the only mode
+that may rise to Tier 4 (`orchestrator_tier_max: 4`); the standard machine
+profiles (`tier1_tasker`, `tier2_designlab`) deliberately stay capped at 1/2,
+so Tier 4 is reached only via a purpose-built profile such as
+`config/profiles/tier4_cloud_hybrid.yaml`.
 
 **TRINITY Role Assignments (Tiers 2+):**
 

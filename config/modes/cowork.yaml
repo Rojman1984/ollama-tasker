@@ -1,7 +1,12 @@
 # Ollama Tasker -- COWORK mode defaults
 # SDD Section 5.1 and 8.4
 name: cowork
-orchestrator_tier_max: 3
+# 4 since task 8.2 (was 3): COWORK may rise to Tier 4 (CloudOrchestrator)
+# when the hardware profile explicitly declares tier_max: 4 with a
+# cloud-routed orchestrator model (SDD 5.3 "Tier 4 activation"). Effective
+# tier on the standard machine profiles is unchanged: min(4, 2)=2 on
+# Designlab1, min(4, 1)=1 on TASKER-P1.
+orchestrator_tier_max: 4
 routing_policy: hybrid
 interaction_pattern: async_checkpoint
 memory_scope: project_episodic

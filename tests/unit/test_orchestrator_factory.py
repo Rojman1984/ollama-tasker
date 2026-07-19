@@ -12,6 +12,7 @@ from tasker.orchestrator.tier0_rules import NanoOrchestrator
 from tasker.orchestrator.tier1_single import SingleLLMOrchestrator
 from tasker.orchestrator.tier2_dual import DualLLMOrchestrator
 from tasker.orchestrator.tier3_reasoning import ReasoningOrchestrator
+from tasker.orchestrator.tier4_cloud import CloudOrchestrator
 from tasker.workers.base import (
     ComputeLocation,
     InteractionPattern,
@@ -144,8 +145,18 @@ class TestBuildOrchestratorTierSelection(unittest.TestCase):
         result = build_orchestrator(config, {ProviderType.OLLAMA: _FakeProvider()})
         self.assertIsInstance(result, ReasoningOrchestrator)
 
-    def test_tier4_falls_back_to_reasoning(self):
-        config = _config(profile_tier=4, mode_tier=4)
+    def test_tier4_with_cloud_orchestrator_location_returns_cloud(self):
+        # Task 8.2: tier >= 4 + orchestrator routed to Ollama Cloud
+        # constructs CloudOrchestrator (previously never constructed at all).
+        config = _config(profile_tier=4, mode_tier=4, compute_location="ollama_cloud")
+        result = build_orchestrator(config, {ProviderType.OLLAMA: _FakeProvider()})
+        self.assertIsInstance(result, CloudOrchestrator)
+
+    def test_tier4_with_local_orchestrator_degrades_to_reasoning(self):
+        # Tier 4 requires a cloud-routed orchestrator model; a local
+        # compute_location degrades to Tier 3 per SDD 10.3 (was the
+        # unconditional behavior before task 8.2).
+        config = _config(profile_tier=4, mode_tier=4, compute_location="local")
         result = build_orchestrator(config, {ProviderType.OLLAMA: _FakeProvider()})
         self.assertIsInstance(result, ReasoningOrchestrator)
 
@@ -367,6 +378,44 @@ class TestOrchestratorCloudConcurrency(unittest.IsolatedAsyncioTestCase):
         output = await orchestrator._call_model("sys", "usr")
         self.assertEqual(output, "local response")
         self.assertEqual(mgr.acquire_calls, 0)
+
+
+class TestTier4Reachability(unittest.TestCase):
+    """
+    Task 8.2 regression: tier resolution from the REAL shipped YAML configs.
+
+    Tier 4 is deliberately unreachable from the standard machine profiles
+    (hardware tier ceiling: min() caps at 2 on Designlab1, 1 on TASKER-P1)
+    and reachable only via the explicit tier4_cloud_hybrid opt-in profile
+    with COWORK mode (the only mode whose orchestrator_tier_max is 4).
+    See SDD 5.3 "Tier 4 activation".
+    """
+
+    def _build(self, profile_name: str, mode_name: str):
+        config = ModeConfigurator().build(profile_name, mode_name)
+        orch = build_orchestrator(config, {ProviderType.OLLAMA: _FakeProvider()})
+        return config, orch
+
+    def test_designlab1_cowork_caps_at_tier2(self):
+        config, orch = self._build("tier2_designlab", "cowork")
+        self.assertEqual(config.effective_tier_max, 2)
+        self.assertIsInstance(orch, DualLLMOrchestrator)
+
+    def test_tasker_p1_cowork_caps_at_tier1(self):
+        config, orch = self._build("tier1_tasker", "cowork")
+        self.assertEqual(config.effective_tier_max, 1)
+        self.assertIsInstance(orch, SingleLLMOrchestrator)
+
+    def test_tier4_profile_with_cowork_reaches_cloud_orchestrator(self):
+        config, orch = self._build("tier4_cloud_hybrid", "cowork")
+        self.assertEqual(config.effective_tier_max, 4)
+        self.assertIsInstance(orch, CloudOrchestrator)
+
+    def test_tier4_profile_with_chat_still_caps_at_mode_tier(self):
+        # Mode ceiling still applies: chat caps at 1 even on a tier-4 profile.
+        config, orch = self._build("tier4_cloud_hybrid", "chat")
+        self.assertEqual(config.effective_tier_max, 1)
+        self.assertIsInstance(orch, SingleLLMOrchestrator)
 
 
 if __name__ == "__main__":

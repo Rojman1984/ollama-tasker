@@ -105,33 +105,37 @@ Ollama Cloud models first; local models and frontier APIs deferred)
 | 7 | Hardening (+ Addenda A/B, 7.5.x hardware detection) | ✅ COMPLETE |
 | 8 | Cloud-path E2E validation | 🔄 IN PROGRESS |
 
-**Last completed task:** Task 8.1 — live cloud-path E2E validation on
-Designlab1, ✅ COMPLETE. All four checkpoints confirmed live (slot
-enforcement incl. a real DEFERRED under saturation; budget increments +
-throttle directive; pause → on-disk checkpoint → real cross-process
-resume; used_fallback reported). The session layer genuinely was NOT
-wired into the live CLI before this session — budget/SessionManager/
-checkpointing/resume/--policy were all dead in cli/shell.py and tiers
-2/3/4 never set used_fallback. All fixed + 19 regression tests
-(567 → 586, green). Evidence: docs/TASKER_CHECKLIST.md → "Phase 8.1 --
-Live Cloud-Path E2E Validation". Full detail: CLAUDE.md Current Session
-Notes.
+**Last completed task:** Task 8.2 — tier4_cloud.py reachability, ✅
+COMPLETE (same session as 8.1, also ✅). Tier 4 was unreachable via three
+gates: profile ceilings (2/1 — by design, kept), mode ceilings (max 3 —
+SDD gap, fixed SDD-first: 5.1 COWORK "2–4" + new 5.3 "Tier 4 activation";
+cowork.yaml tier_max→4, effective tier unchanged on standard machines),
+and the factory never constructing CloudOrchestrator (fixed: tier ≥ 4 +
+orchestrator compute_location ollama_cloud → CloudOrchestrator, local
+location degrades to Tier 3 per SDD 10.3). New opt-in profile
+tier4_cloud_hybrid.yaml; live-confirmed on Designlab1 ("Planning with
+CloudOrchestrator...", cloud plan/synthesize with slot+budget logs,
+reasoning step on nemotron cloud, writing step on local lfm2.5). Suite
+567 → 586 (8.1) → 591 (8.2), green. Evidence:
+docs/TASKER_CHECKLIST.md → "Phase 8.1"/"Phase 8.2" sections; full detail
+in CLAUDE.md Current Session Notes.
 
-**Next task:** Task 8.2 — `tier4_cloud.py` reachability: verify hardware-
-profile → tier resolution can actually route to Tier 4 from the
-Designlab1 and TASKER-P1 profiles. If unreachable by design, fix the
-resolution chain or document why. Add a regression test. (Note from 8.1:
-`build_orchestrator()` currently returns Tier 3 for any tier >= 3 and
-never constructs CloudOrchestrator — start there.) Then 8.3 — tool-loop
-non-termination guard.
+**Next task:** Task 8.3 — tool-loop non-termination guard in
+`tasker/tools/loop.py`: hard iteration cap (max_turns=5 exists — verify
+it is truly hard) + repeated-identical-call detection (worker re-issuing
+the same tool call with the same arguments → terminate early rather than
+burn turns/budget). Unit tests for both guard conditions.
 
-**Files modified this session:** cli/shell.py (session wiring, resume,
---policy, OLLAMA_BASE_URL/TASKER_BUDGET_PRELOAD/TASKER_LOG_LEVEL),
+**Files modified this session:** 8.1 — cli/shell.py (session wiring,
+resume, --policy, OLLAMA_BASE_URL/TASKER_BUDGET_PRELOAD/TASKER_LOG_LEVEL),
 tasker/workers/providers/ollama.py (budget recording),
 tasker/session/concurrency.py (slot logging), orchestrator tier2/3/4
 (used_fallback), config/profiles/tier2_designlab.yaml (+orchestrator
-model), config/profiles/tier2_designlab_cloud.yaml (new),
-tests (+19), docs/TASKER_CHECKLIST.md, docs/TESTING_GUIDE.md, CLAUDE.md,
+model), config/profiles/tier2_designlab_cloud.yaml (new), tests (+19).
+8.2 — docs/SDD.md, config/modes/cowork.yaml,
+tasker/orchestrator/factory.py, config/profiles/tier4_cloud_hybrid.yaml
+(new), tests/unit/test_orchestrator_factory.py (+5 net). Both —
+docs/TASKER_CHECKLIST.md, docs/TESTING_GUIDE.md, CLAUDE.md,
 COWORK_PROMPT.md.
 
 **Open decisions / blockers:**
@@ -164,7 +168,7 @@ was broken). Confirm live:
   - used_fallback reported correctly on ExecutionPlan
 Document evidence (commands + output) in docs/TASKER_CHECKLIST.md.
 
-### 8.2 — tier4_cloud.py reachability
+### 8.2 — tier4_cloud.py reachability  ✅ COMPLETE (2026-07-19)
 
 Verify hardware-profile → tier resolution can actually route to Tier 4 from
 the Designlab1 and TASKER-P1 profiles. If unreachable by design, fix the
