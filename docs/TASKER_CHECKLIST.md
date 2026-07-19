@@ -367,6 +367,64 @@ command in TESTING_GUIDE.md.
       attempted this session -- out of scope, but promising given
       `done_reason=stop` + non-empty `thinking` + empty `content` is
       exactly the signature that control targets.
+      **Later session (targeted diagnostic, Designlab1) ruled out two
+      more hypotheses -- do not re-test these from scratch:**
+      (1) missing `num_predict`/generation-budget option -- confirmed
+      `OllamaProvider` never sets `options.num_predict` or `num_ctx` at
+      all (Ollama's default context applies; `ollama ps` showed the
+      model loaded with only `CONTEXT 4096` despite a real 128k window),
+      matching two independently-built reference scripts that both set
+      `num_predict: 32000` -- but 28 raw reproduction attempts across
+      every previously-observed trigger condition (terse instruction,
+      tool-list system prompt, cold-vs-warm model, explicit
+      `num_predict: 32000` override) produced **0 empty-content
+      failures**, and all 28 had `done_reason: "stop"` (never
+      `"length"`, which is what truncation would show) -- argues against
+      budget starvation being the mechanism, at least under conditions
+      testable via isolated sequential calls.
+      (2) cold-model warmup -- 4/4 clean on a freshly force-unloaded
+      (`ollama stop`) model, no different from warm.
+      **Not fixed -- bug could not be reproduced at all this session**
+      despite covering the exact conditions (terse "Hello"/"A test"
+      wording, LFM25 tool-list system prompt) that triggered it live
+      earlier in the same overall session via the real CLI. See
+      CLAUDE.md's "Diagnostic session" note for the full evidence trail
+      and the untried next lever (reproduce under real async/concurrent
+      harness load, not isolated sequential raw calls).
+      **Follow-up session ruled out two more -- do not re-test these
+      either:**
+      (3) context-window (`num_ctx`) ceiling -- confirmed
+      `WorkerManifest.context_window` (`128000` for lfm2.5-local) is
+      genuinely dead metadata, never wired to Ollama's `num_ctx` request
+      option (real gap, worth fixing on its own merits someday). But
+      10/10 reproduction attempts (COWORK's full 14-tool bundle +
+      synthetic multi-turn history, real `prompt_eval_count=3508`,
+      combined `total_tokens` reaching 4102-5342 -- i.e. exceeding the
+      supposed 4096 default ceiling in most runs) produced **0
+      empty-content failures** both with `num_ctx` unset and with it
+      explicitly set to 32768 -- no difference, no truncation
+      (`done_reason` always `"stop"`) even 30% over the ceiling.
+      (4) concurrency / lack of a local-hardware concurrency guard --
+      confirmed via code read that `OllamaCloudConcurrencyManager` is
+      gated by `is_cloud` in `OllamaProvider.execute()` and never
+      consulted for `LOCAL_HARDWARE` calls (real, confirmed gap -- zero
+      concurrency guarding exists for local calls anywhere in the
+      codebase). But 3 batches of 3 truly concurrent (`asyncio.gather`)
+      requests (9 total) against the same loaded model produced **0/9
+      empty or errored** -- Ollama's server serializes GPU inference
+      cleanly under concurrent HTTP arrival (staggered per-request
+      completion times confirm serialization), no response mixing or
+      corruption observed.
+      **47 total reproduction attempts across two sessions (28 + 10 + 9),
+      0 failures.** Neither the context-ceiling gap nor the missing
+      local-concurrency-guard gap is the empty-content bug's cause, even
+      though both are real, independently-confirmed gaps worth fixing on
+      their own correctness merits eventually (not done this session --
+      "fix only if confirmed" scope). Base rate now appears low enough
+      that a much larger sample (dozens-hundreds of attempts) or a
+      different reproduction strategy (genuinely concurrent *multi-turn*
+      `run_tool_loop()` load, not single-turn) may be needed to catch it
+      at all. See CLAUDE.md's "Follow-up diagnostic session" note.
 
 ## Orchestrator Correctness
 

@@ -533,3 +533,190 @@ specifically (only Designlab1's 94.5s worst case was directly measured;
 TASKER-P1's chat-mode worker call was fast at ~4s, but that's not
 necessarily representative of its plan()/synthesize() latency under the
 same heavy-thinking conditions).
+
+---
+
+## Diagnostic session — empty-content bug, num_predict + warmup hypotheses (Designlab1)
+
+**Scope:** targeted diagnostic only, per explicit instruction — test two
+specific hypotheses for the still-open empty-content bug (num_predict
+generation-budget starvation; cold-model warmup), fix only if confirmed.
+No other change was in scope.
+
+**Step 1 — code audit (read-only):** `tasker/workers/providers/ollama.py`'s
+request payload (`execute()`, ~line 190) is `{"model", "messages",
+"stream": False}` plus optional `tools` — **no `options` dict is ever
+constructed**, so `num_predict` is never sent; Ollama's own default
+applies. **`num_ctx` is also never set.** `HardwareProfile.context_limit`
+(parsed from `tier1_tasker.yaml`, e.g. `4096`) is parsed but **never
+threaded into any request** — confirmed via grep, a dead config value.
+Empirically (`ollama show lfm2.5-thinking:latest`): the model's own
+Modelfile only sets `temperature=0.05`/`top_k=50`, no `num_predict`/
+`num_ctx` override; real max context is 128,000 tokens, but `ollama ps`
+shows it actually loaded with **`CONTEXT 4096`** (the effective Ollama
+server default) — a real gap given `<think>` blocks routinely run
+4,000–14,000+ chars. Neither `WorkerManifest` nor `WorkerTask` has any
+existing field for this (`max_tokens`/`num_predict`/`options`) — grep on
+`tasker/workers/base.py`, zero matches. Confirms Ollama Tasker really is
+missing an equivalent of the two reference MCP scripts'
+`num_predict: 32000`.
+
+**Steps 2–4 — reproduction attempts (28 total raw `/api/chat` calls
+against `lfm2.5-thinking:latest`, Designlab1, real GPU, via a standalone
+script bypassing the harness to see full raw JSON incl. `thinking`):**
+covered every previously-documented trigger combination —
+  - Full user-wording prompt, no tools/system prompt: 3 + 8 = 11 runs, **0
+    empty**. `eval_count` 1661–2260, `done_reason` always `"stop"`.
+  - Terse single-word instruction ("Hello", matching the exact
+    orchestrator step-description wording that triggered the bug live
+    earlier in this same overall session — see the 7.5.4-7.5.6 notes
+    above), no tools: 4 runs, **0 empty**. Notably fast (~3.6-4s) and
+    byte-identical output across all 4 (temperature=0.05 makes this
+    model highly deterministic for short prompts).
+  - Terse instruction + LFM25 tool-list system prompt (matching the
+    actual system-prompt shape a CODE/COWORK-mode worker call gets —
+    the condition present in every earlier live observation of this
+    bug): 6 runs, **0 empty**.
+  - Same tool-prompt condition but with the model force-unloaded
+    (`ollama stop`) immediately before the call, i.e. genuinely cold
+    (Step 4, warmup hypothesis): 4 runs, **0 empty**.
+  - Same tool-prompt condition with an explicit `options.num_predict:
+    32000` override (Step 3, the num_predict hypothesis): 3 runs, **0
+    empty**.
+
+**Critical cross-cutting observation:** across all 28 calls, `done_reason`
+was `"stop"` every single time — **never `"length"`**. `"length"` is what
+Ollama reports when a response is cut off by `num_predict` (or context)
+exhaustion; every one of these 28 responses completed naturally, with
+`eval_count` ranging ~200 (short "Hello", no tools) to ~2260 (long
+constraint-satisfaction reasoning). This is direct evidence against
+generation-budget starvation being the mechanism, at least under every
+condition this session could exercise — if `num_predict` (or the
+effective 4096 `num_ctx`) were actually truncating responses, at least
+some fraction of 28 calls with `thinking_len` up to ~9,251 chars should
+have shown `done_reason="length"`. None did.
+
+**Conclusion (Step 5): neither hypothesis could be confirmed, because
+the bug could not be reproduced at all this session** — not "tested and
+ruled out via a fix that didn't help," but a genuine failure to
+reproduce despite exhaustively covering every condition previously
+observed to trigger it live (terse wording, tool-list system prompt,
+cold model). Per explicit instruction, **no fix was implemented** — a
+speculative `num_predict`/warmup change would be unjustified without
+evidence it addresses the actual failure mode, and could mask the real
+cause for a future session that DOES catch it. **No code was changed,
+nothing was committed.**
+
+**What this session adds to the evidence trail (for whoever picks this
+up next):** the bug's base rate under current conditions on Designlab1
+appears low enough that 28 isolated attempts weren't enough to catch it,
+despite earlier live sessions hitting it repeatedly within a handful of
+full-CLI runs. Plausible explanations, none tested this session: (a) the
+harness's real call path (`aiohttp`, real async concurrency, potentially
+overlapping orchestrator+worker+synthesize calls) differs from this
+session's serial `urllib` script in a way that matters — e.g. GPU
+contention from a near-simultaneous second request; (b) the bug's
+frequency is itself state-dependent on something not controlled here
+(server uptime, thermal state, driver state); (c) true low-probability
+sampling rarity and 28 attempts is simply not enough. **Two hypotheses
+now ruled out as sole/primary causes and should not be re-tested from
+scratch:** num_predict/generation-budget starvation (Step 1 confirms the
+gap exists but Steps 2-4's 28/28 `done_reason="stop"` argues against it
+being why), and simple cold-vs-warm model state (Step 4: 4/4 clean on a
+freshly-reloaded model). The most promising untried lever, based on this
+session's process-of-elimination: **reproduce via the actual harness
+under real async/concurrent load** (e.g. a scripted multi-turn
+`run_tool_loop()` invocation, or genuinely concurrent overlapping
+requests) rather than isolated sequential raw calls, since that's the
+one dimension this session's methodology could not exercise.
+
+---
+
+## Follow-up diagnostic session — context-window ceiling + concurrency hypotheses (Designlab1)
+
+Two more hypotheses tested, both prompted directly by the prior session's
+"untried next lever" note above. Per instruction, did not re-test
+num_predict or cold/warm (both already confirmed ruled out).
+
+### Priority 1 — context-window (`num_ctx`) ceiling
+
+**Confirmed the underlying gap for real:** `OllamaProvider` never sets
+`num_ctx` anywhere (same audit as the prior session, re-verified).
+`worker_registry.yaml`'s `lfm2.5-local` entry declares
+`context_window: 128000`, but that field is purely descriptive — never
+threaded into any request. This part of the hypothesis was correct.
+
+**But the reproduction test ruled it out as the empty-content bug's
+cause.** Built a realistic large-context case: COWORK mode's full
+14-tool bundle (LFM25-formatted tool-list system prompt) + a synthetic
+multi-turn history (bash listing + file-read tool result, matching what
+`run_tool_loop()` actually accumulates) + the terse "Hello" instruction.
+Real tokenizer count (`prompt_eval_count`) was **3508** — notably higher
+than a naive chars/4 estimate (2304), a useful calibration note for
+future token-budget reasoning in this repo. Combined with generation,
+`total_tokens` (`prompt_eval_count + eval_count`) actually **exceeded the
+supposed 4096 default ceiling in most runs**:
+
+  - Baseline (`num_ctx` unset, current behavior), 5 runs: **0/5 empty**.
+    `total_tokens` = 4553, 4360, 4653, 4604, 4102 — i.e. 3 of 5 runs were
+    *already over* 4096, with clean, complete, non-truncated answers
+    every time (`done_reason: "stop"`, never `"length"`).
+  - `num_ctx=32768` explicitly set, 5 runs: **0/5 empty**. `total_tokens`
+    = 4548, 4753, 5342, 4409, 3723 — one run 30% over 4096. Still clean.
+
+10/10 clean across both conditions, spanning 3723–5342 total tokens, is
+strong evidence the model is not actually being hard-capped at 4096 in
+practice (contrary to what `ollama ps`'s `CONTEXT 4096` column implies),
+or that overflow doesn't manifest as this specific empty-content
+signature. **Conclusion: `num_ctx`/context-window ceiling ruled out as
+the empty-content bug's cause.** No fix applied — wiring
+`WorkerManifest.context_window` through to `num_ctx` would still be a
+reasonable correctness improvement on its own merits (the field is
+genuinely dead today), but it does not address this bug, so it was not
+implemented this session per the "fix only if confirmed" instruction.
+
+### Priority 2 — concurrency (local calls unguarded)
+
+**Confirmed via code read:** `tasker/session/concurrency.py`'s
+`OllamaCloudConcurrencyManager` is gated by `is_cloud = worker.
+compute_location == ComputeLocation.OLLAMA_CLOUD` in `OllamaProvider.
+execute()` (line ~162) — for `LOCAL_HARDWARE` (every worker call on
+TASKER-P1/Designlab1 today), `is_cloud` is `False` and the concurrency
+manager is never consulted at all. Confirmed via grep across `cli/
+shell.py`, `tasker/tools/loop.py`, and `concurrency.py` itself: there is
+no semaphore, lock, or any other guard anywhere in the codebase for
+local calls. This part of the hypothesis is also correct as stated —
+local calls truly have zero concurrency guarding today.
+
+**Reproduction:** fired 3 truly concurrent (`asyncio.gather` + `aiohttp`)
+requests against `lfm2.5-thinking:latest`, same terse "Hello" + tool-list
+prompt, across 3 batches (9 total calls). **0/9 empty or errored.**
+Per-request elapsed times within a batch were staggered (e.g. batch 1:
+18.9s / 39.7s / 64.4s) — confirming Ollama's server serializes GPU
+inference even when requests arrive simultaneously at the HTTP layer —
+and did so *cleanly*: every response had a distinct, plausible `content`
+for the shared prompt (no signs of one request's output leaking into
+another), all `status: 200`, all `done_reason: "stop"`.
+
+**Conclusion: concurrency hypothesis also ruled out under the tested
+conditions** (3-way concurrency, 9 total calls). The absence of any
+guard is still a real, confirmed gap in the provider layer worth fixing
+on its own architectural merits (silently relying on the Ollama server
+to serialize correctly is fragile, and `is_cloud`-gating a manager named
+`OllamaCloudConcurrencyManager` for LOCAL_HARDWARE calls was never going
+to work by design) — but since it didn't reproduce the empty-content bug
+here, no fix was implemented this session; a local-hardware concurrency
+guard is a nontrivial provider-layer addition explicitly deferred
+pending direct confirmation with the user before implementing, per this
+session's instructions.
+
+**Net result of both follow-up priorities: still no reproduction of the
+empty-content bug this session** (0/10 Priority 1 + 0/9 Priority 2, on
+top of the prior session's 0/28 — 47 total attempts across every
+hypothesis tested so far). No code changed, nothing committed. Remaining
+untested lever from the prior session's note — genuinely concurrent
+*multi-turn* load specifically through `run_tool_loop()`'s history-
+accumulation path (as opposed to this session's single-turn concurrent
+calls) — is still open for a future session, though the base rate now
+looks low enough that a much larger sample size (dozens to hundreds of
+attempts) may be needed to catch it at all.
