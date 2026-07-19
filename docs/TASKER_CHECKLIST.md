@@ -796,12 +796,76 @@ Two independent, small fixes, unrelated to each other.
 - [ ] Live headless run on TASKER-P1 -- not run this session (no access to
       that machine from here); flagged as a follow-up, not fabricated.
 
-### Out of scope this session (unchanged from SDD_ADDENDUM_PHASE8.md)
-- [ ] Phase 8.2 -- Agentic Readiness Checker (readiness.py, 3 probe rounds,
-      --check-model)
+### Still out of scope (unchanged from SDD_ADDENDUM_PHASE8.md)
 - [ ] Phase 8.3 -- TUI Foundation (real TuiApp, WelcomeScreen, status bar)
 - [ ] Phase 8.4 -- SetupWizardScreen + ModelSelectorScreen
 - [ ] Phase 8.5 -- HarnessPanel
+
+### Phase 8.2 -- Agentic Readiness Checker (addendum numbering; completed 2026-07-19)
+- [x] tasker/setup/readiness.py (ProbeResult, ReadinessResult,
+      ReadinessChecker, assign_roles per B.4.6, format_report per B.4.4,
+      write_manifest_to_registry)
+- [x] All 3 probe rounds implemented (NATIVE, LFM25, JSON_EXTRACT), run in
+      order, later rounds skipped once one succeeds. Success criterion
+      (added to B.4.3 SDD-first): >= 1 extracted call naming
+      get_current_time with the required "timezone" argument present.
+      Probes go through the real OllamaProvider so a passing round
+      exercises the exact production code path.
+- [x] JSON_EXTRACT injection defined + implemented (new B.4.3a, SDD-first):
+      inject_tools() now injects for JSON_EXTRACT (was pass-through);
+      _extract_json() gained a raw_decode fallback scan so nested
+      arguments objects parse (the old regexes could not match them).
+      XML_EXTRACT/FEW_SHOT remain pass-through.
+- [x] Suggested WorkerManifest generation on success: id/capabilities/
+      usage-level/cost reused from an existing registry entry for the same
+      model (re-check never silently narrows a worker; probe verdict wins
+      on tool_protocol), context_window from /api/show's
+      *.context_length (fallback: existing entry, then 8192),
+      latency_class from measured probe duration, worker_role from B.4.6
+      rules, tool_result_role "tool" for non-NATIVE protocols.
+- [x] Worker registry write on user confirmation ([Y/n] prompt; --yes to
+      skip): text-splicing writer preserves the file's hand-written
+      comments -- new id appended, existing id has exactly its own block
+      replaced. Verified loadable by WorkerRegistry.load_from_yaml after
+      both paths.
+- [x] tasker-setup --check-model <name> CLI command (plus --yes,
+      --registry PATH override, --ollama-url; stub removed from wizard.py)
+- [x] B.4.2 cloud-model exception (SDD-first, live-verified): the pull
+      gate applies to LOCAL models only -- a signed-in server serves
+      :cloud models via /api/chat even when absent from /api/tags
+      (confirmed live against kimi-k2.7-code:cloud on 0.30.11), so cloud
+      models are probed directly and the missing tag is informational.
+- [x] tests/unit/test_readiness.py passing (28 tests, provider + HTTP fns
+      mocked per B.10 -- no live Ollama calls); +7 normalizer tests
+      (JSON_EXTRACT injection + raw_decode fallback), +1 provider test
+- [x] Live smoke test, lfm2.5-thinking:latest (Designlab1 WSL, Ollama
+      0.30.11 @ 127.0.0.1:11435): **NATIVE now SUPPORTED** -- Ollama
+      returned a correct tool_calls[] for the probe (A.2b's tools[]
+      rejection no longer reproduces on 0.30.11). Forced Round 2 also
+      SUPPORTED live (bare-object JSON emission, 18.8s). Registry write
+      validated against a scratch copy of the real registry; the REAL
+      registry entry was deliberately left at lfm25 (see open decision
+      below).
+- [x] Live smoke test, cloud model (kimi-k2.7-code:cloud): confirmed
+      native, ~1s probe, /api/show reported real context_window 262144
+      (registry's hand-written entry says 128000 -- stale), roles
+      [reasoning_worker, orchestrator] per B.4.6. Scratch-registry update
+      preserved all comments + all 9 workers.
+- [x] Bonus fix (found live by the probe): OllamaProvider's empty-content
+      retry no longer fires when tool_calls[] are present -- a native tool
+      call from a thinking model legitimately has empty content, and the
+      old condition burned 2 extra (budgeted, if cloud) calls per native
+      tool call. Regression test added.
+
+**Open decisions from this phase (not applied to the real registry):**
+- lfm2.5-local: probe says NATIVE now works on Ollama 0.30.11; registry
+  stays tool_protocol: lfm25 (known-good, validated E2E 8.1-8.3). Flip to
+  native only after re-validating the multi-turn tool loop end-to-end
+  under native on both machines.
+- kimi-k2.7-code-cloud: /api/show says context_window 262144 vs the
+  registered 128000; probe-derived latency_class fast vs registered
+  medium. Both would change live selection behavior -- update deliberately
+  deferred to a session that owns that decision.
 
 ### Mid-session addition (before Phase 8.1 code, per explicit interrupt)
 - [x] SDD_ADDENDUM_PHASE8.md B.4.6 (Role Assignment in Readiness Report)

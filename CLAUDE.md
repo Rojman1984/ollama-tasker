@@ -229,7 +229,8 @@ Update this section as phases complete.
 | 7.5.3 | `NvidiaBackend` — detect + verify (Designlab1) | ✅ COMPLETE |
 | 7.5.4–7.5.6 | `AmdApuBackend`, VRAM cross-check, final paired verification | ✅ COMPLETE |
 | 8.1 | Setup wizard headless logic + `tasker-setup` CLI (see `docs/SDD_ADDENDUM_PHASE8.md`) — **note:** the row above labeled plain "8" is an unrelated, earlier "Orchestrator Factory" milestone from before `SDD_ADDENDUM_PHASE8.md` existed; this is a real naming collision in the project's own history, not a typo — the two are unrelated | ✅ COMPLETE |
-| 8.2–8.5 | Readiness checker, TUI foundation, model selector, harness panel | ⬜ NOT STARTED |
+| 8.2 | Agentic Readiness Checker (`tasker/setup/readiness.py`, addendum numbering — the third "8.2" in this table, see the 8.1 note) | ✅ COMPLETE |
+| 8.3–8.5 | TUI foundation, model selector, harness panel | ⬜ NOT STARTED |
 | E2E 8.1 | Live cloud-path E2E validation (COWORK_PROMPT.md task list — a *third* use of the "8.1" label, distinct from both rows above) | ✅ COMPLETE |
 | E2E 8.2 | tier4_cloud.py reachability from current hardware profiles | ✅ COMPLETE |
 | E2E 8.3 | Tool-loop non-termination guard | ✅ COMPLETE |
@@ -349,6 +350,92 @@ python -m unittest tests.unit.test_orchestrator_nano -v
 ## Current Session Notes
 
 *(Update this section at the end of every Cowork or Code session)*
+
+**Last worked on:** SDD_ADDENDUM_PHASE8.md Phase 8.2 — Agentic Readiness
+Checker (`tasker/setup/readiness.py` + `tasker-setup --check-model`), the
+*addendum's* 8.2 (third use of that number in this project). Headless
+Cowork-supervised session on Designlab1 (WSL, Ollama 0.30.11 @
+127.0.0.1:11435). Full write-up in `docs/TASKER_CHECKLIST.md` → "Phase
+8.2 -- Agentic Readiness Checker (addendum numbering)".
+
+**What was built:** `ReadinessChecker.check()` runs the B.4.3 3-round
+probe (NATIVE → LFM25 → JSON_EXTRACT, later rounds skipped after a
+success) through the real `OllamaProvider`, so a passing round exercises
+the exact production code path. Success = extracted call names
+`get_current_time` with the required `timezone` arg. On success:
+suggested `WorkerManifest` (existing registry entry's id/capabilities/
+usage-level reused — a re-check never narrows a worker; probe verdict
+wins on tool_protocol; `context_window` from `/api/show`'s
+`*.context_length`, fallback existing entry then 8192; `latency_class`
+from measured probe duration; `worker_role` per B.4.6 `assign_roles()`),
+B.4.4 report via `format_report()`, and a [Y/n]-confirmed registry write
+(`write_manifest_to_registry()` — text-splicing, preserves the YAML's
+hand comments; append for new id, exact-block replace for existing id).
+CLI: `tasker-setup --check-model <name>` (+ `--yes`, `--registry PATH`,
+`--ollama-url`). SDD-first additions to the addendum: B.4.3 success
+criterion, B.4.3a (JSON_EXTRACT injection format — `inject_tools()` now
+injects for JSON_EXTRACT, was pass-through; `_extract_json()` gained a
+raw_decode fallback so nested `arguments` objects parse), and the B.4.2
+cloud-model exception (pull gate applies to LOCAL models only —
+live-verified that a signed-in server serves `:cloud` models via
+`/api/chat` while they're absent from `/api/tags`).
+
+**Live findings (both smoke tests done on real hardware):**
+1. `lfm2.5-thinking:latest` → **NATIVE now SUPPORTED on Ollama 0.30.11**
+   — Ollama returned a correct `tool_calls[]` for the probe. A.2b's
+   "rejects tools[] for this family" no longer reproduces on this server
+   version. Forced Round 2 (LFM25) also passed live (bare-object JSON,
+   18.8s). The real registry was deliberately left at `lfm25`
+   (known-good, validated E2E 8.1–8.3) — flipping to native is an open
+   decision requiring tool-loop revalidation on both machines.
+2. `kimi-k2.7-code:cloud` → native, ~1s probe, and `/api/show` reports
+   real context 262144 vs the hand-written registry's 128000 (stale).
+   Registry writes validated against scratch copies only; real registry
+   untouched this session.
+3. **Bonus provider fix** (found live by the probe): the empty-content
+   retry loop now checks `not msg.get("tool_calls")` — a native tool
+   call from a thinking model legitimately has empty content +
+   `tool_calls[]`, and the old condition burned 2 extra (budgeted, if
+   cloud) calls per native tool call. Regression test added.
+
+**Tests:** 595 → 630 (28 new in `test_readiness.py`, +6 net normalizer
+tests incl. JSON_EXTRACT injection + raw_decode fallback scan, +1
+provider retry regression), full suite green.
+
+**Files modified:** `tasker/setup/readiness.py` (new),
+`tasker/setup/wizard.py` (--check-model implemented, stub removed),
+`tasker/tools/normalizer.py` (JSON_EXTRACT injection + `_scan_json_calls`),
+`tasker/workers/providers/ollama.py` (retry guard),
+`docs/SDD_ADDENDUM_PHASE8.md` (B.4.2 exception, B.4.3 criterion, B.4.3a),
+`tests/unit/test_readiness.py` (new), `tests/unit/test_tool_normalizer.py`,
+`tests/unit/test_provider_ollama.py`, `docs/TASKER_CHECKLIST.md`,
+`docs/TESTING_GUIDE.md` (new H6), `CLAUDE.md`, `COWORK_PROMPT.md`.
+
+**Next task:** Addendum Phase 8.3 — TUI foundation (real `TuiApp`,
+`WelcomeScreen`, `HardwareStatusBar`; `tasker/tui/app.py` is currently a
+stub). Then 8.4 (SetupWizardScreen + ModelSelectorScreen wired to the
+readiness checker) and 8.5 (HarnessPanel). Carried-over candidates: wire
+Anthropic/OpenAI/Fugu providers into the CLI provider_map (or pre-filter
+unroutable workers); budget persistence across restarts (SDD 5.10);
+TASKER-P1 live runs of `tasker-setup` (wizard + readiness) — this
+session had no access to that machine.
+
+**Blockers:** None.
+
+**Open decisions (also in TASKER_CHECKLIST.md Phase 8.2 section):**
+- Flip `lfm2.5-local` to `tool_protocol: native`? Probe says 0.30.11
+  supports it natively; requires end-to-end tool-loop revalidation first.
+- Update `kimi-k2.7-code-cloud` context_window 128000 → 262144 and
+  latency medium → fast (probe-derived)? Both change live selection
+  behavior; a 1-token probe's latency is not necessarily representative.
+- Unchanged from before: LFM2.5 empty-content bug (parked; the retry
+  path itself got safer this session but the root cause is still
+  unconfirmed); Tier 2 same-model-for-both-roles bug;
+  `resolve_hardware_profile()` still not wired into `_run_task()`.
+
+---
+
+## Previous Session Notes (COWORK_PROMPT tasks 8.1–8.3, kept for reference)
 
 **Last worked on:** COWORK_PROMPT tasks 8.1 (live cloud-path E2E
 validation), 8.2 (tier4_cloud.py reachability), and 8.3 (tool-loop

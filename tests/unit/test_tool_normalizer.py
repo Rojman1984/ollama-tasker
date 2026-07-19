@@ -110,6 +110,29 @@ class TestJsonExtractProtocol(unittest.TestCase):
         results = ToolCallNormalizer.extract("Just a plain answer.", None, ToolProtocol.JSON_EXTRACT)
         self.assertEqual(results, [])
 
+    def test_extract_bare_object_with_nested_arguments(self):
+        # No fence, nested {} in arguments -- the regex paths cannot match
+        # this; the raw_decode fallback scan (B.4.3a) must recover it.
+        text = 'Sure: {"name": "get_current_time", "arguments": {"timezone": "America/Chicago"}}'
+        results = ToolCallNormalizer.extract(text, None, ToolProtocol.JSON_EXTRACT)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].tool_name, "get_current_time")
+        self.assertEqual(results[0].tool_input, {"timezone": "America/Chicago"})
+
+    def test_extract_bare_array_with_nested_arguments(self):
+        text = '[{"name": "get_current_time", "arguments": {"timezone": "UTC"}}]'
+        results = ToolCallNormalizer.extract(text, None, ToolProtocol.JSON_EXTRACT)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].tool_name, "get_current_time")
+        self.assertEqual(results[0].tool_input, {"timezone": "UTC"})
+
+    def test_scan_fallback_ignores_json_without_tool_name_key(self):
+        # An arguments-only object is not trusted by the fallback scan --
+        # only LFM25 does flat-object inference (anchored to tool schemas).
+        text = 'Result: {"timezone": "America/Chicago"}'
+        results = ToolCallNormalizer.extract(text, None, ToolProtocol.JSON_EXTRACT)
+        self.assertEqual(results, [])
+
     def test_output_fields_are_none(self):
         text = '```json\n{"tool_name": "t", "arguments": {}}\n```'
         r = ToolCallNormalizer.extract(text, None, ToolProtocol.JSON_EXTRACT)[0]
@@ -223,10 +246,34 @@ class TestLfm25InjectTools(unittest.TestCase):
         result = ToolCallNormalizer.inject_tools(messages, [], ToolProtocol.LFM25)
         self.assertEqual(result, messages)
 
-    def test_non_lfm25_non_native_protocol_passes_through_unchanged(self):
+    def test_undefined_injection_protocol_passes_through_unchanged(self):
+        # XML_EXTRACT/FEW_SHOT still have no injection behavior defined
+        # (JSON_EXTRACT gained one in Phase 8.2 -- B.4.3a).
         messages = [{"role": "system", "content": "sys"}]
-        result = ToolCallNormalizer.inject_tools(messages, [_tool()], ToolProtocol.JSON_EXTRACT)
+        result = ToolCallNormalizer.inject_tools(messages, [_tool()], ToolProtocol.XML_EXTRACT)
         self.assertEqual(result, messages)
+
+
+class TestJsonExtractInjectTools(unittest.TestCase):
+
+    def test_appends_tool_list_and_json_array_instruction(self):
+        messages = [{"role": "system", "content": "You are helpful."}]
+        result = ToolCallNormalizer.inject_tools(messages, [_tool("get_weather")], ToolProtocol.JSON_EXTRACT)
+        self.assertIn("List of tools:", result[0]["content"])
+        self.assertIn("get_weather", result[0]["content"])
+        self.assertIn('"arguments"', result[0]["content"])
+
+    def test_creates_system_message_if_absent(self):
+        messages = [{"role": "user", "content": "hi"}]
+        result = ToolCallNormalizer.inject_tools(messages, [_tool()], ToolProtocol.JSON_EXTRACT)
+        self.assertEqual(result[0]["role"], "system")
+        self.assertIn("List of tools:", result[0]["content"])
+        self.assertEqual(result[1]["role"], "user")
+
+    def test_does_not_mutate_input(self):
+        messages = [{"role": "system", "content": "sys"}]
+        ToolCallNormalizer.inject_tools(messages, [_tool()], ToolProtocol.JSON_EXTRACT)
+        self.assertEqual(messages[0]["content"], "sys")
 
 
 class TestLfm25ExtractToolCalls(unittest.TestCase):

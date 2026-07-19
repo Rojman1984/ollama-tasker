@@ -279,6 +279,25 @@ class TestOllamaProviderEmptyContentRetry(unittest.IsolatedAsyncioTestCase):
         await p.execute(_task(), _manifest())
         self.assertEqual(len(captured), 1)
 
+    async def test_does_not_retry_when_tool_calls_present(self):
+        """
+        A native tool call from a thinking model legitimately has empty
+        content + non-empty thinking + tool_calls[] -- that's an answer,
+        not a lost one. Found live by the Phase 8.2 readiness probe, which
+        burned 2 extra calls per native probe before this guard.
+        """
+        captured: list = []
+        resp = _thinking_empty_response()
+        resp["message"]["tool_calls"] = [
+            {"function": {"name": "get_current_time",
+                          "arguments": {"timezone": "America/Chicago"}}}
+        ]
+        post = _make_post_sequence([(200, resp)], captured)
+        p = OllamaProvider(base_url="http://localhost:11434", _post_fn=post)
+        result = await p.execute(_task(), _manifest())
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(result.tool_results[0].tool_name, "get_current_time")
+
 
 class TestOllamaProviderMultiTurn(unittest.IsolatedAsyncioTestCase):
     """

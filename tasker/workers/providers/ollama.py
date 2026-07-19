@@ -234,11 +234,16 @@ class OllamaProvider(WorkerProviderBase):
             # requests when the model's answer appears to have been lost
             # inside its <think> block. Signature: empty content + non-empty
             # thinking + a clean done_reason=="stop" (as opposed to e.g.
-            # "length", which would mean real truncation, not this quirk).
+            # "length", which would mean real truncation, not this quirk)
+            # + NO tool_calls -- a native tool call from a thinking model
+            # legitimately has empty content alongside tool_calls[], and
+            # retrying it would burn 2 extra (budgeted, if cloud) calls per
+            # tool call. Found live by the Phase 8.2 readiness probe.
             retries = 0
             while (
                 content == ""
                 and msg.get("thinking")
+                and not msg.get("tool_calls")
                 and data.get("done_reason") == "stop"
                 and retries < self._EMPTY_CONTENT_MAX_RETRIES
             ):
@@ -262,7 +267,7 @@ class OllamaProvider(WorkerProviderBase):
                 msg = data.get("message", {})
                 content = msg.get("content") or ""
 
-            if content == "" and msg.get("thinking"):
+            if content == "" and msg.get("thinking") and not msg.get("tool_calls"):
                 logger.warning(
                     "OllamaProvider: %s exhausted %d retries with empty content "
                     "(thinking present, answer likely lost inside <think>). "

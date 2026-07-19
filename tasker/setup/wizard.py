@@ -5,8 +5,8 @@ Headless setup wizard: WizardStepResult/StepStatus data model, run_wizard()
 (the 7 steps per SDD_ADDENDUM_PHASE8.md B.3.2), and the `tasker-setup`
 CLI entry point.
 
-Phase 8.1 only -- readiness checking (--check-model) is a Phase 8.2 stub
-here; the TUI (tasker/tui/) is Phase 8.3+.
+Phase 8.1 wizard + the Phase 8.2 `--check-model` readiness flow (which
+delegates to tasker/setup/readiness.py); the TUI (tasker/tui/) is Phase 8.3+.
 
 Step numbering note: B.3.2's own Step 7 is "Model selector + agentic
 readiness" (Phase 8.2, deferred). This session's task explicitly redefines
@@ -564,6 +564,62 @@ def _print_result(result: WizardStepResult, *, verbose: bool) -> None:
             print(f"                -> {line}")
 
 
+def _run_readiness_check(
+    model_name: str,
+    base_url: str,
+    *,
+    registry: str | None = None,
+    assume_yes: bool = False,
+) -> None:
+    """
+    Headless `tasker-setup --check-model <name>` flow (Phase 8.2, B.4):
+    run the 3-round probe, print the readiness report, and -- only on a
+    supported verdict and explicit confirmation -- write the suggested
+    entry to the worker registry. Lazy import for the same cycle-avoidance
+    reason as the step functions.
+    """
+    import asyncio
+
+    from tasker.setup.readiness import (
+        ReadinessChecker,
+        format_report,
+        write_manifest_to_registry,
+    )
+
+    kwargs: dict = {"base_url": base_url}
+    if registry is not None:
+        kwargs["registry_path"] = Path(registry)
+    checker = ReadinessChecker(**kwargs)
+
+    print(f"Probing {model_name} at {base_url} (up to 3 rounds; a slow model "
+          "can take minutes per round)...")
+    result = asyncio.run(checker.check(model_name))
+    print()
+    print(format_report(result))
+
+    if not result.supported or result.suggested_manifest is None:
+        return
+
+    from tasker.setup.readiness import _DEFAULT_REGISTRY_PATH
+    target = Path(registry) if registry is not None else _DEFAULT_REGISTRY_PATH
+    print()
+    if assume_yes:
+        confirmed = True
+    else:
+        try:
+            answer = input(f"Write this entry to {target}? [Y/n] ").strip().lower()
+        except EOFError:
+            answer = "n"
+        confirmed = answer in ("", "y", "yes")
+
+    if not confirmed:
+        print("Not written.")
+        return
+
+    outcome = write_manifest_to_registry(result.suggested_manifest, target)
+    print(f"Registry entry '{result.suggested_manifest.id}' {outcome} in {target}.")
+
+
 def cli_main(argv: list[str] | None = None) -> None:
     """Entry point for the `tasker-setup` console script (B.2)."""
     import argparse
@@ -574,19 +630,28 @@ def cli_main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--check-model", metavar="NAME", default=None,
-        help="Test a model's tool-calling readiness (Phase 8.2 -- not yet implemented).",
+        help="Probe a model's tool-calling readiness (3 rounds: native, lfm25, json_extract).",
     )
     parser.add_argument(
         "--ollama-url", default="http://localhost:11434",
         help="Ollama base URL (default: http://localhost:11434).",
     )
+    parser.add_argument(
+        "--yes", action="store_true",
+        help="With --check-model: write the confirmed registry entry without prompting.",
+    )
+    parser.add_argument(
+        "--registry", metavar="PATH", default=None,
+        help="With --check-model: worker registry YAML to read/write "
+             "(default: config/workers/worker_registry.yaml).",
+    )
     parser.add_argument("--verbose", action="store_true", help="Show step detail output.")
     args = parser.parse_args(argv)
 
     if args.check_model:
-        print(
-            f"--check-model is not implemented yet (Phase 8.2). "
-            f"Requested model: {args.check_model}"
+        _run_readiness_check(
+            args.check_model, args.ollama_url,
+            registry=args.registry, assume_yes=args.yes,
         )
         return
 

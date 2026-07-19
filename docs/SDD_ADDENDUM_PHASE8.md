@@ -198,6 +198,13 @@ For un-pulled models, the checker displays the model name and estimated size
 (from worker_registry.yaml if registered, otherwise "unknown") and asks the
 user to confirm `ollama pull <model>` before testing. It does not auto-pull.
 
+**Cloud-model exception (live-verified, Ollama 0.30.11, Phase 8.2):** the
+pull gate applies to LOCAL models only. A signed-in Ollama server serves
+`:cloud`-tagged models via `/api/chat` even when they are absent from
+`/api/tags` — no pull (and no download) is required, so the checker probes
+cloud models directly and reports their absence from the local tag list as
+informational, not blocking.
+
 ### B.4.3 Readiness Test Protocol
 
 The checker runs a structured 3-round probe against the model:
@@ -243,6 +250,32 @@ This tool is chosen because:
 - It is unambiguous (the model cannot answer without calling the tool)
 - It has a single required string parameter (tests basic argument parsing)
 - It does not require actual execution to test the format
+
+**Probe success criterion (all three rounds):** the round succeeds iff the
+extraction path for its protocol yields at least one call whose tool name is
+`get_current_time` and whose arguments include a `timezone` key. Anything
+else — plain text, empty content, a hallucinated tool, missing required
+argument — is a rejection for that round.
+
+### B.4.3a JSON_EXTRACT injection format (defined for Round 3)
+
+Round 3 requires `ToolCallNormalizer.inject_tools()` to actually inject for
+`ToolProtocol.JSON_EXTRACT`; before Phase 8.2 that protocol passed messages
+through unchanged (no registered worker needed it). Defined now:
+
+- **Injection:** append to the system message (creating one if absent):
+  `List of tools: <json>` followed by an instruction to respond with ONLY a
+  JSON array of `{"name": ..., "arguments": {...}}` objects, optionally
+  inside a ```json fence. Deliberately mirrors the LFM25 injection shape —
+  same tool-list serialization, different output-format instruction — so
+  the two dialects stay comparable.
+- **Extraction:** `_extract_json()` gains a `raw_decode`-based fallback scan
+  (same standard-library scanner `_extract_lfm25` already uses) so that
+  nested `arguments` objects parse correctly. The pre-existing fenced-block
+  and bare-object regex paths are unchanged and tried first; the fallback
+  only runs when they fail. Rationale: the prior regexes could not match a
+  call whose arguments contained `{}` nesting, which would make Round 3
+  reject models that complied exactly with the instruction.
 
 ### B.4.4 Readiness Report
 

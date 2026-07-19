@@ -110,3 +110,27 @@ python -m unittest tests.unit.test_tool_loop -v
 python -m unittest tests.unit.test_tool_loop.TestRunToolLoop.test_identical_consecutive_calls_terminate_early -v
 python -m unittest tests.unit.test_tool_loop.TestRunToolLoop.test_max_turns_exhaustion_returns_last_result_with_warning -v
 ```
+
+## H6. Setup Wizard + Agentic Readiness Checker (SDD_ADDENDUM_PHASE8 8.1/8.2)
+
+### H6.1 Headless setup wizard (addendum Phase 8.1)
+```bash
+python -m unittest tests.unit.test_environment tests.unit.test_setup_wizard -v
+# Live (never starts Ollama itself -- reports ERROR with the command to run):
+tasker-setup --verbose                       # default http://localhost:11434
+tasker-setup --ollama-url http://127.0.0.1:11435 --verbose   # WSL server
+```
+
+### H6.2 Agentic readiness checker (addendum Phase 8.2)
+```bash
+python -m unittest tests.unit.test_readiness -v
+# Live: 3-round probe (NATIVE -> LFM25 -> JSON_EXTRACT), report, and
+# [Y/n]-confirmed registry write. --yes skips the prompt; --registry PATH
+# targets a scratch copy instead of the real registry.
+tasker-setup --check-model lfm2.5-thinking:latest --ollama-url http://127.0.0.1:11435
+tasker-setup --check-model kimi-k2.7-code:cloud --ollama-url http://127.0.0.1:11435 \
+    --registry /tmp/registry_scratch.yaml --yes
+# Expect (0.30.11, live-verified 2026-07-19): both confirm NATIVE in Round 1;
+# an un-pulled LOCAL model instead prints "Run: ollama pull <name>" and
+# probes nothing; an un-pulled :cloud model IS probed (pull not required).
+```

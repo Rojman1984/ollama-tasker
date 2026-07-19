@@ -155,12 +155,12 @@ class ToolCallNormalizer:
             raw = raw_match.group(1) if raw_match else None
 
         if not raw:
-            return results
+            return ToolCallNormalizer._scan_json_calls(text)
 
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:
-            return results
+            return ToolCallNormalizer._scan_json_calls(text)
 
         if isinstance(data, dict):
             data = [data]
@@ -177,6 +177,52 @@ class ToolCallNormalizer:
                 )
             )
         return results
+
+    @staticmethod
+    def _scan_json_calls(text: str) -> list[WorkerToolResult]:
+        """
+        Fallback for _extract_json when the fenced-block / bare-object regex
+        paths fail (defined in SDD_ADDENDUM_PHASE8.md B.4.3a): scan the text
+        for each '[' or '{' and let JSONDecoder.raw_decode find the value
+        boundary. The regex paths cannot match a call whose arguments contain
+        nested {} (e.g. {"name": "t", "arguments": {"timezone": "..."}}),
+        which is the normal shape for any call with structured arguments.
+        Only items carrying an explicit tool/name key count -- a bare
+        arguments-only object is not trusted here (unlike LFM25, which has
+        flat-object inference anchored to the offered tool schemas).
+        """
+        decoder = json.JSONDecoder()
+        for pos, char in enumerate(text):
+            if char not in "[{":
+                continue
+            try:
+                data, _ = decoder.raw_decode(text, pos)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if isinstance(data, dict):
+                data = [data]
+            if not isinstance(data, list):
+                continue
+            results = []
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                name = item.get("tool_name") or item.get("tool") or item.get("name")
+                if not name:
+                    continue
+                args = item.get("arguments") or item.get("args") or {}
+                results.append(
+                    WorkerToolResult(
+                        tool_name=name,
+                        tool_input=args if isinstance(args, dict) else {"value": args},
+                        tool_output=None,
+                        error=None,
+                        duration_ms=0,
+                    )
+                )
+            if results:
+                return results
+        return []
 
     @staticmethod
     def _extract_xml(response_text: str | None) -> list[WorkerToolResult]:
@@ -371,29 +417,42 @@ class ToolCallNormalizer:
         wraps definitions in <|tool_list_start|>/<|tool_list_end|>. See
         SDD_ADDENDUM_7.5.md A.2b.
 
-        Other non-NATIVE protocols (JSON_EXTRACT, XML_EXTRACT, FEW_SHOT)
-        have no registered worker today and no injection behavior defined
-        yet here -- messages pass through unchanged. Implement when a real
+        JSON_EXTRACT: same tool-list serialization, different output-format
+        instruction -- an explicit {"name", "arguments"} JSON array, fence
+        optional. Defined for the Phase 8.2 readiness checker's Round 3
+        probe (SDD_ADDENDUM_PHASE8.md B.4.3a).
+
+        Remaining non-NATIVE protocols (XML_EXTRACT, FEW_SHOT) have no
+        registered worker today and no injection behavior defined yet
+        here -- messages pass through unchanged. Implement when a real
         worker is registered on one of those protocols.
         """
-        if not tools or protocol != ToolProtocol.LFM25:
+        if not tools or protocol not in (ToolProtocol.LFM25, ToolProtocol.JSON_EXTRACT):
             return list(messages)
 
         tools_json = json.dumps([
             {"name": t.name, "description": t.description, "parameters": t.parameters}
             for t in tools
         ])
-        # "Output function calls as JSON" alone was not enough on live testing
-        # against lfm2.5-thinking:latest (Ollama 0.30.11): the model reasoned
-        # to the correct call inside its thinking trace but then emitted no
-        # content at all. Appending an explicit "respond with ONLY the call"
-        # instruction was the fix that got it into content -- see
-        # SDD_ADDENDUM_7.5.md A.2b live test note.
-        suffix = (
-            f"List of tools: {tools_json}\n"
-            "Output function calls as JSON. Respond with ONLY the JSON array "
-            "function call and no other text."
-        )
+        if protocol == ToolProtocol.LFM25:
+            # "Output function calls as JSON" alone was not enough on live
+            # testing against lfm2.5-thinking:latest (Ollama 0.30.11): the
+            # model reasoned to the correct call inside its thinking trace but
+            # then emitted no content at all. Appending an explicit "respond
+            # with ONLY the call" instruction was the fix that got it into
+            # content -- see SDD_ADDENDUM_7.5.md A.2b live test note.
+            suffix = (
+                f"List of tools: {tools_json}\n"
+                "Output function calls as JSON. Respond with ONLY the JSON array "
+                "function call and no other text."
+            )
+        else:
+            suffix = (
+                f"List of tools: {tools_json}\n"
+                "To call a tool, respond with ONLY a JSON array of objects of "
+                'the form {"name": <tool name>, "arguments": {<arguments>}}, '
+                "optionally inside a ```json code fence, and no other text."
+            )
 
         result = [dict(m) for m in messages]
         for m in result:

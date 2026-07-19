@@ -89,8 +89,9 @@ Do not write any code until you have read both documents.
 
 **Project:** Ollama Tasker (standalone — not HomeWatch, not Ztripes)
 **SDD Version:** 0.1.0-draft (docs/SDD.md)
-**Current Phase:** Cloud-path E2E validation (post-Phase-7.5 — Ollama server +
-Ollama Cloud models first; local models and frontier APIs deferred)
+**Current Phase:** SDD_ADDENDUM_PHASE8 (setup wizard / readiness checker /
+TUI). Cloud-path E2E validation (COWORK_PROMPT task list 8.1–8.3) and
+addendum 8.1–8.2 are complete; addendum 8.3–8.5 (TUI) remain.
 
 **Phase completion state:**
 
@@ -103,45 +104,52 @@ Ollama Cloud models first; local models and frontier APIs deferred)
 | 5 | Modes + CLI Shell | ✅ COMPLETE |
 | 6 | Higher Orchestrator Tiers | ✅ COMPLETE |
 | 7 | Hardening (+ Addenda A/B, 7.5.x hardware detection) | ✅ COMPLETE |
-| 8 | Cloud-path E2E validation | 🔄 IN PROGRESS |
+| 8 | Cloud-path E2E validation (task list 8.1–8.3) | ✅ COMPLETE |
+| A8.1–8.2 | Addendum: setup wizard + readiness checker | ✅ COMPLETE |
+| A8.3–8.5 | Addendum: TUI foundation, model selector, harness panel | ⬜ NOT STARTED |
 
-**Last completed task:** Task 8.3 — tool-loop non-termination guard, ✅
-COMPLETE. **The entire PHASE 8 TASK LIST (8.1, 8.2, 8.3) is now done, in
-one session.** 8.3: hard cap verified already correct (max_turns=5
-strictly bounds provider calls, exactness test kept + hardened);
-repeated-identical-call detection added to `run_tool_loop` — a turn
-requesting the identical tool-call set (names+arguments) as the previous
-turn terminates early with a WARNING, without executing the duplicates
-(non-consecutive repeats stay allowed; this exact stuck pattern was
-observed live in the 7.5.4–7.5.6 session burning all 5 turns). SDD 5.7a
-updated first. Suite 567 → 586 (8.1) → 591 (8.2) → 595 (8.3), green.
-Evidence: docs/TASKER_CHECKLIST.md → "Phase 8.1"/"8.2"/"8.3" sections
-(COWORK_PROMPT numbering); full detail in CLAUDE.md Current Session
-Notes.
+**Last completed task:** SDD_ADDENDUM_PHASE8.md Phase 8.2 — Agentic
+Readiness Checker, ✅ COMPLETE (2026-07-19; the *addendum's* 8.2, third
+use of that number). `tasker/setup/readiness.py`: 3-round probe
+(NATIVE→LFM25→JSON_EXTRACT) through the real OllamaProvider, B.4.6 role
+assignment, B.4.4 report, comment-preserving registry write on [Y/n]
+confirmation; `tasker-setup --check-model <name>` (+ --yes, --registry).
+SDD-first additions: B.4.3 success criterion, B.4.3a JSON_EXTRACT
+injection (normalizer now injects for JSON_EXTRACT + raw_decode
+fallback parse), B.4.2 cloud-model pull-gate exception (live-verified:
+signed-in servers serve :cloud models absent from /api/tags). Live smoke
+tests both passed: lfm2.5-thinking → **NATIVE now supported on 0.30.11**
+(A.2b rejection no longer reproduces; real registry deliberately left at
+lfm25), kimi-k2.7-code:cloud → native, /api/show says context 262144 vs
+registered 128000 (stale). Bonus fix: provider's empty-content retry no
+longer fires when tool_calls[] present (was burning 2 extra budgeted
+calls per native tool call from thinking models). Suite 595 → 630,
+green. Evidence: docs/TASKER_CHECKLIST.md → "Phase 8.2 -- Agentic
+Readiness Checker (addendum numbering)".
 
-**Next task:** SDD_ADDENDUM_PHASE8.md Phase 8.2 — Agentic Readiness
-Checker (`tasker/setup/readiness.py`, 3 probe rounds
-NATIVE→LFM25→JSON_EXTRACT, `tasker-setup --check-model <name>`, worker
-registry write on confirmation, WorkerRole assignment per B.4.6). NOTE:
-that is the *addendum's* 8.2, unrelated to this task list's completed
-8.2 — the project's known 8.x numbering collision. Also candidate
-follow-ups from E2E 8.1's Known Open Issues: wire Anthropic/OpenAI/Fugu
-providers into the CLI provider_map (or pre-filter unroutable workers);
-budget persistence across process restarts.
+**Next task:** SDD_ADDENDUM_PHASE8.md Phase 8.3 — TUI foundation
+(textual TuiApp, WelcomeScreen, HardwareStatusBar; tasker/tui/app.py is
+a stub today). Then 8.4 (SetupWizardScreen + ModelSelectorScreen wired
+to the readiness checker), 8.5 (HarnessPanel). Carried-over candidates:
+wire Anthropic/OpenAI/Fugu providers into the CLI provider_map (or
+pre-filter unroutable workers); budget persistence across restarts;
+TASKER-P1 live runs of tasker-setup (wizard + readiness).
 
-**Files modified this session:** 8.1 — cli/shell.py (session wiring,
-resume, --policy, OLLAMA_BASE_URL/TASKER_BUDGET_PRELOAD/TASKER_LOG_LEVEL),
-tasker/workers/providers/ollama.py (budget recording),
-tasker/session/concurrency.py (slot logging), orchestrator tier2/3/4
-(used_fallback), config/profiles/tier2_designlab.yaml (+orchestrator
-model), config/profiles/tier2_designlab_cloud.yaml (new), tests (+19).
-8.2 — docs/SDD.md, config/modes/cowork.yaml,
-tasker/orchestrator/factory.py, config/profiles/tier4_cloud_hybrid.yaml
-(new), tests/unit/test_orchestrator_factory.py (+5 net). Both —
-docs/TASKER_CHECKLIST.md, docs/TESTING_GUIDE.md, CLAUDE.md,
+**Files modified this session:** tasker/setup/readiness.py (new),
+tasker/setup/wizard.py (--check-model), tasker/tools/normalizer.py
+(JSON_EXTRACT injection + fallback scan), tasker/workers/providers/
+ollama.py (retry guard), docs/SDD_ADDENDUM_PHASE8.md (B.4.2/B.4.3/
+B.4.3a), tests/unit/test_readiness.py (new, 28),
+tests/unit/test_tool_normalizer.py, tests/unit/test_provider_ollama.py,
+docs/TASKER_CHECKLIST.md, docs/TESTING_GUIDE.md (new H6), CLAUDE.md,
 COWORK_PROMPT.md.
 
 **Open decisions / blockers:**
+- Flip lfm2.5-local to tool_protocol: native (probe-confirmed on
+  0.30.11)? Requires end-to-end tool-loop revalidation first — registry
+  untouched this session.
+- Update kimi-k2.7-code-cloud context_window (262144 real) and latency
+  (fast per probe)? Changes live selection behavior — deferred.
 - CLI provider_map wires only OllamaProvider — ANY_CLOUD selection can
   legally pick Anthropic/OpenAI/Fugu workers and then fail with "No
   provider for <x>" (observed live under throttle). Wire the remaining
