@@ -232,7 +232,7 @@ Update this section as phases complete.
 | 8.2–8.5 | Readiness checker, TUI foundation, model selector, harness panel | ⬜ NOT STARTED |
 | E2E 8.1 | Live cloud-path E2E validation (COWORK_PROMPT.md task list — a *third* use of the "8.1" label, distinct from both rows above) | ✅ COMPLETE |
 | E2E 8.2 | tier4_cloud.py reachability from current hardware profiles | ✅ COMPLETE |
-| E2E 8.3 | Tool-loop non-termination guard | ⬜ NOT STARTED |
+| E2E 8.3 | Tool-loop non-termination guard | ✅ COMPLETE |
 
 ---
 
@@ -351,11 +351,27 @@ python -m unittest tests.unit.test_orchestrator_nano -v
 *(Update this section at the end of every Cowork or Code session)*
 
 **Last worked on:** COWORK_PROMPT tasks 8.1 (live cloud-path E2E
-validation) and 8.2 (tier4_cloud.py reachability), both on Designlab1
-(headless Cowork-supervised session). All four 8.1 validation checkpoints
-confirmed with live evidence; Tier 4 made reachable and confirmed live.
-Full write-ups in `docs/TASKER_CHECKLIST.md` → "Phase 8.1 -- Live
-Cloud-Path E2E Validation" and "Phase 8.2 -- tier4_cloud.py Reachability".
+validation), 8.2 (tier4_cloud.py reachability), and 8.3 (tool-loop
+non-termination guard) — the full PHASE 8 TASK LIST — on Designlab1
+(headless Cowork-supervised session). Full write-ups in
+`docs/TASKER_CHECKLIST.md` → "Phase 8.1"/"Phase 8.2"/"Phase 8.3"
+sections (COWORK_PROMPT numbering).
+
+**Task 8.3 summary:** SDD 5.7a updated first, then `run_tool_loop`
+(`tasker/tools/loop.py`) gained the second guard condition. Hard cap:
+verified already correct — `max_turns=5` strictly bounds provider calls
+(existing exactness test kept, updated to vary its commands per turn).
+New: repeated-identical-call detection — a turn requesting the identical
+tool-call set (names + arguments, order-sensitive, sorted-key-JSON
+compared) as the immediately preceding turn terminates the loop at that
+turn with a WARNING, without executing the duplicates or spending
+another provider call (on a cloud worker every wasted turn is a budgeted
+call — this exact stuck pattern was observed live in the 7.5.4–7.5.6
+session, where lfm2.5-thinking burned all 5 turns). Non-consecutive
+repeats stay allowed (ls → pwd → ls is legitimate re-checking). 4 new
+tests in `test_tool_loop.py` (early termination at 2 calls, same-tool/
+different-args negative, non-consecutive negative, multi-call-set
+positive). Suite 591 → 595, green.
 
 **Task 8.2 summary:** Tier 4 was unreachable through three independent
 gates: (1) machine profiles cap tier_max at 2/1 — by design, kept;
@@ -437,8 +453,8 @@ always route local. The kimi cloud planner follows the vocabulary. Not a
 bug (parse behaves as designed), but it means local-planner runs rarely
 route steps to cloud workers on their own.
 
-**Tests:** 567 → 586 (task 8.1) → 591 (task 8.2), full suite green
-throughout (also re-verified after every live-run-driven fix).
+**Tests:** 567 → 586 (task 8.1) → 591 (task 8.2) → 595 (task 8.3), full
+suite green throughout (also re-verified after every live-run-driven fix).
 
 **Last files modified:** task 8.1 — `cli/shell.py` (major),
 `tasker/workers/providers/ollama.py`, `tasker/session/concurrency.py`,
@@ -451,15 +467,20 @@ Task 8.2 — `docs/SDD.md` (5.1 + 5.3 Tier 4 activation),
 `config/modes/cowork.yaml` (tier_max 4),
 `tasker/orchestrator/factory.py` (tier ≥ 4 → CloudOrchestrator),
 `config/profiles/tier4_cloud_hybrid.yaml` (new),
-`tests/unit/test_orchestrator_factory.py`. Both — `docs/TASKER_CHECKLIST.md`,
-`docs/TESTING_GUIDE.md`, `CLAUDE.md`, `COWORK_PROMPT.md`.
+`tests/unit/test_orchestrator_factory.py`. Task 8.3 — `docs/SDD.md`
+(5.7a guard), `tasker/tools/loop.py`, `tests/unit/test_tool_loop.py`.
+All — `docs/TASKER_CHECKLIST.md`, `docs/TESTING_GUIDE.md`, `CLAUDE.md`,
+`COWORK_PROMPT.md`.
 
-**Next task:** COWORK_PROMPT task 8.3 — tool-loop non-termination guard:
-hard iteration cap + repeated-identical-call detection in
-`tasker/tools/loop.py` (`run_tool_loop` already has `max_turns=5`; 8.3
-adds detection of a worker re-issuing the identical tool call and unit
-tests for both guard conditions), so a runaway loop cannot burn Ollama
-Cloud budget.
+**Next task:** COWORK_PROMPT's PHASE 8 TASK LIST (8.1–8.3) is complete.
+Next up is `SDD_ADDENDUM_PHASE8.md` Phase 8.2 — Agentic Readiness
+Checker (`tasker/setup/readiness.py`, 3 probe rounds
+NATIVE→LFM25→JSON_EXTRACT, `tasker-setup --check-model <name>`, worker
+registry write on confirmation, `WorkerRole` assignment per B.4.6) —
+note this "8.2" is the *addendum's* numbering, not COWORK_PROMPT's
+just-completed task 8.2. Then addendum 8.3–8.5 (TUI foundation, model
+selector, harness panel). Also worth considering: the Known Open Issues
+from E2E 8.1 (CLI provider_map only wires Ollama; budget persistence).
 
 **Blockers:** None.
 

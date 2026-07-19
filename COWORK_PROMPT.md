@@ -105,26 +105,29 @@ Ollama Cloud models first; local models and frontier APIs deferred)
 | 7 | Hardening (+ Addenda A/B, 7.5.x hardware detection) | ✅ COMPLETE |
 | 8 | Cloud-path E2E validation | 🔄 IN PROGRESS |
 
-**Last completed task:** Task 8.2 — tier4_cloud.py reachability, ✅
-COMPLETE (same session as 8.1, also ✅). Tier 4 was unreachable via three
-gates: profile ceilings (2/1 — by design, kept), mode ceilings (max 3 —
-SDD gap, fixed SDD-first: 5.1 COWORK "2–4" + new 5.3 "Tier 4 activation";
-cowork.yaml tier_max→4, effective tier unchanged on standard machines),
-and the factory never constructing CloudOrchestrator (fixed: tier ≥ 4 +
-orchestrator compute_location ollama_cloud → CloudOrchestrator, local
-location degrades to Tier 3 per SDD 10.3). New opt-in profile
-tier4_cloud_hybrid.yaml; live-confirmed on Designlab1 ("Planning with
-CloudOrchestrator...", cloud plan/synthesize with slot+budget logs,
-reasoning step on nemotron cloud, writing step on local lfm2.5). Suite
-567 → 586 (8.1) → 591 (8.2), green. Evidence:
-docs/TASKER_CHECKLIST.md → "Phase 8.1"/"Phase 8.2" sections; full detail
-in CLAUDE.md Current Session Notes.
+**Last completed task:** Task 8.3 — tool-loop non-termination guard, ✅
+COMPLETE. **The entire PHASE 8 TASK LIST (8.1, 8.2, 8.3) is now done, in
+one session.** 8.3: hard cap verified already correct (max_turns=5
+strictly bounds provider calls, exactness test kept + hardened);
+repeated-identical-call detection added to `run_tool_loop` — a turn
+requesting the identical tool-call set (names+arguments) as the previous
+turn terminates early with a WARNING, without executing the duplicates
+(non-consecutive repeats stay allowed; this exact stuck pattern was
+observed live in the 7.5.4–7.5.6 session burning all 5 turns). SDD 5.7a
+updated first. Suite 567 → 586 (8.1) → 591 (8.2) → 595 (8.3), green.
+Evidence: docs/TASKER_CHECKLIST.md → "Phase 8.1"/"8.2"/"8.3" sections
+(COWORK_PROMPT numbering); full detail in CLAUDE.md Current Session
+Notes.
 
-**Next task:** Task 8.3 — tool-loop non-termination guard in
-`tasker/tools/loop.py`: hard iteration cap (max_turns=5 exists — verify
-it is truly hard) + repeated-identical-call detection (worker re-issuing
-the same tool call with the same arguments → terminate early rather than
-burn turns/budget). Unit tests for both guard conditions.
+**Next task:** SDD_ADDENDUM_PHASE8.md Phase 8.2 — Agentic Readiness
+Checker (`tasker/setup/readiness.py`, 3 probe rounds
+NATIVE→LFM25→JSON_EXTRACT, `tasker-setup --check-model <name>`, worker
+registry write on confirmation, WorkerRole assignment per B.4.6). NOTE:
+that is the *addendum's* 8.2, unrelated to this task list's completed
+8.2 — the project's known 8.x numbering collision. Also candidate
+follow-ups from E2E 8.1's Known Open Issues: wire Anthropic/OpenAI/Fugu
+providers into the CLI provider_map (or pre-filter unroutable workers);
+budget persistence across process restarts.
 
 **Files modified this session:** 8.1 — cli/shell.py (session wiring,
 resume, --policy, OLLAMA_BASE_URL/TASKER_BUDGET_PRELOAD/TASKER_LOG_LEVEL),
@@ -174,7 +177,7 @@ Verify hardware-profile → tier resolution can actually route to Tier 4 from
 the Designlab1 and TASKER-P1 profiles. If unreachable by design, fix the
 resolution chain or document why. Add a regression test.
 
-### 8.3 — Tool-loop non-termination guard
+### 8.3 — Tool-loop non-termination guard  ✅ COMPLETE (2026-07-19)
 
 Hard iteration cap + repeated-identical-call detection in the tool loop,
 so a runaway loop cannot burn Ollama Cloud budget. Unit tests for both

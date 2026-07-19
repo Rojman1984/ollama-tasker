@@ -165,19 +165,105 @@ class TestRunToolLoop(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.duration_ms, 100 + 150 + 5)  # + the executed tool's own duration
 
     async def test_max_turns_exhaustion_returns_last_result_with_warning(self):
-        pending = WorkerToolResult("bash", {"command": "ls"}, None, None, 0)
-        always_wants_tool = _result(
-            output="", tool_results=[pending],
-            raw_assistant_message={"role": "assistant", "content": "..."},
-        )
-        provider = FakeProvider([always_wants_tool] * (_MAX_TOOL_TURNS + 2))
+        # Task 8.3 verification: max_turns is a HARD cap on provider calls.
+        # Each turn requests a *different* command so the repeated-identical-
+        # call guard (tested separately below) never fires and the cap is
+        # what terminates the loop.
+        wants = [
+            _result(
+                output="",
+                tool_results=[WorkerToolResult("bash", {"command": f"ls {i}"}, None, None, 0)],
+                raw_assistant_message={"role": "assistant", "content": "..."},
+            )
+            for i in range(_MAX_TOOL_TURNS + 2)
+        ]
+        provider = FakeProvider(wants)
         with mock.patch("tasker.tools.loop.execute_tool") as mock_execute:
             mock_execute.return_value = WorkerToolResult("bash", {"command": "ls"}, "output", None, 5)
             with self.assertLogs("tasker.tools.loop", level="WARNING") as cm:
                 result = await run_tool_loop(_task(), _worker(), provider, cwd=Path("."))
         self.assertEqual(len(provider.calls), _MAX_TOOL_TURNS)
         self.assertIn("max_turns", "\n".join(cm.output))
+        # The final (unexecuted) pending request survives into tool_results
+        last_pending = wants[_MAX_TOOL_TURNS - 1].tool_results[0]
+        self.assertIn(last_pending, result.tool_results)
+
+    async def test_identical_consecutive_calls_terminate_early(self):
+        # Task 8.3 guard: turn 2 re-requests exactly the same call as turn 1
+        # -> loop stops at turn 2, well before max_turns, without executing
+        # the duplicate.
+        pending = WorkerToolResult("bash", {"command": "ls"}, None, None, 0)
+        always_wants_same = _result(
+            output="", tool_results=[pending],
+            raw_assistant_message={"role": "assistant", "content": "..."},
+        )
+        provider = FakeProvider([always_wants_same] * (_MAX_TOOL_TURNS + 2))
+        executed = WorkerToolResult("bash", {"command": "ls"}, "output", None, 5)
+        with mock.patch("tasker.tools.loop.execute_tool", return_value=executed) as mock_execute:
+            with self.assertLogs("tasker.tools.loop", level="WARNING") as cm:
+                result = await run_tool_loop(_task(), _worker(), provider, cwd=Path("."))
+        self.assertEqual(len(provider.calls), 2)          # not _MAX_TOOL_TURNS
+        self.assertEqual(mock_execute.call_count, 1)      # duplicate never executed
+        self.assertIn("identical tool call", "\n".join(cm.output))
+        # Turn 1's executed result and turn 2's unexecuted request both survive
+        self.assertIn(executed, result.tool_results)
         self.assertIn(pending, result.tool_results)
+
+    async def test_same_tool_different_args_is_not_a_repeat(self):
+        # bash ls -> bash pwd -> final answer: same tool, different
+        # arguments -- must NOT trigger the guard.
+        provider = FakeProvider([
+            _result(output="", tool_results=[WorkerToolResult("bash", {"command": "ls"}, None, None, 0)],
+                    raw_assistant_message={"role": "assistant", "content": "..."}),
+            _result(output="", tool_results=[WorkerToolResult("bash", {"command": "pwd"}, None, None, 0)],
+                    raw_assistant_message={"role": "assistant", "content": "..."}),
+            _result(output="done"),
+        ])
+        executed = WorkerToolResult("bash", {"command": "x"}, "output", None, 5)
+        with mock.patch("tasker.tools.loop.execute_tool", return_value=executed):
+            result = await run_tool_loop(_task(), _worker(), provider, cwd=Path("."))
+        self.assertEqual(len(provider.calls), 3)
+        self.assertEqual(result.output, "done")
+
+    async def test_nonconsecutive_repeat_is_allowed(self):
+        # ls -> pwd -> ls -> final: repeating a call later in the task is
+        # legitimate (e.g. re-checking state after a change); only
+        # *consecutive* identical requests terminate the loop.
+        ls_req = WorkerToolResult("bash", {"command": "ls"}, None, None, 0)
+        pwd_req = WorkerToolResult("bash", {"command": "pwd"}, None, None, 0)
+        provider = FakeProvider([
+            _result(output="", tool_results=[ls_req],
+                    raw_assistant_message={"role": "assistant", "content": "..."}),
+            _result(output="", tool_results=[pwd_req],
+                    raw_assistant_message={"role": "assistant", "content": "..."}),
+            _result(output="", tool_results=[ls_req],
+                    raw_assistant_message={"role": "assistant", "content": "..."}),
+            _result(output="done"),
+        ])
+        executed = WorkerToolResult("bash", {"command": "x"}, "output", None, 5)
+        with mock.patch("tasker.tools.loop.execute_tool", return_value=executed):
+            result = await run_tool_loop(_task(), _worker(), provider, cwd=Path("."))
+        self.assertEqual(len(provider.calls), 4)
+        self.assertEqual(result.output, "done")
+
+    async def test_identical_multi_call_set_terminates_early(self):
+        # The guard compares the whole requested set: two calls repeated
+        # identically as a pair on the next turn -> terminate.
+        pair = [
+            WorkerToolResult("bash", {"command": "ls"}, None, None, 0),
+            WorkerToolResult("file_read", {"path": "a.txt"}, None, None, 0),
+        ]
+        wants_pair = _result(
+            output="", tool_results=list(pair),
+            raw_assistant_message={"role": "assistant", "content": "..."},
+        )
+        provider = FakeProvider([wants_pair, wants_pair, _result(output="never reached")])
+        executed = WorkerToolResult("bash", {"command": "x"}, "output", None, 5)
+        with mock.patch("tasker.tools.loop.execute_tool", return_value=executed) as mock_execute:
+            with self.assertLogs("tasker.tools.loop", level="WARNING"):
+                result = await run_tool_loop(_task(), _worker(), provider, cwd=Path("."))
+        self.assertEqual(len(provider.calls), 2)
+        self.assertEqual(mock_execute.call_count, 2)      # only turn 1's pair ran
 
     async def test_tool_execution_error_fed_back_as_content_and_loop_continues(self):
         requested = WorkerToolResult("bash", {"command": "sleep 100"}, None, None, 0)

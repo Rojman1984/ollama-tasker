@@ -102,3 +102,11 @@ tasker-cli --mode cowork "Plan two steps. Step 1: a reasoning specialist reasons
 # Expect: "[cowork] Planning with CloudOrchestrator..." + slot/budget INFO
 # logs on the plan and synthesize calls themselves.
 ```
+
+### H5.6 Tool-loop non-termination guard (Phase 8.3, COWORK_PROMPT numbering)
+```bash
+python -m unittest tests.unit.test_tool_loop -v
+# Guard-specific:
+python -m unittest tests.unit.test_tool_loop.TestRunToolLoop.test_identical_consecutive_calls_terminate_early -v
+python -m unittest tests.unit.test_tool_loop.TestRunToolLoop.test_max_turns_exhaustion_returns_last_result_with_warning -v
+```

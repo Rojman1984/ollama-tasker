@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import logging
 from pathlib import Path
 
@@ -90,6 +91,7 @@ async def run_tool_loop(
     accumulated_tool_results = []
 
     turn = 0
+    prev_signature: tuple | None = None
     result: WorkerResult | None = None
     while True:
         turn += 1
@@ -108,6 +110,29 @@ async def run_tool_loop(
             break
         if not result.tool_results:
             break
+
+        # Non-termination guard (SDD 5.7a, task 8.3): a turn that requests
+        # the identical tool-call set as the previous turn means the model
+        # is ignoring its tool results and looping -- stop before executing
+        # the duplicates or spending another (possibly Ollama-Cloud-
+        # budgeted) provider call. Only *consecutive* identical requests
+        # trigger this; repeating a call later in the task is legitimate.
+        turn_signature = tuple(
+            (tr.tool_name, json.dumps(tr.tool_input, sort_keys=True, default=str))
+            for tr in result.tool_results
+        )
+        if turn_signature == prev_signature:
+            logger.warning(
+                "run_tool_loop: %s requested the identical tool call(s) %s on "
+                "two consecutive turns -- terminating early (turn %d/%d) to "
+                "avoid a runaway loop. instruction=%r",
+                worker.model_id,
+                [tr.tool_name for tr in result.tool_results],
+                turn, max_turns, task.instruction[:80],
+            )
+            break
+        prev_signature = turn_signature
+
         if turn >= max_turns:
             logger.warning(
                 "run_tool_loop: %s hit max_turns=%d with tool calls still pending -- "

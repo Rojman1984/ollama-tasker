@@ -1050,3 +1050,41 @@ Synthesizing...
       with slot acquire/release + budget increments logged on every
       orchestration call.
 - [x] Full suite green: **591 tests, OK** (was 586 after 8.1).
+
+---
+
+## Phase 8.3 -- Tool-Loop Non-Termination Guard (COWORK_PROMPT task numbering)
+
+Two guard conditions so a runaway tool loop cannot burn Ollama Cloud budget
+(SDD 5.7a updated first, per dev rules):
+
+- [x] **Hard iteration cap (verified, already correct):** `run_tool_loop`'s
+      `max_turns=5` is a hard cap on provider calls -- the loop structure
+      increments `turn` before each `provider.execute()` and breaks at the
+      cap. Existing test asserts `len(provider.calls) == _MAX_TOOL_TURNS`
+      exactly; updated to request a *different* command each turn so it
+      keeps exercising the cap now that identical requests terminate
+      earlier (see below).
+- [x] **Repeated-identical-call detection (new):** if a turn requests the
+      identical tool-call set (tool names + arguments, order-sensitive,
+      compared via sorted-key JSON) as the immediately preceding turn, the
+      loop terminates at that turn with a WARNING, without executing the
+      duplicates and without spending another provider call. Termination
+      contract matches the max_turns exit (last result returned, pending
+      requests survive into `tool_results`). Non-consecutive repeats
+      (ls -> pwd -> ls) are deliberately allowed -- re-checking state later
+      in a task is legitimate.
+- [x] Unit tests (`tests/unit/test_tool_loop.py`, 10 -> 14):
+      `test_identical_consecutive_calls_terminate_early` (2 provider calls
+      instead of 5, duplicate never executed),
+      `test_same_tool_different_args_is_not_a_repeat`,
+      `test_nonconsecutive_repeat_is_allowed`,
+      `test_identical_multi_call_set_terminates_early` (whole-set
+      comparison), plus the hardened max_turns test.
+- [x] Full suite green: **595 tests, OK** (was 591 after 8.2).
+
+Real-world motivation: the 7.5.4-7.5.6 session live-observed
+`lfm2.5-thinking` hallucinating a nonsensical tool call and "never
+concluding across repeated turns, exhausting run_tool_loop's max_turns=5"
+-- on a cloud worker each of those wasted turns would have been a budgeted
+call; the guard now stops that pattern at turn 2.

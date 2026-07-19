@@ -515,7 +515,17 @@ tools directly," rules that out; see 7.1):**
   (`format_tool_result_message()`, `tasker/workers/providers/ollama.py`)
   into a running message history, re-invoke. Terminates when a turn
   requests no more tools, or `max_turns` is hit (returns the last result
-  and logs a WARNING rather than raising). Usage/cost/duration accumulate
+  and logs a WARNING rather than raising), or — non-termination guard,
+  COWORK_PROMPT task 8.3 — when a turn requests an **identical tool-call
+  set** (same tool names and arguments, order-sensitive) as the
+  immediately preceding turn: a model that ignores its tool results and
+  re-issues the same call is stuck, and every additional turn may be a
+  budgeted Ollama Cloud call, so the loop stops at the second identical
+  request without executing it (WARNING logged, last result returned —
+  same contract as the `max_turns` exit). Non-consecutive repeats are
+  deliberately allowed (re-running `git status` later in a task is
+  legitimate); only consecutive identical requests trigger the guard.
+  Usage/cost/duration accumulate
   across all turns; every turn's *executed* `WorkerToolResult`s survive
   into the final `WorkerResult.tool_results` (not just the last turn's,
   which typically has none since it's the final answer).
