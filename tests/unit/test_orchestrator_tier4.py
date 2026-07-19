@@ -178,6 +178,13 @@ class TestCloudOrchestrator(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(plan, ExecutionPlan)
         self.assertGreater(len(plan.steps), 0)
 
+    async def test_plan_fallback_sets_used_fallback_flag(self):
+        # Regression (Phase 8.1): tier 4 fell back without marking the plan.
+        provider = _FakeProvider(output="this is prose, not JSON")
+        orc = CloudOrchestrator(provider=provider, worker=_cloud_worker())
+        plan = await orc.plan("task", _classifier(TaskType.RESEARCH), [])
+        self.assertTrue(plan.used_fallback)
+
     async def test_plan_preserves_original_task(self):
         plan_json = json.dumps([
             {"description": "do it", "role": "worker", "capabilities": ["tool_use"]},

@@ -6,6 +6,12 @@ description: "Designlab1 -- Ryzen 5/7, 32GB RAM, GTX 1050 Ti 4GB"
 orchestrator:
   tier_max: 2
   provider: dual_llm
+  # `model` is what the factory actually reads today (planner_model /
+  # synthesizer_model are declared but not yet consumed -- known open Tier 2
+  # bug, see CLAUDE.md session notes). Without it the factory fell back to
+  # its qwen3:1.7b default, which is not installed on Designlab1, so live
+  # tier-2 planning could never work on the machine this profile is for.
+  model: lfm2.5-thinking:latest
   planner_model: qwen3:7b
   synthesizer_model: qwen3:4b
   load_strategy: resident

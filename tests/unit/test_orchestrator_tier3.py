@@ -102,6 +102,12 @@ class TestReasoningOrchestrator(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(plan, ExecutionPlan)
         self.assertGreater(len(plan.steps), 0)
 
+    async def test_plan_fallback_sets_used_fallback_flag(self):
+        # Regression (Phase 8.1): tier 3 fell back without marking the plan.
+        orc = _make_orc("I have thought deeply and...")  # not JSON
+        plan = await orc.plan("task", _classifier(TaskType.RESEARCH), [])
+        self.assertTrue(plan.used_fallback)
+
     async def test_plan_all_steps_pending(self):
         plan_json = json.dumps([
             {"description": "step one", "role": "worker", "capabilities": ["tool_use"]},

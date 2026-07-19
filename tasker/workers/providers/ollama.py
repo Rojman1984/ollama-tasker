@@ -12,6 +12,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 
+from tasker.session.budget import OllamaSessionBudget
 from tasker.session.concurrency import OllamaCloudConcurrencyManager
 from tasker.tools.normalizer import ToolCallNormalizer
 from tasker.workers.base import (
@@ -95,6 +96,17 @@ def format_tool_result_message(
     return msg
 
 
+def compute_usage_units(elapsed_s: float, usage_level: int | None) -> float:
+    """
+    GPU-time units for one Ollama Cloud call (SDD 3.1: usage unit =
+    GPU-time x model usage level 1-4). Wall-clock duration approximates
+    GPU-time (Ollama reports no GPU seconds; wall clock is an upper bound
+    that errs on the early-throttle side). usage_level None (e.g. the
+    ad-hoc orchestrator manifest) is billed conservatively as LIGHT (1).
+    """
+    return elapsed_s * float(usage_level or 1)
+
+
 def _error(task: WorkerTask, worker: WorkerManifest, reason: str, elapsed: float) -> WorkerResult:
     return WorkerResult(
         task_id=task.task_id,
@@ -132,12 +144,14 @@ class OllamaProvider(WorkerProviderBase):
         self,
         base_url: str,
         concurrency_mgr: OllamaCloudConcurrencyManager | None = None,
+        budget: OllamaSessionBudget | None = None,
         *,
         _post_fn: _PostFn | None = None,
         _get_fn: _GetFn | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._concurrency = concurrency_mgr
+        self._budget = budget
         self._post_fn = _post_fn or self._default_post
         self._get_fn = _get_fn or self._default_get
 
@@ -298,6 +312,22 @@ class OllamaProvider(WorkerProviderBase):
             raw_assistant_message: dict = {"role": "assistant", "content": content}
             if worker.tool_protocol == ToolProtocol.NATIVE and raw_calls:
                 raw_assistant_message["tool_calls"] = raw_calls
+
+            # Session budget accounting: only OLLAMA_CLOUD calls consume
+            # budget; local inference is unlimited by plan (SDD 3.2).
+            if is_cloud and self._budget is not None:
+                elapsed_s = time.monotonic() - start
+                units = compute_usage_units(elapsed_s, worker.ollama_usage_level)
+                self._budget.record_usage(units)
+                logger.info(
+                    "OllamaCloud budget: +%.1f units (%s, %.1fs x level %s) -> "
+                    "%.1f/%.0f session (%.1f%%)",
+                    units, worker.model_id, elapsed_s,
+                    worker.ollama_usage_level or 1,
+                    self._budget.usage_consumed, self._budget.session_limit,
+                    self._budget.usage_pct * 100,
+                )
+
             return WorkerResult(
                 task_id=task.task_id,
                 worker_id=worker.id,

@@ -1,0 +1,39 @@
+# Tier 2 -- Designlab1, CLOUD-ORCHESTRATOR variant (Phase 8.1 cloud-path E2E).
+# Same hardware as tier2_designlab.yaml, but the orchestrator model runs on
+# Ollama Cloud (SDD 5.6.1: same endpoint, compute_location distinguishes) so
+# plan/synthesize calls exercise the OLLAMA_CLOUD concurrency + budget path.
+# Select with: TASKER_PROFILE=tier2_designlab_cloud
+hardware_profile: tier2_designlab_cloud
+description: "Designlab1 -- cloud orchestrator variant (kimi-k2.7-code:cloud planner)"
+
+orchestrator:
+  tier_max: 2
+  provider: dual_llm
+  # kimi-k2.7-code:cloud is the registry's only ollama_usage_level 2 cloud
+  # model -- the cheapest cloud option that can plan competently.
+  model: kimi-k2.7-code:cloud
+  compute_location: ollama_cloud
+  load_strategy: resident
+  context_limit: 8192
+
+classifier:
+  provider: local_llm
+  model: qwen3:1.7b
+
+worker_pool:
+  max_concurrent_local: 2
+  max_concurrent_ollama_cloud: 3
+  unload_between_tasks: false
+
+ollama:
+  plan: pro
+  base_url: "http://localhost:11434"
+  session_throttle_at: 0.90
+  weekly_throttle_at: 0.85
+  fallback_on_exhaustion: local_then_direct_cloud
+
+mode_constraints:
+  cowork:
+    behavior: limited_parallel
+  research:
+    behavior: parallel_fetch

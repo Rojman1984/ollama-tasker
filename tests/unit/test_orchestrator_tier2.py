@@ -102,6 +102,22 @@ class TestDualLLMOrchestrator(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(plan, ExecutionPlan)
         self.assertGreater(len(plan.steps), 0)
 
+    async def test_plan_fallback_sets_used_fallback_flag(self):
+        # Regression (Phase 8.1): tier 2 fell back to the Nano template
+        # without marking the plan, so the live CLI reported
+        # used_fallback=False for a plan the model never produced.
+        orc = _make_dual("not json", "synth")
+        plan = await orc.plan("task", _classifier(TaskType.CODING), [])
+        self.assertTrue(plan.used_fallback)
+
+    async def test_plan_valid_json_leaves_used_fallback_false(self):
+        plan_json = json.dumps([
+            {"description": "step", "role": "worker", "capabilities": ["tool_use"]},
+        ])
+        orc = _make_dual(plan_json, "synth")
+        plan = await orc.plan("task", _classifier(), [])
+        self.assertFalse(plan.used_fallback)
+
     async def test_plan_preserves_original_task(self):
         plan_json = json.dumps([
             {"description": "step", "role": "worker", "capabilities": ["tool_use"]},

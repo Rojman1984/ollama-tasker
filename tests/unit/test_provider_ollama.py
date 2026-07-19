@@ -436,5 +436,76 @@ class TestOllamaProviderCloud(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, WorkerStatus.SUCCESS)
 
 
+class TestOllamaProviderBudgetRecording(unittest.IsolatedAsyncioTestCase):
+    """
+    Phase 8.1: an injected OllamaSessionBudget accumulates GPU-time units
+    (wall-clock duration x ollama_usage_level) on every successful
+    OLLAMA_CLOUD call, and never on LOCAL_HARDWARE calls.
+    """
+
+    def _budget(self):
+        from datetime import datetime
+
+        from tasker.session.budget import OllamaSessionBudget
+
+        return OllamaSessionBudget(
+            plan=OllamaPlan.PRO, window_start=datetime.now().astimezone()
+        )
+
+    def _provider_with_budget(self, budget, post_status=200, post_response=None):
+        return OllamaProvider(
+            base_url="http://localhost:11434",
+            concurrency_mgr=None,
+            budget=budget,
+            _post_fn=_make_post(post_status, post_response or _ok_response()),
+            _get_fn=_make_get(200, {"models": []}),
+        )
+
+    async def test_cloud_call_records_usage(self):
+        budget = self._budget()
+        p = self._provider_with_budget(budget)
+        await p.execute(_task(), _manifest(ComputeLocation.OLLAMA_CLOUD))
+        self.assertGreater(budget.usage_consumed, 0.0)
+        self.assertGreater(budget.weekly_usage_consumed, 0.0)
+
+    async def test_local_call_records_nothing(self):
+        budget = self._budget()
+        p = self._provider_with_budget(budget)
+        await p.execute(_task(), _manifest(ComputeLocation.LOCAL_HARDWARE))
+        self.assertEqual(budget.usage_consumed, 0.0)
+
+    async def test_failed_cloud_call_records_nothing(self):
+        budget = self._budget()
+        p = self._provider_with_budget(budget, post_status=500, post_response={})
+        await p.execute(_task(), _manifest(ComputeLocation.OLLAMA_CLOUD))
+        self.assertEqual(budget.usage_consumed, 0.0)
+
+    def test_usage_units_scale_with_usage_level(self):
+        from tasker.workers.providers.ollama import compute_usage_units
+
+        self.assertEqual(compute_usage_units(10.0, OllamaUsageLevel.LIGHT), 10.0)
+        self.assertEqual(compute_usage_units(10.0, OllamaUsageLevel.HEAVY), 30.0)
+        self.assertEqual(compute_usage_units(10.0, OllamaUsageLevel.EXTRA_HEAVY), 40.0)
+
+    def test_usage_units_none_level_billed_as_light(self):
+        from tasker.workers.providers.ollama import compute_usage_units
+
+        self.assertEqual(compute_usage_units(7.5, None), 7.5)
+
+    async def test_usage_level_none_billed_as_light(self):
+        # The ad-hoc orchestrator manifest has ollama_usage_level=None;
+        # it must still consume budget (conservatively as level 1).
+        budget = self._budget()
+        m = _manifest(ComputeLocation.OLLAMA_CLOUD)
+        m.ollama_usage_level = None
+        await self._provider_with_budget(budget).execute(_task(), m)
+        self.assertGreater(budget.usage_consumed, 0.0)
+
+    async def test_no_budget_injected_is_fine(self):
+        p = _provider(post_response=_ok_response())
+        result = await p.execute(_task(), _manifest(ComputeLocation.OLLAMA_CLOUD))
+        self.assertEqual(result.status, WorkerStatus.SUCCESS)
+
+
 if __name__ == "__main__":
     unittest.main()

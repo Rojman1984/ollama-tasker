@@ -105,20 +105,43 @@ Ollama Cloud models first; local models and frontier APIs deferred)
 | 7 | Hardening (+ Addenda A/B, 7.5.x hardware detection) | ✅ COMPLETE |
 | 8 | Cloud-path E2E validation | 🔄 IN PROGRESS |
 
-**Last completed task:** Phase 7.5.4–7.5.6 — AmdApuBackend + worker VRAM
-cross-check, live-verified on TASKER-P1 via SSH (full 17/17 GPU offload).
-Session notes committed as 749dfee. 523+ tests passing.
+**Last completed task:** Task 8.1 — live cloud-path E2E validation on
+Designlab1, ✅ COMPLETE. All four checkpoints confirmed live (slot
+enforcement incl. a real DEFERRED under saturation; budget increments +
+throttle directive; pause → on-disk checkpoint → real cross-process
+resume; used_fallback reported). The session layer genuinely was NOT
+wired into the live CLI before this session — budget/SessionManager/
+checkpointing/resume/--policy were all dead in cli/shell.py and tiers
+2/3/4 never set used_fallback. All fixed + 19 regression tests
+(567 → 586, green). Evidence: docs/TASKER_CHECKLIST.md → "Phase 8.1 --
+Live Cloud-Path E2E Validation". Full detail: CLAUDE.md Current Session
+Notes.
 
-**Next task:** Live end-to-end validation of the Ollama Cloud path: real
-multi-step orchestration through Ollama Cloud workers confirming concurrency
-slot management, session budget tracking, pause/resume checkpoints, and
-`used_fallback` observability. Then `tier4_cloud.py` reachability from current
-hardware profiles, then tool-loop non-termination guard (hard iteration cap +
-repeated-identical-call detection).
+**Next task:** Task 8.2 — `tier4_cloud.py` reachability: verify hardware-
+profile → tier resolution can actually route to Tier 4 from the
+Designlab1 and TASKER-P1 profiles. If unreachable by design, fix the
+resolution chain or document why. Add a regression test. (Note from 8.1:
+`build_orchestrator()` currently returns Tier 3 for any tier >= 3 and
+never constructs CloudOrchestrator — start there.) Then 8.3 — tool-loop
+non-termination guard.
 
-**Files modified this session:** COWORK_PROMPT.md (this status refresh).
+**Files modified this session:** cli/shell.py (session wiring, resume,
+--policy, OLLAMA_BASE_URL/TASKER_BUDGET_PRELOAD/TASKER_LOG_LEVEL),
+tasker/workers/providers/ollama.py (budget recording),
+tasker/session/concurrency.py (slot logging), orchestrator tier2/3/4
+(used_fallback), config/profiles/tier2_designlab.yaml (+orchestrator
+model), config/profiles/tier2_designlab_cloud.yaml (new),
+tests (+19), docs/TASKER_CHECKLIST.md, docs/TESTING_GUIDE.md, CLAUDE.md,
+COWORK_PROMPT.md.
 
 **Open decisions / blockers:**
+- CLI provider_map wires only OllamaProvider — ANY_CLOUD selection can
+  legally pick Anthropic/OpenAI/Fugu workers and then fail with "No
+  provider for <x>" (observed live under throttle). Wire the remaining
+  providers or pre-filter unroutable workers.
+- Cloud-orchestrator planning is not tick()-gated (deliberate — a
+  checkpoint without a plan cannot resume); budget state does not persist
+  across process restarts (only the checkpoint's BudgetSnapshot does).
 - LFM2.5 empty-content bug PARKED for local-model phase; next lever is
   reproduction under real async/concurrent harness load (see CLAUDE.md
   diagnostic notes — hypotheses 1–3 ruled out, do not re-test).
@@ -129,7 +152,7 @@ repeated-identical-call detection).
 
 ## PHASE 8 TASK LIST (in order — do not skip ahead)
 
-### 8.1 — Live cloud-path E2E validation
+### 8.1 — Live cloud-path E2E validation  ✅ COMPLETE (2026-07-19)
 
 Run a real multi-step orchestration through Ollama Cloud workers (not unit
 tests — the live CLI path; unit tests previously passed while the live path

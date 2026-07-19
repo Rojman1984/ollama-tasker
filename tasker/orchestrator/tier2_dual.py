@@ -76,6 +76,7 @@ class DualLLMOrchestrator(OrchestratorBase):
         result = parse_plan(task, raw)
         if result is None:
             result = await self._fallback.plan(task, classifier_output, available_workers)
+            result.used_fallback = True
         return result
 
     async def synthesize(

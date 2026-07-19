@@ -814,3 +814,179 @@ Two independent, small fixes, unrelated to each other.
       to empty list), serialized in to_dict()/from_dict()
 - [x] Round-trip tests added to test_worker_manifest.py (defaults-empty +
       round-trip); full suite confirmed passing after the addition
+
+---
+
+## Phase 8.1 -- Live Cloud-Path E2E Validation (COWORK_PROMPT task numbering)
+
+> **Naming note:** distinct from "Phase 8.1 -- Setup Wizard (headless)" above,
+> which follows SDD_ADDENDUM_PHASE8.md's numbering. This section is task 8.1
+> of COWORK_PROMPT.md's PHASE 8 TASK LIST (cloud-path E2E validation) -- the
+> same numbering collision already flagged in CLAUDE.md's Phase Tracker.
+
+All evidence below was captured live on Designlab1 (GTX 1050 Ti, Ollama
+0.30.11 on 127.0.0.1:11435, signed in to Ollama Cloud as Rojman1984),
+2026-07-19. Environment for every run:
+
+```bash
+export TASKER_PROFILE=tier2_designlab_cloud   # new cloud-orchestrator profile
+export OLLAMA_BASE_URL=http://127.0.0.1:11435 # overrides profile YAML (new)
+export TASKER_LOG_LEVEL=INFO
+```
+
+### Live-path bugs found and fixed (each with regression tests)
+
+- [x] **used_fallback never set by tiers 2/3/4** -- only
+      `SingleLLMOrchestrator` (tier 1) marked NanoOrchestrator fallback
+      plans; `DualLLMOrchestrator` (the live tier on Designlab1),
+      `ReasoningOrchestrator`, and `CloudOrchestrator` returned fallback
+      plans with `used_fallback=False`. Fixed in all three; regression
+      tests `test_plan_fallback_sets_used_fallback_flag` in
+      `test_orchestrator_tier2/3/4.py`.
+- [x] **Session budget never constructed or recorded in production** --
+      `OllamaSessionBudget` existed but `record_usage()` had zero
+      production callers, and `cli/shell.py` passed hardcoded
+      `slots_available=1, should_throttle=False` to `WorkerSelector`.
+      Fixed: `OllamaProvider` now accepts an optional budget and records
+      GPU-time units (wall-clock x `ollama_usage_level`, None billed as
+      1) on every successful OLLAMA_CLOUD call
+      (`compute_usage_units()`, `tasker/workers/providers/ollama.py`);
+      the CLI builds the budget from the profile plan and threads live
+      `concurrency_mgr.slots_available` + tick-driven throttle into the
+      selector. Tests: `TestOllamaProviderBudgetRecording` (7 tests).
+- [x] **SessionManager/tick() not in the CLI path; no checkpoint ever
+      written during a run; `tasker resume` was a stub** -- the CLI step
+      loop now calls `SessionManager.tick()` before every dispatch
+      (SDD 9.1), pauses via the full SDD 9.2 flow (checkpoint with plan +
+      completed-step records + budget snapshot, notifier event, PAUSED),
+      and `tasker resume <id>` / `--last` performs the real SDD 9.4
+      resume (fresh window, RESUMED event, continues from
+      `current_step_index`, synthesizes prior + new results). Tests:
+      `tests/unit/test_cli_session_wiring.py` (9 tests, incl. mid-run
+      exhaustion pausing before the next step, never mid-step).
+- [x] **`--policy` flag parsed but ignored** -- now resolved through
+      `_POLICY_ALIASES` and applied as a mode routing-policy override
+      (CLI, REPL `/policy`, and `resume --policy`).
+- [x] **No OLLAMA_BASE_URL override** -- profile YAML hardcoded the port;
+      Designlab1 actually serves on 127.0.0.1:11435 (systemd port.conf
+      drop-in), so the live path could never connect. Env var now wins.
+- [x] **tier2_designlab.yaml had no `orchestrator.model`** -- factory fell
+      back to qwen3:1.7b, which is not installed on Designlab1; live
+      tier-2 planning could never have worked on the machine the profile
+      is for. Added `model: lfm2.5-thinking:latest`.
+      (The planner_model/synthesizer_model dual-model keys remain unread
+      -- known open Tier 2 bug, unchanged.)
+- [x] New profile `config/profiles/tier2_designlab_cloud.yaml` -- same
+      hardware, orchestrator on Ollama Cloud (`kimi-k2.7-code:cloud`,
+      `compute_location: ollama_cloud`), used for cloud-path validation.
+- [x] INFO logging added: slot acquire/deny/release
+      (`tasker/session/concurrency.py`) and per-call budget increments
+      (provider). `TASKER_LOG_LEVEL` now configures `logging.basicConfig`
+      in `cli/shell.py main()`.
+
+### Checkpoint 1 -- OllamaCloudConcurrencyManager constructed + enforcing
+
+Every cloud call in the live CLI runs showed slot lifecycle (Pro plan, 3
+slots):
+
+```
+INFO tasker.session.concurrency: OllamaCloud slot acquired (1/3 in use, plan=pro)
+INFO tasker.workers.providers.ollama: OllamaCloud budget: +5.5 units (kimi-k2.7-code:cloud, 5.5s x level 1) -> 5.5/3000 session (0.2%)
+INFO tasker.session.concurrency: OllamaCloud slot released (0/3 in use, plan=pro)
+```
+
+Enforcement (DEFERRED, never block/queue) proven by saturating a FREE-plan
+manager (1 slot) with 2 truly concurrent real cloud calls through the
+production `OllamaProvider` (scratchpad `concurrency_saturation_demo.py`):
+
+```
+INFO tasker.session.concurrency: OllamaCloud slot acquired (1/1 in use, plan=free)
+INFO tasker.session.concurrency: OllamaCloud slot DENIED — all 1 slot(s) in use (plan=free)
+call 1: status='success' output='OK'
+call 2: status='deferred' reason='No Ollama Cloud concurrency slot available.'
+```
+
+### Checkpoint 2 -- Budget tracking increments + throttle behavior
+
+Multi-step cloud orchestration (`tasker-cli --mode cowork "...two steps...
+reasoning specialist..."`): plan (kimi cloud, +5.5u) -> step 0 routed to
+`nemotron-3-ultra-cloud` via the `reasoning` capability (+46.4u = 15.5s x
+level 3) -> step 1 local -> cloud synthesis (+7.2u). Budget visibly
+accumulated 0 -> 59.1/3000 (2.0%) across the run.
+
+Throttle (live, `TASKER_BUDGET_PRELOAD=2988`): tick() returned
+CONTINUE_LOCAL_ONLY at 99.7% and the step loop printed
+`[throttle] budget at 99.7% — routing local-biased`; heavy cloud workers
+(usage_level >= 3) were dropped from selection. Observed consequences,
+both by design but worth knowing: (a) a step requiring
+`{reasoning, thinking}` had no eligible worker under throttle (heavy-cloud
+filter runs before the capability filter, matching SDD 5.5's decision-tree
+order) and failed selection cleanly; (b) selection then diverted a
+`{tool_use, reasoning}` step to `claude-haiku-4-5` (direct cloud is legal
+under ANY_CLOUD + throttle per SDD 9.3), which surfaced that the CLI
+provider_map wires only OllamaProvider -- "No provider for anthropic".
+Logged under Known Open Issues.
+
+### Checkpoint 3 -- Pause/resume checkpoints survive a real pause
+
+Run with `TASKER_BUDGET_PRELOAD=3050` (exhausted): planning completed,
+then the tick before step 0 returned PAUSE -> full SDD 9.2 flow ran:
+
+```
+  2 step(s), used_fallback=False
+[10:31:46] PAUSED: Session paused. Checkpoint: e917766c-0238-4c5f-8e71-caa8e66454fb
+⏸  Session budget exhausted (101.8%) — paused before step 0.
+```
+
+Checkpoint verified on disk (`.tasker/checkpoints/e917766c-....json`):
+mode=cowork, profile=tier2_designlab_cloud, current_step_index=0, full
+2-step plan with capabilities, budget snapshot usage_pct=1.0177.
+Then, in a **fresh process** with the preload unset:
+
+```
+$ tasker-cli resume --last
+Resuming checkpoint e917766c-...  [cowork]  ...
+  paused with budget at 102% (pro plan), 0/2 step(s) completed
+[10:32:10] RESUMED: Session resumed from checkpoint e917766c-...
+  Step 0: ... [ok] nemotron-3-ultra-cloud (40330ms, budget 4.0%)
+  Step 1: ... [ok] nemotron-3-ultra-cloud (3315ms, budget 4.4%)
+Synthesizing...
+$3^6 = 729$ is bigger than $6! = 720$ by 9.
+```
+
+Mid-run exhaustion (step completes, pause before *next* step, SDD 9.2
+"always complete the current step") is additionally covered by
+`test_mid_run_exhaustion_pauses_before_next_step`.
+
+### Checkpoint 4 -- used_fallback reported correctly
+
+Every live run printed the flag after planning, e.g.
+`2 step(s), used_fallback=False` (model plans parsed successfully in all
+live runs). The True path (Nano template standing in for an unparseable
+model plan) is regression-tested at tiers 1-4 and the CLI prints
+`(fallback: NanoOrchestrator template — model plan unparseable)` when set.
+
+### Suite status
+
+- [x] Full suite green after all changes: **586 tests, OK**
+      (`python -m unittest discover -s tests`) -- was 567 before this
+      session (+19: 3 tier-fallback regressions, 7 provider budget,
+      9 CLI session wiring).
+
+### Known Open Issues added this session
+
+- [ ] CLI `provider_map` wires only OllamaProvider; selection can legally
+      choose Anthropic/OpenAI/Fugu workers (ANY_CLOUD modes, esp. under
+      throttle) and then fails with "No provider for <x>". Either wire the
+      remaining providers into `_build_pipeline()` or filter unroutable
+      workers out before selection.
+- [ ] Cloud-orchestrator plan/synthesize calls are not gated by
+      SessionManager.tick() -- a fully exhausted budget still permits the
+      planning call (observed live: +3.1u at 101.8%). Deliberate for now:
+      a checkpoint without a plan cannot resume. Revisit if planning cost
+      becomes material.
+- [ ] Budget state does not persist across process restarts (SDD 5.10 says
+      it should) -- each CLI invocation starts a fresh 5-hour window; only
+      the checkpoint's BudgetSnapshot is persisted. Real Ollama Cloud
+      server-side limits are unaffected (they are enforced remotely); this
+      only weakens local throttle fidelity between invocations.

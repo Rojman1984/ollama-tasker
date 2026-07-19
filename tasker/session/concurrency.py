@@ -10,10 +10,13 @@ See SDD Section 5.9.
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 from tasker.workers.base import OllamaPlan
+
+logger = logging.getLogger(__name__)
 
 
 _PLAN_SLOTS: dict[OllamaPlan, int] = {
@@ -58,7 +61,15 @@ class OllamaCloudConcurrencyManager:
         async with self._lock:
             if self._in_use < self.max_slots:
                 self._in_use += 1
+                logger.info(
+                    "OllamaCloud slot acquired (%d/%d in use, plan=%s)",
+                    self._in_use, self.max_slots, self.plan.value,
+                )
                 return True
+            logger.info(
+                "OllamaCloud slot DENIED — all %d slot(s) in use (plan=%s)",
+                self.max_slots, self.plan.value,
+            )
             return False
 
     async def release(self) -> None:
@@ -66,6 +77,10 @@ class OllamaCloudConcurrencyManager:
         async with self._lock:
             if self._in_use > 0:
                 self._in_use -= 1
+                logger.info(
+                    "OllamaCloud slot released (%d/%d in use, plan=%s)",
+                    self._in_use, self.max_slots, self.plan.value,
+                )
 
     @property
     def slots_available(self) -> int:
