@@ -89,145 +89,72 @@ Do not write any code until you have read both documents.
 
 **Project:** Ollama Tasker (standalone — not HomeWatch, not Ztripes)
 **SDD Version:** 0.1.0-draft (docs/SDD.md)
-**Current Phase:** 1 — Data Models + Worker Registry + Worker Selector
+**Current Phase:** Cloud-path E2E validation (post-Phase-7.5 — Ollama server +
+Ollama Cloud models first; local models and frontier APIs deferred)
 
 **Phase completion state:**
 
 | Phase | Description | Status |
 |-------|-------------|--------|
-| 1 | Data models + Worker Registry + Selector | ⬜ NOT STARTED |
-| 2 | Session Layer | ⬜ NOT STARTED |
-| 3 | Orchestrator (Base, Tier 0, Tier 1) | ⬜ NOT STARTED |
-| 4 | Providers + ToolNormalizer | ⬜ NOT STARTED |
-| 5 | Modes + CLI Shell | ⬜ NOT STARTED |
-| 6 | Higher Orchestrator Tiers | ⬜ NOT STARTED |
-| 7 | Hardening | ⬜ NOT STARTED |
+| 1 | Data models + Worker Registry + Selector | ✅ COMPLETE |
+| 2 | Session Layer | ✅ COMPLETE |
+| 3 | Orchestrator (Base, Tier 0, Tier 1) | ✅ COMPLETE |
+| 4 | Providers + ToolNormalizer | ✅ COMPLETE |
+| 5 | Modes + CLI Shell | ✅ COMPLETE |
+| 6 | Higher Orchestrator Tiers | ✅ COMPLETE |
+| 7 | Hardening (+ Addenda A/B, 7.5.x hardware detection) | ✅ COMPLETE |
+| 8 | Cloud-path E2E validation | 🔄 IN PROGRESS |
 
-**Last completed task:** None — first session.
+**Last completed task:** Phase 7.5.4–7.5.6 — AmdApuBackend + worker VRAM
+cross-check, live-verified on TASKER-P1 via SSH (full 17/17 GPU offload).
+Session notes committed as 749dfee. 523+ tests passing.
 
-**Next task:** Create `tasker/workers/base.py` — all data models and enumerations
-per SDD Section 6. This file is the contract that every other module imports from.
-Nothing else is written until this file is complete and its unit tests pass.
+**Next task:** Live end-to-end validation of the Ollama Cloud path: real
+multi-step orchestration through Ollama Cloud workers confirming concurrency
+slot management, session budget tracking, pause/resume checkpoints, and
+`used_fallback` observability. Then `tier4_cloud.py` reachability from current
+hardware profiles, then tool-loop non-termination guard (hard iteration cap +
+repeated-identical-call detection).
 
-**Files modified this session:** None yet.
+**Files modified this session:** COWORK_PROMPT.md (this status refresh).
 
-**Open decisions / blockers:** None. All design decisions are captured in SDD.
+**Open decisions / blockers:**
+- LFM2.5 empty-content bug PARKED for local-model phase; next lever is
+  reproduction under real async/concurrent harness load (see CLAUDE.md
+  diagnostic notes — hypotheses 1–3 ruled out, do not re-test).
+- Cowork now drives headless Claude Code runs via shared tmux session
+  (`tmux attach -t tasker -r` to observe).
+
+---
+
+## PHASE 8 TASK LIST (in order — do not skip ahead)
+
+### 8.1 — Live cloud-path E2E validation
+
+Run a real multi-step orchestration through Ollama Cloud workers (not unit
+tests — the live CLI path; unit tests previously passed while the live path
+was broken). Confirm live:
+  - Concurrency slot management (OllamaCloudConcurrencyManager constructed
+    and enforcing in the CLI path)
+  - Session budget tracking increments and throttle behavior
+  - Pause/resume checkpoints survive a real pause
+  - used_fallback reported correctly on ExecutionPlan
+Document evidence (commands + output) in docs/TASKER_CHECKLIST.md.
+
+### 8.2 — tier4_cloud.py reachability
+
+Verify hardware-profile → tier resolution can actually route to Tier 4 from
+the Designlab1 and TASKER-P1 profiles. If unreachable by design, fix the
+resolution chain or document why. Add a regression test.
+
+### 8.3 — Tool-loop non-termination guard
+
+Hard iteration cap + repeated-identical-call detection in the tool loop,
+so a runaway loop cannot burn Ollama Cloud budget. Unit tests for both
+guard conditions.
 
 ---
 
-## PHASE 1 TASK LIST (in order — do not skip ahead)
-
-### 1.1 — tasker/workers/base.py
-
-Create all data models and enumerations defined in SDD Sections 6 and a subset of
-Section 5. This is the single source of truth — no other file defines these types.
-
-Required contents:
-
-Enumerations (SDD 6.8):
-  - ProviderType
-  - ComputeLocation
-  - Capability
-  - ToolProtocol
-  - RoutingPolicy
-  - PrivacyTier
-  - AgentRole
-  - SessionState
-  - SessionDirective
-  - WorkerStatus
-  - OllamaPlan
-  - OllamaUsageLevel (IntEnum)
-  - LatencyClass
-  - FallbackHint
-
-Dataclasses (SDD 6.1–6.4):
-  - WorkerManifest
-  - WorkerTask
-  - WorkerResult
-  - WorkerToolResult
-  - ModelUsage
-  - ToolDefinition
-  - RetryDecision
-  - ClassifierResult
-
-Supporting types:
-  - TaskerPolicyError(Exception) — raised on privacy tier violation
-  - TaskerConfigError(Exception) — raised on invalid configuration
-
-Validation:
-  - WorkerManifest.__post_init__ must reject any manifest missing Capability.TOOL_USE
-
-### 1.2 — tests/unit/test_worker_manifest.py
-
-Unit tests for WorkerManifest:
-  - valid manifest with TOOL_USE passes
-  - manifest without TOOL_USE raises TaskerPolicyError
-  - serialization round-trip (to_dict / from_dict)
-  - capability subset checks
-  - ollama_usage_level only set when provider is OLLAMA
-
-### 1.3 — tasker/workers/registry.py
-
-Implement WorkerRegistry and WorkerSelector per SDD Section 5.4 and 5.5.
-
-WorkerRegistry:
-  - register(manifest: WorkerManifest) → validates, stores
-  - deregister(worker_id: str) → removes
-  - filter(capabilities: set[Capability]) → list[WorkerManifest]
-  - health_check(worker_id: str) → bool (stub: always True until providers exist)
-  - list_all() → list[WorkerManifest]
-  - get(worker_id: str) → WorkerManifest | None
-
-WorkerSelector:
-  - select(required_capabilities, policy, privacy_tier, slots_available,
-           should_throttle) → WorkerManifest
-  - Implement the full selection decision tree from SDD Section 5.5:
-      1. Privacy check (hard block on LOCAL_ONLY)
-      2. Concurrency check (exclude OLLAMA_CLOUD if slots_available == 0)
-      3. Budget check (penalize usage_level 3-4 when should_throttle)
-      4. Capability filter
-      5. Policy rank (COST_OPTIMIZED / CAPABILITY_FIRST / SPEED_OPTIMIZED / HYBRID / PRIVATE)
-  - select() raises TaskerPolicyError if LOCAL_ONLY and no local worker available
-
-### 1.4 — tests/unit/test_worker_registry.py
-
-  - register adds to registry
-  - deregister removes from registry
-  - filter returns correct capability matches
-  - filter returns empty list when no match
-  - list_all returns all registered workers
-
-### 1.5 — tests/unit/test_worker_selector.py
-
-  - COST_OPTIMIZED prefers LOCAL_HARDWARE over OLLAMA_CLOUD over DIRECT_CLOUD
-  - CAPABILITY_FIRST selects highest-scored worker
-  - LOCAL_ONLY with local worker available → selects local worker
-  - LOCAL_ONLY with NO local workers → raises TaskerPolicyError
-  - OLLAMA_CLOUD excluded when slots_available == 0
-  - Usage level 3-4 penalized when should_throttle is True
-  - No candidates after all filters → raises appropriate error
-
-### 1.6 — config/workers/worker_registry.yaml
-
-Create the initial worker registry YAML with these workers (from SDD Section 8.3):
-  - lfm2.5-local (LOCAL_HARDWARE, ollama)
-  - nemotron-3-ultra-cloud (OLLAMA_CLOUD, ollama, usage_level 3)
-  - minimax-m3-cloud (OLLAMA_CLOUD, ollama, usage_level 3, long_context)
-  - glm-5.1-cloud (OLLAMA_CLOUD, ollama, usage_level 3, code specialist)
-  - kimi-k2.7-code-cloud (OLLAMA_CLOUD, ollama, usage_level 2, code + vision)
-  - claude-haiku-4-5 (DIRECT_CLOUD, anthropic)
-  - claude-sonnet-4-6 (DIRECT_CLOUD, anthropic)
-  - fugu-ultra (DIRECT_CLOUD, fugu, multi_agent)
-
-### 1.7 — tasker/workers/__init__.py
-
-Expose the public surface cleanly.
-
-### 1.8 — docs/TASKER_CHECKLIST.md
-
-Create the checklist. Add checked items for every task completed in Phase 1.
-
----
 
 ## DEVELOPMENT RULES (enforce these — do not deviate)
 
