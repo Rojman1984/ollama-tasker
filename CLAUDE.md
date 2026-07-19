@@ -881,3 +881,21 @@ accumulation path (as opposed to this session's single-turn concurrent
 calls) — is still open for a future session, though the base rate now
 looks low enough that a much larger sample size (dozens to hundreds of
 attempts) may be needed to catch it at all.
+
+## Ollama server rules — DO NOT VIOLATE (Roland directive, 2026-07-19)
+
+- NEVER start, restart, or launch Ollama. Do not run `ollama serve`,
+  `Start-Process "ollama app.exe"`, or any command that spawns a server.
+  The Windows Ollama app owns the server lifecycle on this machine.
+- The API is at http://127.0.0.1:11434 (Windows app). WSL Ollama is at
+  127.0.0.1:11435 — inside WSL, set OLLAMA_HOST=127.0.0.1:11435.
+- If the API doesn't respond, STOP and tell Roland. Do not attempt recovery
+  by starting Ollama; a second instance causes port conflicts and freezes
+  the app UI. The only approved fix (run ONLY if Roland explicitly asks):
+  Stop-Process -Name 'ollama app','ollama' -Force; Start-Sleep 3;
+  Start-Process "$env:LOCALAPPDATA\Programs\Ollama\ollama app.exe"
+- Prefer HTTP calls to /api/* over the `ollama` CLI — the CLI auto-spawns
+  a server if it can't reach one, which is exactly the failure mode.
+- Set OLLAMA_HOST=127.0.0.1:11434 explicitly in any environment where the
+  CLI must run (11435 inside WSL), so it targets the running server instead
+  of spawning one.
