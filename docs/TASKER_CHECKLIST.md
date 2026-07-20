@@ -797,7 +797,6 @@ Two independent, small fixes, unrelated to each other.
       that machine from here); flagged as a follow-up, not fabricated.
 
 ### Still out of scope (unchanged from SDD_ADDENDUM_PHASE8.md)
-- [ ] Phase 8.3 -- TUI Foundation (real TuiApp, WelcomeScreen, status bar)
 - [ ] Phase 8.4 -- SetupWizardScreen + ModelSelectorScreen
 - [ ] Phase 8.5 -- HarnessPanel
 
@@ -1351,3 +1350,108 @@ session):**
   REPL's `_repl()`/`_dispatch()` logic is not expected to be reused by
   the Textual screens (different interaction model entirely), only
   `tasker/runtime/dispatch.py` is expected to carry forward.
+
+---
+
+## Phase 8.3 -- Textual TUI Skeleton (2026-07-19)
+
+SDD_ADDENDUM_PHASE8.md B.5.1-B.5.4. Supersedes the rudimentary REPL
+above -- `tasker` now launches a real full-screen Textual app instead.
+
+**SDD-first reconciliation (before any code):** the addendum had three
+mutually-inconsistent claims about which sub-phase owns SetupWizardScreen
+and ModelSelectorScreen -- B.5.2's screen-list comments said "Phase 8.2"
+for SetupWizardScreen (wrong regardless -- 8.2 was the headless readiness
+checker, not a UI screen) and "Phase 8.3" for ModelSelectorScreen; B.8's
+roadmap table bundled SetupWizardScreen into 8.3's one-line description;
+B.11's granular, test-gated checklist scoped 8.3 to the skeleton alone
+and bundled SetupWizardScreen with ModelSelectorScreen under 8.4. Asked
+the user to confirm which was authoritative rather than guessing;
+confirmed B.11 (the detailed, phase-gated spec) wins, matching this
+project's established one-atomic-phase-at-a-time pattern from 8.1/8.2.
+B.8's table and B.5.2's comments were corrected to match B.11 --
+8.3 = skeleton only, 8.4 = SetupWizardScreen + ModelSelectorScreen.
+
+- [x] `textual>=0.70.0` already in `pyproject.toml` (added in an earlier
+      session) -- confirmed installed version 8.2.8 is API-compatible
+      (verified `ListView.Selected.index`, `Static.content`,
+      `App.run_test()`/`Pilot`, `App.export_screenshot()` directly
+      against the installed package rather than assuming from memory).
+- [x] `tasker/tui/app.py` -- real `TuiApp(App)` + `main()`, replacing the
+      Phase 8.1 stub and the one-session REPL (B.5.0). `on_mount()`
+      pushes `WelcomeScreen`. The REPL's `_repl()`/`_dispatch()`
+      functions are gone -- they were documented from the start as a
+      temporary interim, not something meant to survive this phase; for
+      an interactive multi-turn session in the meantime, `tasker-cli
+      shell` still works (a separate, simpler REPL, unaffected by this
+      change). `tasker/runtime/dispatch.py` (the actually-reusable part)
+      is untouched and carried forward as planned -- nothing here
+      duplicates it, and it's the piece HarnessPanel (8.5) and
+      SetupWizardScreen/ModelSelectorScreen (8.4) will build on.
+- [x] `tasker/tui/screens/welcome.py` -- `WelcomeScreen`: status bar +
+      titled menu (`ListView`) with all 5 B.5.2 items (Setup Wizard,
+      Model Selector, Run Task, View Sessions, Daemon) plus Quit, so 8.4/
+      8.5 don't need a second navigation-layout change. Only Quit is
+      wired this phase (`q` binding + click); the other four show an
+      inert notice naming the headless command that covers the same
+      ground today (`tasker-setup`, `tasker-setup --check-model`,
+      `tasker-cli`, `tasker-cli checkpoints`) instead of navigating
+      anywhere -- Daemon's notice cites B.6's reserved-placeholder rule.
+- [x] `tasker/tui/widgets/status_bar.py` -- `HardwareStatusBar`: reactive
+      one-line bar per B.5.4's bracketed format
+      (`[CPU: Nc/NGB] [GPU: ...] [Tier: N / strategy]  [Model: ...]
+      [Session: ...]`). Reads the machine-local cache directly (never a
+      live `detect_gpu()`/`psutil` call -- A.3.1 convention every other
+      entry point follows), including its pre-computed
+      `computed_profile.orchestrator_tier_max`/`load_strategy` block
+      (SDD_ADDENDUM_7.5.md A.3.3) rather than re-deriving a
+      `HardwareProfile` a second time via `load_cached_detection()`.
+      `active_model`/`session_state` are reactive placeholders -- wired
+      to real values only once ModelSelectorScreen (8.4) and HarnessPanel
+      (8.5) exist to set them.
+- [x] `tasker` entry point already pointed to `tasker.tui.app:main`
+      (from the Phase 8.1 stub) -- no `pyproject.toml` change needed.
+      `tasker-cli` already existed too. Reinstalled with
+      `pip install -e .` anyway (venv confirmed via `which python`/
+      `which pip` first).
+- [x] `tests/unit/test_tui_status_bar.py` (new, 7 tests):
+      `refresh_hardware()` against a mocked raw cache -- no-cache
+      fallback, GPU/no-GPU formatting, ram_gb rounding (regression for
+      the raw-float display bug caught live during manual testing, see
+      below), missing-`computed_profile` fallback, `render()` combining
+      all three reactive fields.
+- [x] `tests/unit/test_tui_welcome_screen.py` (new, 12 tests) and
+      `tests/unit/test_tui_app.py` (new, 4 tests, replacing the deleted
+      REPL test file of the same name) -- driven headlessly through
+      Textual's `App.run_test()`/`Pilot` (no real terminal needed):
+      status bar present, correct menu item count/ids, title text, each
+      non-Quit item's notice text and phase reference, Quit
+      click + `q` binding both exit the app, `TuiApp` pushes
+      `WelcomeScreen` on mount, `main()` calls `TuiApp().run()`.
+- [x] Full suite green: **659 tests, OK** (was 668 after the REPL
+      session; net -9 = -30 deleted REPL tests + 21 new TUI tests).
+- [x] **Manual verification, Designlab1** (per B.8's requirement --
+      Textual rendering can't be fully unit-tested without a terminal):
+      (1) `tasker` launched in a real pty via `script -qc "timeout 3
+      tasker" /dev/null` -- ran the full 3s with no crash/traceback
+      (`timeout`'s SIGTERM exit code 124, i.e. still running, not a
+      failure). (2) Real (unmocked) headless screenshots captured via
+      `App.export_screenshot()` against this machine's actual cached
+      hardware detection and published as an artifact for visual review
+      -- confirmed real values on screen (12-core CPU, GTX 1050 Ti
+      4096MB, tier 2, resident) and a real menu-selection notice ("Setup
+      Wizard: Coming in Phase 8.4..."). Bug caught live during this step
+      and fixed before finalizing: `ram_gb` was displaying as an
+      unrounded float (`15.307815551757812`) -- rounded to whole GB, with
+      a regression test added.
+- [ ] Manual verification, TASKER-P1 (or WSL2) -- not run this session,
+      no access to that machine from here; unchanged follow-up note from
+      every prior phase that needed it.
+
+**Open decisions / known issues:**
+- `active_model`/`session_state` on `HardwareStatusBar` are inert
+  placeholders until 8.4 (model selection) and 8.5 (harness session
+  state) exist to drive them.
+- No dark/light theme decision made explicitly -- Textual's own default
+  theme applies; revisit once the addendum's visual direction (if any)
+  is specified.

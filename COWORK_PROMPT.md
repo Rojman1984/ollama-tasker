@@ -91,11 +91,11 @@ Do not write any code until you have read both documents.
 **SDD Version:** 0.1.0-draft (docs/SDD.md)
 **Current Phase:** SDD_ADDENDUM_PHASE8 (setup wizard / readiness checker /
 TUI). Cloud-path E2E validation (COWORK_PROMPT task list 8.1–8.3) and
-addendum 8.1–8.2 are complete. Addendum 8.3–8.5 (the full Textual TUI)
-remain ⬜, but `tasker` is no longer a stub — a scoped interim REPL now
-covers that entry point (see below and new B.5.0 in the addendum). Two
-standalone launch/ops tasks (API server launchability, TUI REPL — neither
-addendum-numbered) were completed in between.
+addendum 8.1–8.3 are complete. `tasker` now launches a real Textual app
+(skeleton only — Setup Wizard/Model Selector/Run Task are inert
+placeholders until 8.4/8.5). One standalone launch/ops task (API server
+launchability, not addendum-numbered) was completed in between; the
+interim REPL from the session before this one has been superseded.
 
 **Phase completion state:**
 
@@ -110,58 +110,67 @@ addendum-numbered) were completed in between.
 | 7 | Hardening (+ Addenda A/B, 7.5.x hardware detection) | ✅ COMPLETE |
 | 8 | Cloud-path E2E validation (task list 8.1–8.3) | ✅ COMPLETE |
 | A8.1–8.2 | Addendum: setup wizard + readiness checker | ✅ COMPLETE |
-| A8.3–8.5 | Addendum: full Textual TUI, model selector, harness panel | ⬜ NOT STARTED |
+| A8.3 | Addendum: Textual TUI skeleton (TuiApp, WelcomeScreen, status bar) | ✅ COMPLETE |
+| A8.4–8.5 | Addendum: SetupWizardScreen + ModelSelectorScreen, HarnessPanel | ⬜ NOT STARTED |
 
-**Last completed task:** Rudimentary TUI REPL, ✅ COMPLETE (2026-07-19;
-standalone ops task, not addendum-numbered — a deliberate B.5.0 interim
-ahead of the Textual work in A8.3–8.5 above). `tasker/tui/app.py`
-replaced the "coming in Phase 8.3" stub with a real stdlib-only REPL:
-`/mode [chat|code|cowork|research|secure]` (shown in the prompt),
-`/workers`, `/budget`, `/resume <id>|--last`, `/checkpoints`, `/help`,
-`/quit`/`/exit`; non-slash input dispatches through the real orchestrator
-→ provider pipeline. Extracted `cli/shell.py`'s pipeline/dispatch logic
-into a new shared module, `tasker/runtime/dispatch.py`, reused by both
-`tasker-cli` and `tasker` (zero behavior change to the CLI, confirmed by
-the full suite staying green immediately after the extraction).
-New: each mode lazily caches its own pipeline across turns within one
-REPL session, so `/budget` shows real accumulating usage instead of
-resetting every call — honestly scoped as per-mode, not the true
-single-account budget (SDD 5.10). Live smoke test on Designlab1 WSL
-(Ollama 0.30.11 @ 127.0.0.1:11435, never started): a scripted session
-ran a real chat task (`SingleLLMOrchestrator` → `lfm2.5-local`, zero
-cloud spend) and a real cowork task (`run_tool_loop` bash dispatch,
-which live-triggered the Phase 8.3 tool-loop non-termination guard as
-designed), with `/budget` correctly showing live usage and per-mode
-window scoping throughout. Suite 638 → 668, green. Evidence:
-docs/TASKER_CHECKLIST.md → "Rudimentary TUI REPL -- tasker/tui/app.py
+**Last completed task:** Textual TUI skeleton, ✅ COMPLETE (2026-07-19;
+the addendum's real Phase 8.3). SDD-first: the addendum had three
+mutually inconsistent claims about which sub-phase owns SetupWizardScreen/
+ModelSelectorScreen (B.5.2's comments, B.8's table, B.11's checklist all
+disagreed) — asked the user to confirm scope before writing code;
+confirmed B.11 (skeleton-only 8.3, wizard+selector bundled into 8.4) is
+authoritative, and corrected B.8/B.5.2 to match. `tasker/tui/app.py` now
+has a real `TuiApp(App)` + `main()`, replacing both the Phase 8.1 stub
+and the prior session's interim REPL (whose `_repl()`/`_dispatch()` are
+now gone — documented from day one as temporary; `tasker-cli shell`
+remains available for an interactive CLI session).
+`tasker/tui/screens/welcome.py`: `WelcomeScreen` renders the full B.5.2
+menu up front (Setup Wizard, Model Selector, Run Task, View Sessions,
+Daemon, Quit) so 8.4/8.5 don't need a second layout change; only Quit is
+wired, the rest show an inert "coming in Phase 8.x" notice.
+`tasker/tui/widgets/status_bar.py`: `HardwareStatusBar`, a reactive
+bracketed status line (B.5.4) reading the machine-local hardware cache
+directly (never live detection). `tasker/runtime/dispatch.py` — the
+actually-reusable piece — untouched, carried forward as planned.
+Live-verified on Designlab1: `tasker` booted in a real pty with no crash
+(3s run under `timeout`, killed as expected); real (unmocked) headless
+screenshots captured via Textual's `export_screenshot()` against this
+machine's actual cached hardware and published for visual review,
+confirming real values on screen. Caught + fixed a real bug during that
+step: `ram_gb` was displaying as an unrounded float, now rounded to
+whole GB with a regression test. Suite 668 → 659 (−30 deleted REPL
+tests, +21 new TUI tests, all headless via Textual's `Pilot`). Evidence:
+docs/TASKER_CHECKLIST.md → "Phase 8.3 -- Textual TUI Skeleton
 (2026-07-19)".
 
-**Next task:** SDD_ADDENDUM_PHASE8.md Phase 8.3–8.5 — the full Textual
-TUI (WelcomeScreen, HardwareStatusBar, SetupWizardScreen,
-ModelSelectorScreen, HarnessPanel) that supersedes this REPL; only
-`tasker/runtime/dispatch.py` is expected to carry forward into it, not
-`_repl()`/`_dispatch()`. Carried-over candidates: wire Anthropic/OpenAI/
-Fugu providers into the CLI/TUI provider_map (or pre-filter unroutable
-workers); budget persistence across process restarts; TASKER-P1 live
-runs of tasker-setup/tasker; orchestrator-planned ExecutionPlan in the
-API path (still _stub_plan, one step per request).
+**Next task:** SDD_ADDENDUM_PHASE8.md Phase 8.4 — SetupWizardScreen
+(wraps `tasker/setup/wizard.py`'s `run_wizard()`) + ModelSelectorScreen
+(wraps `tasker/setup/readiness.py`'s `ReadinessChecker`), plus the
+Textual message bus (`WizardStepCompleted`, `ReadinessCheckCompleted`,
+`WorkerRegistryUpdated`) per B.11. Then Phase 8.5 (HarnessPanel, built on
+`tasker/runtime/dispatch.py`). TASKER-P1 manual verification for 8.3
+still open (no access this session, same as every prior phase that
+needed it). Carried-over candidates: wire Anthropic/OpenAI/Fugu
+providers into the CLI/TUI provider_map (or pre-filter unroutable
+workers); budget persistence across process restarts; orchestrator-
+planned ExecutionPlan in the API path (still _stub_plan).
 
-**Files modified this session:** tasker/runtime/__init__.py (new),
-tasker/runtime/dispatch.py (new — extracted from cli/shell.py),
-cli/shell.py (re-imports from the shared module, no behavior change),
-tasker/tui/app.py (real REPL, was a stub), tests/unit/test_tui_app.py
-(new, 30 tests), docs/SDD_ADDENDUM_PHASE8.md (new B.5.0),
-docs/TESTING_GUIDE.md (new H8), docs/TASKER_CHECKLIST.md, CLAUDE.md,
-COWORK_PROMPT.md. No pyproject.toml change needed (`tasker =
-"tasker.tui.app:main"` already pointed here).
+**Files modified this session:** tasker/tui/app.py (rewritten —
+TuiApp/main(), REPL removed), tasker/tui/screens/welcome.py (new),
+tasker/tui/screens/__init__.py (new), tasker/tui/widgets/status_bar.py
+(new), tasker/tui/widgets/__init__.py (new), tests/unit/test_tui_app.py
+(rewritten), tests/unit/test_tui_welcome_screen.py (new),
+tests/unit/test_tui_status_bar.py (new), docs/SDD_ADDENDUM_PHASE8.md
+(B.8/B.5.2 reconciliation), docs/TESTING_GUIDE.md (H8 superseded, new
+H9), docs/TASKER_CHECKLIST.md, CLAUDE.md, COWORK_PROMPT.md. No
+pyproject.toml change needed (`tasker`/`tasker-cli` entry points already
+correct); reinstalled with `pip install -e .` anyway.
 
 **Open decisions / blockers:**
-- Per-mode (not per-account) budget scoping in the REPL — a real
-  architectural simplification, should be revisited if/when the true
-  SDD 5.10 single-account model needs representing in an interactive
-  session.
-- No `--mode`/other CLI flags on `tasker` itself (always starts in
-  chat) — not requested this session.
+- `active_model`/`session_state` on `HardwareStatusBar` are inert
+  placeholders until 8.4/8.5 exist to drive them.
+- No explicit dark/light theme decision — Textual's own default theme
+  applies; revisit if the addendum ever specifies a visual direction.
 - `_handle_completions` (API server) still builds a fresh per-request
   OllamaSessionBudget/SessionManager, separate from the provider's own
   shared budget used for GPU-time accounting — pause/resume checkpoint

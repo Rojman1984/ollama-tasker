@@ -190,51 +190,75 @@ model, see CLAUDE.md's latency notes). Stop the server with the normal
 signal (`Ctrl-C` interactively, or `kill <pid>` if backgrounded) --
 `web.run_app` shuts down cleanly.
 
-## H8. Rudimentary TUI REPL (`tasker`)
+## H8. [SUPERSEDED] Rudimentary TUI REPL
 
-`tasker` (`tasker/tui/app.py:main()`) is a stdlib-only interactive REPL
--- a deliberate scoped interim ahead of the full Textual TUI
-(SDD_ADDENDUM_PHASE8.md B.5.1+, still not started). Drives the same
-production pipeline as `tasker-cli` via the shared
-`tasker/runtime/dispatch.py` module. See that module's and
-`tasker/tui/app.py`'s docstrings for the per-mode budget-persistence
-model.
+The stdlib-only REPL this section documented (`/mode`, `/budget`, etc.
+typed at a `tasker (mode)>` prompt) was a deliberate one-session interim
+ahead of the Textual TUI, and is now gone -- `tasker` launches the real
+Textual app described in H9 below. Its production-dispatch logic lives
+on in `tasker/runtime/dispatch.py` (see H9). For an interactive
+multi-turn CLI session today, use `tasker-cli shell`, which has its own
+REPL (`/mode`, `/workers`, `/policy`, `/secure`, `/budget`,
+`/checkpoint`, `/resume`, `/status`, `/help`) -- a different,
+longer-standing implementation, unaffected by the TUI work.
 
-### H8.1 Unit tests
+## H9. Textual TUI Skeleton (`tasker`) -- SDD_ADDENDUM_PHASE8 Phase 8.3
+
+`tasker` (`tasker/tui/app.py:main()`) now launches `TuiApp`, a real
+full-screen Textual application. Phase 8.3 scope (see the addendum's
+2026-07-19 reconciliation note in B.8): `TuiApp` + `WelcomeScreen` +
+`HardwareStatusBar` only. Setup Wizard and Model Selector screens are
+Phase 8.4; the task-running harness panel is Phase 8.5 -- until then,
+every non-Quit menu item shows an inert notice pointing at the headless
+command that covers the same ground today (`tasker-setup`,
+`tasker-setup --check-model`, `tasker-cli`).
+
+### H9.1 Unit tests
 ```bash
-python -m unittest tests.unit.test_tui_app -v
-# Also confirms the cli/shell.py <-> tasker/runtime/dispatch.py refactor
-# didn't change CLI behavior:
-python -m unittest tests.unit.test_cli_session_wiring tests.unit.test_harness_modes -v
+python -m unittest tests.unit.test_tui_app tests.unit.test_tui_welcome_screen tests.unit.test_tui_status_bar -v
 ```
-Covers: per-mode pipeline build-once/reuse/eviction-on-pause in
-`_dispatch()`, `/budget`'s no-pipeline vs. live-pipeline output, every
-slash command driven through `_repl()` via a mocked `input()` sequence,
-and `main()`'s wiring. No live Ollama calls.
+Driven headlessly through Textual's own `App.run_test()`/`Pilot` test
+driver -- no real terminal needed, no live Ollama calls, no live
+hardware detection (`tasker.config.detect._read_matching_cache` is
+mocked). Covers: `TuiApp` pushes `WelcomeScreen` on mount; the menu has
+all 5 B.5.2 items plus Quit with correct ids; each non-Quit item's
+notice text and phase reference; Quit (click and the `q` binding) exits
+the app; `HardwareStatusBar.refresh_hardware()` against a mocked cache
+(present/absent, with/without GPU, `computed_profile` missing, `ram_gb`
+rounding).
 
-### H8.2 Live: interactive session
+### H9.2 Live: launch the real TUI
 ```bash
-# Never starts Ollama itself. WSL: 127.0.0.1:11435.
-OLLAMA_BASE_URL=http://127.0.0.1:11435 tasker
+tasker
 ```
+Arrow keys / mouse to navigate the menu, Enter or click to select, `q`
+or the Quit item to exit. The status bar at the top reads this machine's
+real cached hardware detection (`tasker-hardware detect` must have been
+run at least once, same as every other entry point that shows it) --
+run `tasker-hardware detect` first if it shows "hardware: not detected".
+
+For automated/headless verification without a real terminal (e.g. CI,
+or capturing evidence for a phase-completion writeup), drive it the same
+way the test suite does:
+```python
+import asyncio
+from tasker.tui.app import TuiApp
+
+async def main():
+    app = TuiApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        svg = app.export_screenshot(title="WelcomeScreen")
+        open("welcome.svg", "w").write(svg)
+
+asyncio.run(main())
 ```
-tasker (chat)> /budget
-tasker (chat)> Say hello in exactly three words.
-tasker (chat)> /budget
-tasker (chat)> /mode cowork
-tasker (cowork)> List the files in the current directory using a bash command.
-tasker (cowork)> /budget
-tasker (cowork)> /quit
-```
-Expect (live-verified 2026-07-19, Designlab1 WSL, Ollama 0.30.11 @
-127.0.0.1:11435): the chat task dispatches through a real
-`SingleLLMOrchestrator` plan -> `lfm2.5-local` worker -> synthesis
-(zero cloud spend, local calls never consume Ollama Cloud budget by
-design); `/budget` before any task shows profile/plan only, `/budget`
-after shows real live `0.0/3000 units` (correctly zero -- local, not
-cloud); `/mode cowork` updates the prompt to `tasker (cowork)>`; the
-cowork task exercises a real `run_tool_loop` bash-tool dispatch (may hit
-the Phase 8.3 tool-loop non-termination guard on this model -- that's
-expected, not a failure); `/quit` exits cleanly. Also testable
-non-interactively via a piped scripted input file (`tasker <
-commands.txt`) for automated smoke runs.
+Expect (live-verified 2026-07-19, Designlab1 WSL, Textual 8.2.8): boots
+straight into the status bar + menu; the bracketed status line reflects
+real detected hardware (this machine: 12-core CPU, GTX 1050 Ti 4096MB,
+tier 2, resident); selecting Setup Wizard / Model Selector / Run Task /
+View Sessions shows the expected "coming in Phase 8.x" notice without
+navigating; selecting Daemon cites the B.6 reserved-placeholder note;
+`tasker` also confirmed to boot without crashing in a real pty
+(`script -qc "timeout 3 tasker" /dev/null` -- ran the full 3s, killed by
+the timeout, not a crash).

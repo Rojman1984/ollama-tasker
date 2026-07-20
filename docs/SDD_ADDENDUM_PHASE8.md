@@ -442,23 +442,30 @@ TuiApp (App)
 │   Status bar: [hardware profile] [active model] [session state]
 │   Menu: Setup Wizard | Model Selector | Run Task | View Sessions | Quit
 │
-├── SetupWizardScreen      ← Phase 8.2
+├── SetupWizardScreen      ← Phase 8.4
 │   Runs wizard steps live, shows status per step
 │   Re-runnable: "Re-run All" and "Re-run Step N" buttons
 │   GPU guidance panel: shows commands to run if env vars missing
 │
-├── ModelSelectorScreen    ← Phase 8.3
+├── ModelSelectorScreen    ← Phase 8.4
 │   Two-panel: available models (left) | readiness report (right)
 │   "Test Model" button launches ReadinessChecker async
 │   Progress indicator during test (model inference can be slow)
 │   "Add to Registry" button on confirmed compatible model
 │
-└── HarnessPanel           ← Phase 8.4 (basic in this phase)
+└── HarnessPanel           ← Phase 8.5
     Mode selector (CHAT / CODE / COWORK / RESEARCH / SECURE)
     Task input field
     Output display (streaming)
     Session status (budget, checkpoint if COWORK)
 ```
+
+WelcomeScreen's menu items for SetupWizardScreen/ModelSelectorScreen/
+HarnessPanel exist from Phase 8.3 onward but are inert placeholders
+("coming in Phase 8.4"/"coming in Phase 8.5") until their respective
+phase lands -- this lets 8.3 ship the full menu shape (including the
+DAEMON placeholder per B.6) without a second navigation-layout change
+in 8.4/8.5.
 
 ### B.5.3 Message Protocol (Textual-Native)
 
@@ -574,9 +581,18 @@ WSL2-specific behavior differences:
 |---|---|---|
 | 8.1 | Setup wizard headless logic (wizard.py, all 7 steps) + CLI (`tasker-setup`) | `tasker-setup` |
 | 8.2 | Agentic readiness checker (readiness.py) + CLI probe mode | `tasker-setup --check-model <name>` |
-| 8.3 | Textual TUI skeleton (TuiApp, WelcomeScreen, status bar, SetupWizardScreen) | `tasker` |
-| 8.4 | ModelSelectorScreen wired to readiness checker | `tasker` → Model Selector |
+| 8.3 | Textual TUI skeleton (TuiApp, WelcomeScreen, status bar) | `tasker` |
+| 8.4 | SetupWizardScreen + ModelSelectorScreen wired to readiness checker | `tasker` → Setup Wizard / Model Selector |
 | 8.5 | HarnessPanel (mode select, task input, output display, session status) | `tasker` → Run Task |
+
+> Reconciled 2026-07-19: this table originally bundled SetupWizardScreen
+> into 8.3 and gave ModelSelectorScreen its own row; B.5.2's screen-list
+> comments and B.11's checklist disagreed with that split (B.11 already
+> scoped 8.3 to the skeleton alone and bundled SetupWizardScreen with
+> ModelSelectorScreen under 8.4). B.11 -- the more granular, test-gated
+> spec -- is authoritative; this table and B.5.2 below are now aligned to
+> it, matching the project's one-atomic-phase-at-a-time pattern used
+> throughout 8.1/8.2.
 
 Each sub-phase must have passing unit tests before the next begins.
 Sub-phases 8.3–8.5 require manual TUI verification (screenshot or
