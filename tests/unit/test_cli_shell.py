@@ -189,5 +189,72 @@ class TestReplChatCommands(unittest.TestCase):
         self.assertEqual(kwargs["effort"], "high")
 
 
+class TestReplModelOnboarding(unittest.TestCase):
+    """
+    /model <tag> dynamic onboarding (tasker/setup/onboarding.py wired
+    into cli/shell.py's _onboard_and_pin()). onboard_model() itself is
+    mocked -- its own behavior is covered by test_onboarding.py -- so
+    these tests are purely about the REPL's confirmation flow and how
+    the result is surfaced/pinned.
+    """
+
+    def _registry_with(self, worker_ids):
+        registry = mock.Mock()
+        registry.get = lambda wid: mock.Mock(id=wid) if wid in worker_ids else None
+        return registry
+
+    def _run_repl(self, inputs, onboard_return):
+        registry = self._registry_with(["lfm2.5-local"])
+        store = mock.Mock()
+        out = io.StringIO()
+        with mock.patch("builtins.input", side_effect=inputs + ["/quit"]), \
+             mock.patch("cli.shell._run_chat_task"), \
+             mock.patch("cli.shell._run_task"), \
+             mock.patch(
+                 "cli.shell.onboard_model",
+                 new=mock.AsyncMock(return_value=onboard_return),
+             ) as m_onboard, \
+             redirect_stdout(out):
+            _repl(registry, store, initial_mode="chat")
+        return out.getvalue(), m_onboard
+
+    def test_unknown_tag_confirmed_yes_onboards_and_pins(self):
+        manifest = mock.Mock(id="llama3.2-local")
+        output, m_onboard = self._run_repl(
+            ["/model llama3.2:3b", "y", "/model"],
+            onboard_return=(manifest, "Registered 'llama3.2-local' (protocol=native, context=8192)."),
+        )
+        self.assertIn("is not registered, but looks like an Ollama model tag", output)
+        self.assertIn("Registered 'llama3.2-local'", output)
+        self.assertIn("Current CHAT model: llama3.2-local (explicit)", output)
+        m_onboard.assert_called_once()
+        self.assertEqual(m_onboard.call_args[0][0], "llama3.2:3b")
+
+    def test_unknown_tag_declined_does_not_onboard(self):
+        output, m_onboard = self._run_repl(
+            ["/model llama3.2:3b", "n", "/model"],
+            onboard_return=(mock.Mock(), "should not be reached"),
+        )
+        self.assertIn("Cancelled.", output)
+        self.assertIn("Current CHAT model: lfm2.5-local (default", output)
+        m_onboard.assert_not_called()
+
+    def test_unknown_tag_onboard_failure_does_not_pin(self):
+        output, m_onboard = self._run_repl(
+            ["/model llama3.2:3b", "y", "/model"],
+            onboard_return=(None, "Pull failed: HTTP 500 from http://localhost:11434/api/pull"),
+        )
+        self.assertIn("Pull failed", output)
+        self.assertIn("Current CHAT model: lfm2.5-local (default", output)
+
+    def test_unregistered_id_without_colon_never_offers_onboarding(self):
+        output, m_onboard = self._run_repl(
+            ["/model totally-unknown-worker"], onboard_return=(mock.Mock(), "x"),
+        )
+        self.assertIn("Unknown worker id: 'totally-unknown-worker'", output)
+        self.assertNotIn("looks like an Ollama model tag", output)
+        m_onboard.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

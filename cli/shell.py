@@ -47,14 +47,69 @@ from tasker.runtime.dispatch import (
     _DEFAULT_EFFORT,
 )
 from tasker.session.checkpoint import CheckpointStore
+from tasker.setup.onboarding import looks_like_model_tag, onboard_model
 from tasker.workers.registry import WorkerRegistry
 
 _KNOWN_COMMANDS = (
     "/mode", "/workers", "/policy", "/secure", "/budget",
-    "/checkpoint", "/resume", "/model", "/effort", "/status", "/help",
-    "/quit", "/exit",
+    "/checkpoint", "/resume", "/model", "/effort", "/status",
+    "/help", "/quit", "/exit",
 )
+_DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
+
+
+def _pull_progress_printer():
+    """De-duplicated progress printer for /api/pull's NDJSON stream --
+    prints each distinct status line once rather than flooding the
+    terminal with a line per byte-progress tick."""
+    last_status = None
+
+    def _cb(evt: dict) -> None:
+        nonlocal last_status
+        status = evt.get("status")
+        if status and status != last_status:
+            print(f"  [pull] {status}")
+            last_status = status
+
+    return _cb
+
+
 _MODE_NAMES = frozenset({"chat", "code", "cowork", "research", "secure"})
+
+
+def _onboard_and_pin(registry: WorkerRegistry, model_tag: str) -> str | None:
+    """
+    /model <tag> dynamic onboarding (SDD_ADDENDUM_PHASE8.md B.5.5): an
+    unregistered id that looks like a genuine Ollama model tag gets
+    offered for download + registration rather than a flat "unknown
+    worker id" rejection. Confirms with the user first (never pulls
+    without an explicit yes), pulls via HTTP /api/pull (never the
+    `ollama` CLI -- CLAUDE.md's binding server rules), probes it for
+    tool-calling readiness, and registers it on success. Returns the new
+    worker id to pin CHAT to, or None if declined/failed (message
+    already printed either way).
+    """
+    base_url = os.environ.get("OLLAMA_BASE_URL", _DEFAULT_OLLAMA_BASE_URL)
+    print(
+        f"Worker '{model_tag}' is not registered, but looks like an Ollama "
+        f"model tag. This will pull it via {base_url} (HTTP /api/pull, "
+        f"never the `ollama` CLI) if not already downloaded, then probe it "
+        f"for tool-calling support."
+    )
+    try:
+        confirmed = input(f"Download and onboard '{model_tag}'? [y/N] ").strip().lower() == "y"
+    except (KeyboardInterrupt, EOFError):
+        print()
+        confirmed = False
+    if not confirmed:
+        print("Cancelled.")
+        return None
+
+    manifest, message = asyncio.run(
+        onboard_model(model_tag, registry, base_url, progress_cb=_pull_progress_printer())
+    )
+    print(message)
+    return manifest.id if manifest is not None else None
 
 
 def _suggest_command(cmd: str) -> str | None:
@@ -186,11 +241,15 @@ def _repl(
             elif cmd == "/model":
                 if arg:
                     worker = registry.get(arg)
-                    if worker is None:
-                        print(f"Unknown worker id: {arg!r}  (see /workers)")
-                    else:
+                    if worker is not None:
                         chat_model = arg
                         print(f"CHAT model pinned to: {chat_model}")
+                    elif looks_like_model_tag(arg):
+                        onboarded = _onboard_and_pin(registry, arg)
+                        if onboarded:
+                            chat_model = onboarded
+                    else:
+                        print(f"Unknown worker id: {arg!r}  (see /workers)")
                 elif chat_model:
                     print(f"Current CHAT model: {chat_model} (explicit)")
                 else:
@@ -227,6 +286,8 @@ def _repl(
                     "  /checkpoint         list checkpoints\n"
                     "  /resume <id|--last> resume from checkpoint\n"
                     "  /model <worker_id>  pin CHAT mode to an exact worker\n"
+                    "                      (an unregistered but valid-looking\n"
+                    "                      Ollama tag offers to pull + onboard it)\n"
                     "  /effort <low|med|high>  redirect CHAT mode's default worker\n"
                     "  /status             show current session state\n"
                     "  /help               this message\n"

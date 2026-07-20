@@ -401,3 +401,50 @@ by "What is my name?" produced a reply that correctly referenced
 conversation history across REPL turns. `/status` showed
 `chat_model=lfm2.5-local (default)  chat_effort=med` as expected. Local
 only, zero cloud spend.
+
+## H13. `/model` dynamic onboarding (2026-07-20)
+
+New sprint (REPL/TUI UX package), part 1 of 3. An unregistered `/model
+<tag>` that looks like a genuine Ollama model reference (`name:tag`)
+offers to pull it, probe it for tool-calling readiness, and register it
+-- rather than a flat "Unknown worker id" rejection.
+
+### H13.1 Unit tests
+```bash
+python -m unittest tests.unit.test_onboarding tests.unit.test_cli_shell.TestReplModelOnboarding -v
+```
+Covers: `looks_like_model_tag()` (accepts `name:tag` shapes, rejects
+colon-less registry-style ids so a typo of a known id is never treated
+as a download candidate); `pull_model()` -- success on final
+`{"status": "success"}`, failure on non-200/`{"error": ...}`/unexpected
+final status/transport exception, progress callback invoked per NDJSON
+line (all via an injected `_pull_fn`, no real HTTP); `onboard_model()`
+-- pull failure never probes or registers, probe failure (not
+tool-capable) never registers despite a successful pull, success writes
+the manifest to the registry file *and* the live in-memory registry and
+returns it. `cli/shell.py`'s `_onboard_and_pin()` -- the REPL's
+confirm/decline flow, and that a colon-less unregistered id never offers
+onboarding (falls through to the plain "Unknown worker id" message).
+
+### H13.2 Live: real pull + probe against the WSL Ollama server
+```bash
+OLLAMA_BASE_URL=http://127.0.0.1:11435 TASKER_PROFILE=tier2_designlab tasker-cli shell
+tasker> /model smollm2:135m
+Download and onboard 'smollm2:135m'? [y/N] y
+```
+Live-verified 2026-07-20 (Designlab1, WSL Ollama): real `POST
+/api/pull` streamed real progress lines (`pulling manifest` ->
+`pulling <digest>` x6 -> `verifying sha256 digest` -> `writing
+manifest` -> `success`), confirmed via `GET /api/tags` showing
+`smollm2:135m` actually present on the server afterward. The probe then
+correctly reported the tiny 135M model as NOT tool-capable (expected --
+proves the failure path honestly: pulled but not registered,
+`worker_registry.yaml` untouched, CHAT model selection unchanged).
+Cleaned up afterward via `DELETE /api/pull`'s counterpart `/api/delete`
+(never the `ollama` CLI, per the binding server rules) -- server back to
+its original 3-model state. The success-registration path itself is
+unit-tested (`test_onboarding.py`'s
+`test_pull_and_probe_success_registers_and_returns_manifest`) rather
+than forcing a second, larger tool-capable download live. Local only;
+zero Ollama Cloud spend (the one live `/api/pull` was against a local,
+not `:cloud`-tagged, tag).

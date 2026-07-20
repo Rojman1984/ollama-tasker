@@ -1688,3 +1688,50 @@ or an explicit `/model`) is still recorded by the shared
 the way COWORK's step loop is. Worth reconsidering if `/effort high`
 chat usage on Ollama Cloud becomes a real budget-exhaustion vector in
 practice.
+
+## REPL/TUI UX sprint, part 1 -- `/model` dynamic onboarding (2026-07-20)
+
+New sprint from Roland's live REPL/TUI testing, three parts, one commit
+each. Part 1 of 3.
+
+- [x] **SDD-first:** SDD_ADDENDUM_PHASE8.md B.4.7 "Dynamic Model
+      Onboarding via `/model`" documents the confirm -> pull -> probe ->
+      register -> pin flow, the `name:tag` onboarding-candidate
+      heuristic, and the explicit non-scope (re-pulling an already-
+      registered model, concurrent onboarding, no change to
+      `ReadinessChecker.check()`'s own never-auto-pull contract).
+- [x] New `tasker/setup/onboarding.py`: `looks_like_model_tag()` (colon-
+      shape heuristic, deliberately narrow to avoid false-positiving on
+      a typo'd registry id), `pull_model()` (HTTP `POST /api/pull`,
+      streaming NDJSON, injectable `_pull_fn` for testing -- never the
+      `ollama` CLI, per CLAUDE.md's binding server rules), `onboard_model()`
+      (pull -> `ReadinessChecker.check()` -> `write_manifest_to_registry()`
+      + live in-memory `registry.register()` on success).
+- [x] `cli/shell.py`: `/model <tag>` for an unregistered, tag-shaped id
+      now calls `_onboard_and_pin()` -- prints what will happen and
+      where from, confirms with the user, runs the onboarding flow, and
+      pins CHAT to the new worker id on success. A de-duplicated pull-
+      progress printer (`_pull_progress_printer()`) prints one line per
+      distinct status change, not one per byte-progress tick. `/help`
+      updated.
+- [x] Tests: `tests/unit/test_onboarding.py` (new, 14 tests),
+      `tests/unit/test_cli_shell.py` (+4, `TestReplModelOnboarding`).
+- [x] Full suite green: **748 tests, OK** (was 730).
+- [x] **Live smoke** (Designlab1, WSL Ollama 127.0.0.1:11435, zero cloud
+      spend): `/model smollm2:135m` in a real `tasker-cli shell` session
+      -> confirmed `y` -> real streamed `/api/pull` progress -> `GET
+      /api/tags` confirmed the model actually landed on the server ->
+      readiness probe correctly reported it as not tool-capable (a real
+      135M model genuinely can't reliably call tools) -> not registered,
+      `worker_registry.yaml` untouched, CHAT model unchanged. Cleaned up
+      via `/api/delete` (never the `ollama` CLI) -- server restored to
+      its original 3-model state.
+
+**Open decisions / known issues:** the success-registration path (pull
++ probe succeed, manifest actually written and pinned) was proven at
+the unit level, not live in this pass -- the live smoke deliberately
+used a tiny, genuinely-not-tool-capable model to keep the download
+small and fast; a future session wanting live success-path evidence
+should pull a real tool-capable model instead (e.g. a small
+`qwen2.5`/`llama3.1` variant), which will take longer and use more
+bandwidth/disk.

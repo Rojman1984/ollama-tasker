@@ -397,6 +397,65 @@ Add WorkerRole to WorkerManifest.to_dict() / from_dict() serialization.
 
 ---
 
+## B.4.7 Dynamic Model Onboarding via `/model`
+
+**Status:** Added after live REPL/TUI UX testing (Roland). Origin: a
+user typing `/model llama3.2:3b` for a model not yet in
+`worker_registry.yaml` previously got a flat "Unknown worker id"
+rejection -- the only way to add a new model was the separate
+`tasker-setup --check-model` CLI flow, run outside the REPL, with a
+manual `ollama pull` first.
+
+**Rule:** `/model <tag>` in the interactive REPL (`cli/shell.py`), when
+`<tag>` is not a registered worker id, is offered as a candidate for
+*dynamic onboarding* if it looks like a genuine Ollama model reference
+(`tasker.setup.onboarding.looks_like_model_tag()` -- requires a
+`name:tag` shape, e.g. `llama3.2:3b`; a colon-less string is always
+treated as a plain unknown-id typo, never as an onboarding candidate,
+to avoid false-positiving on a mistyped registry id like
+`lfm2.5-locl`).
+
+**Flow** (`tasker.setup.onboarding.onboard_model()`), all local, no
+Ollama Cloud spend unless the tag itself names a `:cloud` model:
+  1. **Confirm.** The REPL shows the exact `OLLAMA_BASE_URL` it will
+     pull from and states plainly that nothing downloads without an
+     explicit yes. Declining is a no-op — nothing pulled, nothing
+     probed, nothing registered.
+  2. **Pull.** `tasker.setup.onboarding.pull_model()` — HTTP `POST
+     /api/pull` on `OLLAMA_BASE_URL`, streaming NDJSON progress
+     (`{"status": ...}` lines, ending `{"status": "success"}` or
+     `{"error": ...}`). **Never the `ollama` CLI** — CLAUDE.md's binding
+     Ollama server rules apply here exactly as everywhere else in this
+     codebase (the CLI auto-spawns a server if it can't reach one).
+     Progress is de-duplicated to one printed line per distinct status
+     change, not one per byte-progress tick.
+  3. **Probe.** The exact same B.4.3 readiness protocol
+     (`ReadinessChecker.check()`) used by `tasker-setup --check-model`
+     — NATIVE → LFM25 → JSON_EXTRACT, stopping at the first successful
+     round. A model that fails all three rounds is *not* registered
+     (`Capability.TOOL_USE` is mandatory at registration, B.1) — the
+     pull still happened (the model is now locally available for a
+     future direct `ollama`-less use), but onboarding reports failure
+     and the REPL's CHAT model selection is left unchanged.
+  4. **Register.** On a successful probe, the suggested
+     `WorkerManifest` (same construction as B.4.5/B.4.6 — id, protocol,
+     context window, recommended roles) is written to
+     `worker_registry.yaml` via `write_manifest_to_registry()` *and*
+     registered into the REPL's live in-memory `WorkerRegistry`, so it
+     is selectable immediately without a restart.
+  5. **Pin.** On success, the REPL pins CHAT mode to the new worker id
+     (equivalent to `/model <new-id>` on the freshly registered entry).
+
+**Not in scope for B.4.7:** re-pulling an already-registered worker's
+model (that's `tasker-setup --check-model`'s job, unaffected by this);
+concurrent/queued onboarding of multiple tags in one command; any
+change to `ReadinessChecker.check()`'s own B.4.2 "never auto-pull"
+contract — that contract is unchanged and still true of the checker in
+isolation; the pull happens *before* `check()` is called, in the
+onboarding flow's own step 2, not inside the checker.
+
+---
+
 ## B.5 TUI Architecture
 
 ### B.5.0 Interim: rudimentary stdlib REPL (deliberate scoped deviation)
