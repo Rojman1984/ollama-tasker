@@ -352,6 +352,83 @@ python -m unittest tests.unit.test_orchestrator_nano -v
 
 *(Update this section at the end of every Cowork or Code session)*
 
+**Last worked on:** `tasker-cli shell` bug-fix session, prompted by live
+user testing (not a queued addendum phase). Full write-up in
+`docs/TASKER_CHECKLIST.md` → "`tasker-cli shell` bug fixes -- provider
+wiring + REPL UX (2026-07-20)".
+
+**P1 fix — provider-wiring gap:** live testing hit a real failure: a
+chat-mode turn's `WorkerSelector` picked `fugu-ultra`, but `tasker-cli
+shell`'s `provider_map` only wires `OllamaProvider` — the step failed
+mid-dispatch (`No provider for fugu`) and the whole run ended in "No
+results to synthesize." with no clear explanation. This was a known,
+previously-flagged gap (open issue since the Phase 8.1 E2E session) that
+had never actually been fixed. Fix, mirroring the existing
+`apply_gpu_availability` pattern (SDD_ADDENDUM_7.5.md A.3.4): new
+`WorkerRegistry.apply_provider_availability(provider_map)`
+(`tasker/workers/registry.py`) marks a worker `available=False` (logged
+reason, never dropped from `list_all()`) when its provider has no entry
+in the active `provider_map`. Wired into
+`tasker/runtime/dispatch.py`'s `_run_task()`/`_resume_task()`
+immediately after the pipeline (and its `provider_map`) is built, so an
+unwired-provider worker is excluded from *both* planning and selection —
+not just selection, which would still have let the orchestrator plan a
+step around a worker that could never execute it. Regression test
+(`tests/unit/test_dispatch_provider_wiring.py`) deliberately uses
+`RoutingPolicy.CAPABILITY_FIRST` with the excluded worker scored higher,
+so the test proves exclusion happens up front rather than the worker
+merely losing a ranking tie-break.
+
+**Two REPL UX fixes, same live-testing session:** (1) unknown-command
+handler (`cli/shell.py:_suggest_command()`) now suggests a next step —
+a bare mode name is special-cased first (`/chat` → `did you mean: /mode
+chat?`, the actual likely intent) ahead of a generic `difflib` fuzzy
+match for real typos (`/wrkers` → `/workers?`). (2) the interactive
+shell now defaults to quiet logging — `main()`'s default level dropped
+`WARNING` → `ERROR` so plumbing warnings (including the new
+provider-availability log lines) don't interleave with the chat flow;
+new `--verbose` flag restores `WARNING`; `TASKER_LOG_LEVEL` (when
+explicitly set) still wins over both. Bug caught while adding
+`--verbose`: `_first_positional()` assumed every `--flag` token takes a
+value, so a boolean flag like `--verbose` silently swallowed the next
+real token (task text or a subcommand) as its "value" — fixed with an
+explicit `_BOOL_FLAGS` set.
+
+**Tests:** 659 → 677 (+18: 5 in `test_worker_registry.py`, 2 new in
+`test_dispatch_provider_wiring.py`, 11 new in `test_cli_shell.py`). Full
+suite green.
+
+**Live smoke test (Designlab1, local-only, zero cloud spend — slash-command
+testing only, no chat/tool dispatch run):** `tasker-cli shell`, typed
+`/chat` → `Unknown command: /chat  (did you mean: /mode chat?)`; typed
+`/wrkers` → `Unknown command: /wrkers  (did you mean: /workers?)`;
+confirmed no plumbing warnings print by default.
+
+**Files modified:** `tasker/workers/registry.py`
+(`apply_provider_availability`), `tasker/runtime/dispatch.py` (wired
+into `_run_task`/`_resume_task`), `cli/shell.py` (`_suggest_command`,
+`--verbose`, `_BOOL_FLAGS` fix to `_first_positional`),
+`tests/unit/test_worker_registry.py`,
+`tests/unit/test_dispatch_provider_wiring.py` (new),
+`tests/unit/test_cli_shell.py` (new), `docs/TESTING_GUIDE.md` (new
+H10), `docs/TASKER_CHECKLIST.md`, `CLAUDE.md`, `COWORK_PROMPT.md`.
+
+**Next task:** SDD_ADDENDUM_PHASE8.md Phase 8.4 — SetupWizardScreen +
+ModelSelectorScreen (still not started; see the Phase 8.3 notes below
+for scope). Also still open: wiring Anthropic/OpenAI/Fugu providers into
+`provider_map` (this session made the gap *safe*, not *closed* — those
+providers are still unreachable, just no longer a silent failure);
+budget persistence across process restarts; orchestrator-planned
+`ExecutionPlan` in the API path.
+
+**Blockers:** None.
+
+**Open decisions:** None new this session.
+
+---
+
+## Previous Session Notes (Phase 8.3 Textual TUI skeleton, kept for reference)
+
 **Last worked on:** SDD_ADDENDUM_PHASE8.md Phase 8.3 — Textual TUI
 skeleton (`TuiApp`, `WelcomeScreen`, `HardwareStatusBar`), superseding
 the one-session rudimentary REPL. Full write-up in

@@ -121,6 +121,26 @@ class WorkerRegistry:
                     " (unified memory, reserve applied)" if gpu.is_unified_memory else "",
                 )
 
+    def apply_provider_availability(self, provider_map: dict) -> None:
+        """
+        Cross-check every worker's declared provider against the wired
+        provider_map (e.g. {ProviderType.OLLAMA: OllamaProvider(...)}) for
+        the current entry point. A worker whose provider has no wired
+        implementation is marked available=False with a logged reason --
+        never silently dropped, same pattern as apply_gpu_availability --
+        so WorkerSelector excludes it up front instead of being selected
+        and then failing mid-dispatch with "No provider for X" after a
+        step has already been planned around it.
+        """
+        for worker in self._workers.values():
+            if worker.provider not in provider_map:
+                worker.available = False
+                logger.warning(
+                    "Worker '%s' marked unavailable -- no wired provider for "
+                    "'%s' in the active provider_map.",
+                    worker.id, worker.provider.value,
+                )
+
     @classmethod
     def load_from_yaml(cls, path: Path) -> WorkerRegistry:
         """Load a WorkerRegistry from config/workers/worker_registry.yaml."""

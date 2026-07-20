@@ -26,12 +26,13 @@ def _manifest(
     compute_location: ComputeLocation = ComputeLocation.LOCAL_HARDWARE,
     capabilities: set[Capability] | None = None,
     available: bool = True,
+    provider: ProviderType = ProviderType.OLLAMA,
 ) -> WorkerManifest:
     if capabilities is None:
         capabilities = {Capability.TOOL_USE, Capability.CODE}
     return WorkerManifest(
         id=worker_id,
-        provider=ProviderType.OLLAMA,
+        provider=provider,
         model_id="lfm2.5:latest",
         compute_location=compute_location,
         capabilities=capabilities,
@@ -118,6 +119,56 @@ class TestWorkerRegistry(unittest.TestCase):
 
     def test_health_check_missing_worker(self):
         self.assertFalse(self.registry.health_check("missing"))
+
+
+class TestApplyProviderAvailability(unittest.TestCase):
+    """
+    A worker whose provider has no wired implementation in the active
+    provider_map (e.g. selection picks a Fugu worker but only OllamaProvider
+    is wired) must be marked unavailable up front -- never selected, then
+    failed mid-dispatch with "No provider for X". Same pattern as
+    apply_gpu_availability: marked, logged, never silently dropped.
+    """
+
+    def setUp(self):
+        self.registry = WorkerRegistry()
+
+    def test_worker_with_unwired_provider_marked_unavailable(self):
+        self.registry.register(_manifest("fugu-w1", provider=ProviderType.FUGU))
+        provider_map = {ProviderType.OLLAMA: object()}
+        self.registry.apply_provider_availability(provider_map)
+        self.assertFalse(self.registry.get("fugu-w1").available)
+
+    def test_worker_with_wired_provider_stays_available(self):
+        self.registry.register(_manifest("ollama-w1", provider=ProviderType.OLLAMA))
+        provider_map = {ProviderType.OLLAMA: object()}
+        self.registry.apply_provider_availability(provider_map)
+        self.assertTrue(self.registry.get("ollama-w1").available)
+
+    def test_never_dropped_from_list_all(self):
+        self.registry.register(_manifest("fugu-w1", provider=ProviderType.FUGU))
+        provider_map = {ProviderType.OLLAMA: object()}
+        self.registry.apply_provider_availability(provider_map)
+        ids = {m.id for m in self.registry.list_all()}
+        self.assertIn("fugu-w1", ids)
+
+    def test_mixed_registry_only_unwired_marked_unavailable(self):
+        self.registry.register(_manifest("ollama-w1", provider=ProviderType.OLLAMA))
+        self.registry.register(_manifest("fugu-w1", provider=ProviderType.FUGU))
+        self.registry.register(_manifest("anthropic-w1", provider=ProviderType.ANTHROPIC))
+        provider_map = {ProviderType.OLLAMA: object()}
+        self.registry.apply_provider_availability(provider_map)
+        self.assertTrue(self.registry.get("ollama-w1").available)
+        self.assertFalse(self.registry.get("fugu-w1").available)
+        self.assertFalse(self.registry.get("anthropic-w1").available)
+
+    def test_already_unavailable_worker_stays_unavailable(self):
+        self.registry.register(
+            _manifest("ollama-w1", provider=ProviderType.OLLAMA, available=False)
+        )
+        provider_map = {ProviderType.OLLAMA: object()}
+        self.registry.apply_provider_availability(provider_map)
+        self.assertFalse(self.registry.get("ollama-w1").available)
 
 
 class TestRealWorkerRegistryYaml(unittest.TestCase):

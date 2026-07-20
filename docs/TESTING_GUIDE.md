@@ -262,3 +262,45 @@ navigating; selecting Daemon cites the B.6 reserved-placeholder note;
 `tasker` also confirmed to boot without crashing in a real pty
 (`script -qc "timeout 3 tasker" /dev/null` -- ran the full 3s, killed by
 the timeout, not a crash).
+
+## H10. `tasker-cli shell` fixes -- provider wiring + unknown-command UX (2026-07-20)
+
+Live user testing found a P1 bug: a chat-mode turn selected `fugu-ultra`
+even though `provider_map` only wires `OllamaProvider`, so the step failed
+mid-dispatch (`No provider for fugu`) and the run ended in "No results to
+synthesize." instead of falling back to an available local worker. Two
+smaller REPL UX issues were found in the same session.
+
+### H10.1 Unit tests
+```bash
+python -m unittest tests.unit.test_worker_registry tests.unit.test_dispatch_provider_wiring tests.unit.test_cli_shell -v
+```
+Covers: `WorkerRegistry.apply_provider_availability()` marks a worker
+unavailable (never dropped from `list_all()`) when its declared provider
+has no entry in the active `provider_map`, same pattern as
+`apply_gpu_availability`; `_run_task()`/`_resume_task()` exclude such a
+worker *before* planning/selection even when it would otherwise win on
+routing policy (`CAPABILITY_FIRST`, higher capability score) --
+`test_dispatch_provider_wiring.py` proves the wired fallback worker
+executes instead of the run failing; `_suggest_command()` special-cases a
+bare mode name (`/chat` -> `did you mean: /mode chat?`) ahead of a
+generic `difflib` typo match (`/wrkers` -> `/workers`); `_first_positional()`
+no longer swallows the token after a boolean flag (`--verbose`, `--last`)
+as if it were that flag's value; `main()` defaults interactive-shell
+logging to `ERROR` (was `WARNING`, cluttering the chat flow with plumbing
+lines), `--verbose` restores `WARNING`, and `TASKER_LOG_LEVEL` (when set)
+always wins over both.
+
+### H10.2 Live: unknown-command suggestions + quiet-by-default logging
+```bash
+tasker-cli shell
+```
+```
+tasker> /chat
+Unknown command: /chat  (did you mean: /mode chat?)
+tasker> /wrkers
+Unknown command: /wrkers  (did you mean: /workers?)
+```
+No plumbing warnings appear by default; `tasker-cli shell --verbose`
+restores them. Live-verified 2026-07-20 (Designlab1), local-only, zero
+cloud spend -- slash-command testing only, no chat/tool dispatch run.

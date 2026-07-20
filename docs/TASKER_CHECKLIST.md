@@ -1455,3 +1455,63 @@ B.8's table and B.5.2's comments were corrected to match B.11 --
 - No dark/light theme decision made explicitly -- Textual's own default
   theme applies; revisit once the addendum's visual direction (if any)
   is specified.
+
+## `tasker-cli shell` bug fixes -- provider wiring + REPL UX (2026-07-20)
+
+Live user testing session (local-only, zero cloud spend). One P1
+correctness bug plus two REPL UX papercuts, all found interactively.
+
+- [x] **P1 fix:** `WorkerRegistry.apply_provider_availability(provider_map)`
+      (`tasker/workers/registry.py`) -- marks a worker `available=False`
+      (never dropped, logged reason, same pattern as
+      `apply_gpu_availability`) when its declared `provider` has no
+      entry in the active `provider_map`. Root cause: `tasker-cli shell`
+      only wires `OllamaProvider`, but `WorkerSelector` had no visibility
+      into that -- it could (and live-testing showed it did) select
+      `fugu-ultra`, which then failed mid-dispatch with `No provider for
+      fugu`, ending the whole run in "No results to synthesize."
+      instead of falling back to an available Ollama worker.
+- [x] Wired into `tasker/runtime/dispatch.py`'s `_run_task()` and
+      `_resume_task()` -- called right after the pipeline (and its
+      `provider_map`) is built, before `registry.list_all()` is handed to
+      the orchestrator for planning, so an unwired-provider worker is
+      excluded from both planning and selection, not just selection.
+- [x] REPL UX: unknown-command handler now suggests the nearest command
+      (`cli/shell.py:_suggest_command()`). A bare mode name is
+      special-cased first (`/chat` -> `did you mean: /mode chat?`,
+      matching the actual likely intent) ahead of a generic `difflib`
+      fuzzy match for real typos (`/wrkers` -> `/workers?`).
+- [x] REPL UX: interactive shell now defaults to quiet logging.
+      `main()`'s default level dropped from `WARNING` to `ERROR` so
+      plumbing warnings (e.g. the new provider-availability log lines)
+      don't interleave with the chat flow; a new `--verbose` flag
+      restores `WARNING`; `TASKER_LOG_LEVEL` (when explicitly set) always
+      wins over both, unchanged from before.
+- [x] Bug fixed in the same pass while adding `--verbose`:
+      `_first_positional()` treated every `--flag` token as if it took a
+      value, so `--verbose` (a boolean flag) silently swallowed the next
+      real token (the task string or a subcommand like `workers`) as its
+      "value". Fixed with an explicit `_BOOL_FLAGS` set.
+- [x] Tests: `tests/unit/test_worker_registry.py` (+5,
+      `TestApplyProviderAvailability`), `tests/unit/test_dispatch_provider_wiring.py`
+      (new, 2 tests -- drives the real `_run_task()`/`_resume_task()`
+      with a fake orchestrator + fake provider, `CAPABILITY_FIRST` policy
+      so the excluded worker would otherwise win selection), 
+      `tests/unit/test_cli_shell.py` (new, 11 tests -- `_suggest_command`,
+      `_first_positional` boolean-flag handling, `--verbose`/
+      `TASKER_LOG_LEVEL` logging-level precedence).
+- [x] Full suite green: **677 tests, OK** (was 659; +18 net).
+- [x] Live smoke test, Designlab1 (local-only, zero cloud spend --
+      slash-command testing only, no chat/tool dispatch): `tasker-cli
+      shell`, typed `/chat` -> `Unknown command: /chat  (did you mean:
+      /mode chat?)`; typed `/wrkers` -> `Unknown command: /wrkers  (did
+      you mean: /workers?)`; confirmed no plumbing warnings appear by
+      default.
+
+**Open decisions / known issues:** none new. The provider-wiring gap
+this fixes is the same one flagged as an open issue since the Phase 8.1
+E2E session ("CLI `provider_map` wires only OllamaProvider; `ANY_CLOUD`
+selection can legally pick Anthropic/OpenAI/Fugu workers") -- this
+change makes that condition *safe* (excluded up front, never a silent
+mid-run failure) but does not itself wire the other three providers;
+that remains open if/when Anthropic/OpenAI/Fugu support is needed live.

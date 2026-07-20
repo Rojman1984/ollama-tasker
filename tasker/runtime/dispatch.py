@@ -350,6 +350,15 @@ async def _run_task(
             return
     profile_name, config, budget, session_mgr, concurrency_mgr, provider_map, orchestrator = pipeline
 
+    # Exclude workers whose provider has no wired implementation in this
+    # pipeline's provider_map -- e.g. a Fugu/Anthropic/OpenAI worker when
+    # only OllamaProvider is wired -- *before* planning/selection, not
+    # after a step has already been planned around one (SDD 5.5 gap found
+    # live: selection picked fugu-ultra, provider_map.get() returned None,
+    # the step silently failed with "No provider for fugu" and the whole
+    # run ended in "No results to synthesize.").
+    registry.apply_provider_availability(provider_map)
+
     all_workers = registry.list_all()
     classifier_output = ClassifierResult(
         task_type=TaskType.CONVERSATIONAL,
@@ -425,6 +434,7 @@ async def _resume_task(
     if pipeline is None:
         return
     profile_name, config, budget, session_mgr, concurrency_mgr, provider_map, orchestrator = pipeline
+    registry.apply_provider_availability(provider_map)
 
     # Run the real SessionManager resume flow (notifier event, budget window
     # validation, PAUSED -> RESUMING -> RUNNING) against the loaded checkpoint.

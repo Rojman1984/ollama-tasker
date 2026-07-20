@@ -113,8 +113,39 @@ interim REPL from the session before this one has been superseded.
 | A8.3 | Addendum: Textual TUI skeleton (TuiApp, WelcomeScreen, status bar) | ✅ COMPLETE |
 | A8.4–8.5 | Addendum: SetupWizardScreen + ModelSelectorScreen, HarnessPanel | ⬜ NOT STARTED |
 
-**Last completed task:** Textual TUI skeleton, ✅ COMPLETE (2026-07-19;
-the addendum's real Phase 8.3). SDD-first: the addendum had three
+**Last completed task:** `tasker-cli shell` bug-fix session, ✅ COMPLETE
+(2026-07-20; live user testing, not a queued addendum phase). P1 fix: a
+chat-mode turn's `WorkerSelector` picked `fugu-ultra` even though
+`tasker-cli shell`'s `provider_map` only wires `OllamaProvider` — the
+step failed mid-dispatch (`No provider for fugu`), ending the run in "No
+results to synthesize." with no clear cause. This was the exact
+long-flagged "CLI provider_map wires only OllamaProvider" open issue
+below, finally fixed rather than just documented: new
+`WorkerRegistry.apply_provider_availability(provider_map)`
+(`tasker/workers/registry.py`, same never-drop/logged-reason pattern as
+`apply_gpu_availability`) marks a worker unavailable when its provider
+has no entry in the active `provider_map`; wired into
+`tasker/runtime/dispatch.py`'s `_run_task()`/`_resume_task()` right
+after `provider_map` is built, so the worker is excluded from planning
+*and* selection, not just selection. Regression test uses
+`RoutingPolicy.CAPABILITY_FIRST` with the excluded worker scored higher,
+proving up-front exclusion rather than a ranking loss. Two REPL UX
+fixes in the same session: unknown-command handler suggests a next step
+(`/chat` → `did you mean: /mode chat?`; `/wrkers` → `/workers?` via
+`difflib`); interactive shell now defaults to `ERROR`-level logging
+(was `WARNING`, cluttering the chat flow) with a new `--verbose` flag to
+restore it — caught and fixed a real bug while adding the flag:
+`_first_positional()` assumed every `--flag` took a value, so
+`--verbose` silently swallowed the next real token. Suite 659 → 677
+(+18). Evidence: docs/TASKER_CHECKLIST.md → "`tasker-cli shell` bug
+fixes -- provider wiring + REPL UX (2026-07-20)".
+
+---
+
+## Previous completed task (kept for reference)
+
+Textual TUI skeleton, ✅ COMPLETE (2026-07-19; the addendum's real Phase
+8.3). SDD-first: the addendum had three
 mutually inconsistent claims about which sub-phase owns SetupWizardScreen/
 ModelSelectorScreen (B.5.2's comments, B.8's table, B.11's checklist all
 disagreed) — asked the user to confirm scope before writing code;
@@ -143,30 +174,38 @@ tests, +21 new TUI tests, all headless via Textual's `Pilot`). Evidence:
 docs/TASKER_CHECKLIST.md → "Phase 8.3 -- Textual TUI Skeleton
 (2026-07-19)".
 
-**Next task:** SDD_ADDENDUM_PHASE8.md Phase 8.4 — SetupWizardScreen
-(wraps `tasker/setup/wizard.py`'s `run_wizard()`) + ModelSelectorScreen
-(wraps `tasker/setup/readiness.py`'s `ReadinessChecker`), plus the
-Textual message bus (`WizardStepCompleted`, `ReadinessCheckCompleted`,
-`WorkerRegistryUpdated`) per B.11. Then Phase 8.5 (HarnessPanel, built on
-`tasker/runtime/dispatch.py`). TASKER-P1 manual verification for 8.3
-still open (no access this session, same as every prior phase that
-needed it). Carried-over candidates: wire Anthropic/OpenAI/Fugu
-providers into the CLI/TUI provider_map (or pre-filter unroutable
-workers); budget persistence across process restarts; orchestrator-
-planned ExecutionPlan in the API path (still _stub_plan).
+(That session's own "Next task" pointed at Phase 8.4 — still accurate,
+see below; its "Files modified" and "Open decisions" are folded into
+this section's lists.)
 
-**Files modified this session:** tasker/tui/app.py (rewritten —
-TuiApp/main(), REPL removed), tasker/tui/screens/welcome.py (new),
-tasker/tui/screens/__init__.py (new), tasker/tui/widgets/status_bar.py
-(new), tasker/tui/widgets/__init__.py (new), tests/unit/test_tui_app.py
-(rewritten), tests/unit/test_tui_welcome_screen.py (new),
-tests/unit/test_tui_status_bar.py (new), docs/SDD_ADDENDUM_PHASE8.md
-(B.8/B.5.2 reconciliation), docs/TESTING_GUIDE.md (H8 superseded, new
-H9), docs/TASKER_CHECKLIST.md, CLAUDE.md, COWORK_PROMPT.md. No
-pyproject.toml change needed (`tasker`/`tasker-cli` entry points already
-correct); reinstalled with `pip install -e .` anyway.
+---
+
+**Next task (current):** SDD_ADDENDUM_PHASE8.md Phase 8.4 —
+SetupWizardScreen (wraps `tasker/setup/wizard.py`'s `run_wizard()`) +
+ModelSelectorScreen (wraps `tasker/setup/readiness.py`'s
+`ReadinessChecker`), plus the Textual message bus
+(`WizardStepCompleted`, `ReadinessCheckCompleted`,
+`WorkerRegistryUpdated`) per B.11. Then Phase 8.5 (HarnessPanel, built
+on `tasker/runtime/dispatch.py`). TASKER-P1 manual verification for 8.3
+still open (no access this session, same as every prior phase that
+needed it). Today's bug-fix session did not touch this queue — it was
+interrupt-driven by live testing, not a step in the addendum sequence.
+
+**Files modified this session (2026-07-20):**
+`tasker/workers/registry.py` (`apply_provider_availability`),
+`tasker/runtime/dispatch.py` (wired into `_run_task`/`_resume_task`),
+`cli/shell.py` (`_suggest_command`, `--verbose`, `_BOOL_FLAGS` fix to
+`_first_positional`), `tests/unit/test_worker_registry.py` (+5),
+`tests/unit/test_dispatch_provider_wiring.py` (new, 2 tests),
+`tests/unit/test_cli_shell.py` (new, 11 tests), `docs/TESTING_GUIDE.md`
+(new H10), `docs/TASKER_CHECKLIST.md`, `CLAUDE.md`, `COWORK_PROMPT.md`.
+No `pyproject.toml` change needed.
 
 **Open decisions / blockers:**
+- Provider-wiring gap is now *safe* (excluded up front, logged, never a
+  silent mid-run failure) but not *closed* — Anthropic/OpenAI/Fugu are
+  still unreachable from `tasker-cli shell`/`tasker`'s `provider_map`.
+  Wiring them in (or intentionally deciding not to) remains open.
 - `active_model`/`session_state` on `HardwareStatusBar` are inert
   placeholders until 8.4/8.5 exist to drive them.
 - No explicit dark/light theme decision — Textual's own default theme
@@ -182,11 +221,10 @@ correct); reinstalled with `pip install -e .` anyway.
   COWORK — deferred as orchestrator work.
 - Unchanged from before: flip lfm2.5-local to tool_protocol: native
   (probe-confirmed on 0.30.11, needs tool-loop revalidation first);
-  update kimi-k2.7-code-cloud context_window/latency from probe data;
-  CLI provider_map wires only OllamaProvider — ANY_CLOUD selection can
-  legally pick Anthropic/OpenAI/Fugu workers and then fail with "No
-  provider for <x>" (observed live under throttle). Wire the remaining
-  providers or pre-filter unroutable workers.
+  update kimi-k2.7-code-cloud context_window/latency from probe data.
+  (The "CLI provider_map wires only OllamaProvider" item that used to be
+  here is now the safe-but-not-closed bullet at the top of this list —
+  fixed 2026-07-20, see above.)
 - Cloud-orchestrator planning is not tick()-gated (deliberate — a
   checkpoint without a plan cannot resume); budget state does not persist
   across process restarts (only the checkpoint's BudgetSnapshot does).

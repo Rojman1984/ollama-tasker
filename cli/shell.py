@@ -44,6 +44,30 @@ from tasker.runtime.dispatch import (
 from tasker.session.checkpoint import CheckpointStore
 from tasker.workers.registry import WorkerRegistry
 
+_KNOWN_COMMANDS = (
+    "/mode", "/workers", "/policy", "/secure", "/budget",
+    "/checkpoint", "/resume", "/status", "/help", "/quit", "/exit",
+)
+_MODE_NAMES = frozenset({"chat", "code", "cowork", "research", "secure"})
+
+
+def _suggest_command(cmd: str) -> str | None:
+    """
+    Nearest-command suggestion for an unrecognized slash command.
+
+    A user typing e.g. "/chat" almost always means "switch to chat mode"
+    (a natural guess given the mode names), not a typo of some other
+    slash command -- so that case is special-cased ahead of the generic
+    fuzzy match, which instead catches real typos like "/wrkers".
+    """
+    name = cmd[1:]
+    if name in _MODE_NAMES:
+        return f"/mode {name}"
+    import difflib
+
+    matches = difflib.get_close_matches(cmd, _KNOWN_COMMANDS, n=1, cutoff=0.6)
+    return matches[0] if matches else None
+
 # --------------------------------------------------------------------------- #
 # Singletons shared between CLI surface and REPL
 # --------------------------------------------------------------------------- #
@@ -163,7 +187,11 @@ def _repl(
                 )
 
             else:
-                print(f"Unknown command: {cmd}  (type /help)")
+                suggestion = _suggest_command(cmd)
+                if suggestion:
+                    print(f"Unknown command: {cmd}  (did you mean: {suggestion}?)")
+                else:
+                    print(f"Unknown command: {cmd}  (type /help)")
 
         else:
             # Non-slash input: treat as a task in the current mode
@@ -193,6 +221,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--policy", default=None,
         help="Routing policy override",
+    )
+    parser.add_argument(
+        "--verbose", action="store_true",
+        help="Show INFO/WARNING plumbing logs (provider calls, slot/budget "
+             "accounting) instead of keeping the chat flow quiet",
     )
 
     sub = parser.add_subparsers(dest="command")
@@ -251,6 +284,13 @@ def _cmd_resume(
 # Entry point
 # --------------------------------------------------------------------------- #
 
+# Boolean flags take no value -- must be excluded from the "next token is
+# this option's value" skip logic below, or the token right after one of
+# these (which may be the actual task string or subcommand) gets silently
+# swallowed as if it were the flag's argument.
+_BOOL_FLAGS = frozenset({"--verbose", "--last"})
+
+
 def _first_positional() -> str | None:
     """Return the first non-flag argument from sys.argv, skipping option values."""
     skip_next = False
@@ -258,7 +298,7 @@ def _first_positional() -> str | None:
         if skip_next:
             skip_next = False
             continue
-        if tok.startswith("--") and "=" not in tok:
+        if tok.startswith("--") and "=" not in tok and tok not in _BOOL_FLAGS:
             skip_next = True   # next token is the value for this option
             continue
         if tok.startswith("-"):
@@ -270,8 +310,15 @@ def _first_positional() -> str | None:
 def main() -> None:
     import logging
 
+    # Default the interactive shell to quiet: WARNING+ plumbing logs
+    # (provider/registry/concurrency internals) were showing up interleaved
+    # with the chat flow by default. --verbose restores the old WARNING
+    # default; TASKER_LOG_LEVEL (when set) always wins over both, so
+    # existing debugging workflows that export it explicitly are unaffected.
+    verbose = "--verbose" in sys.argv[1:]
+    default_level = "WARNING" if verbose else "ERROR"
     logging.basicConfig(
-        level=os.environ.get("TASKER_LOG_LEVEL", "WARNING").upper(),
+        level=os.environ.get("TASKER_LOG_LEVEL", default_level).upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
@@ -310,6 +357,7 @@ def main() -> None:
     _tp.add_argument("--mode", default="chat",
                      choices=["chat", "code", "cowork", "research", "secure"])
     _tp.add_argument("--policy", default=None)
+    _tp.add_argument("--verbose", action="store_true")
     args, remaining = _tp.parse_known_args()
     task = " ".join(remaining).strip()
     if task:
