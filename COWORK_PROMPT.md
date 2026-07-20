@@ -91,7 +91,9 @@ Do not write any code until you have read both documents.
 **SDD Version:** 0.1.0-draft (docs/SDD.md)
 **Current Phase:** SDD_ADDENDUM_PHASE8 (setup wizard / readiness checker /
 TUI). Cloud-path E2E validation (COWORK_PROMPT task list 8.1–8.3) and
-addendum 8.1–8.2 are complete; addendum 8.3–8.5 (TUI) remain.
+addendum 8.1–8.2 are complete; addendum 8.3–8.5 (TUI) remain. A
+standalone launch/ops task (API server launchability, not addendum-
+numbered) was completed in between — see below.
 
 **Phase completion state:**
 
@@ -108,24 +110,27 @@ addendum 8.1–8.2 are complete; addendum 8.3–8.5 (TUI) remain.
 | A8.1–8.2 | Addendum: setup wizard + readiness checker | ✅ COMPLETE |
 | A8.3–8.5 | Addendum: TUI foundation, model selector, harness panel | ⬜ NOT STARTED |
 
-**Last completed task:** SDD_ADDENDUM_PHASE8.md Phase 8.2 — Agentic
-Readiness Checker, ✅ COMPLETE (2026-07-19; the *addendum's* 8.2, third
-use of that number). `tasker/setup/readiness.py`: 3-round probe
-(NATIVE→LFM25→JSON_EXTRACT) through the real OllamaProvider, B.4.6 role
-assignment, B.4.4 report, comment-preserving registry write on [Y/n]
-confirmation; `tasker-setup --check-model <name>` (+ --yes, --registry).
-SDD-first additions: B.4.3 success criterion, B.4.3a JSON_EXTRACT
-injection (normalizer now injects for JSON_EXTRACT + raw_decode
-fallback parse), B.4.2 cloud-model pull-gate exception (live-verified:
-signed-in servers serve :cloud models absent from /api/tags). Live smoke
-tests both passed: lfm2.5-thinking → **NATIVE now supported on 0.30.11**
-(A.2b rejection no longer reproduces; real registry deliberately left at
-lfm25), kimi-k2.7-code:cloud → native, /api/show says context 262144 vs
-registered 128000 (stale). Bonus fix: provider's empty-content retry no
-longer fires when tool_calls[] present (was burning 2 extra budgeted
-calls per native tool call from thinking models). Suite 595 → 630,
-green. Evidence: docs/TASKER_CHECKLIST.md → "Phase 8.2 -- Agentic
-Readiness Checker (addendum numbering)".
+**Last completed task:** API server launchability, ✅ COMPLETE
+(2026-07-19; standalone ops/launch task, not addendum-numbered).
+`tasker/api/server.py:main()` (new `tasker-api` console script) wired
+the same way as `cli/shell.py`'s `main()`: TASKER_PROFILE resolution,
+OLLAMA_BASE_URL override, provider_map with shared budget/concurrency
+manager on OllamaProvider, hardware-cache GPU availability cross-check.
+`--host`/`--port`/`--mode` flags. Real `WorkerSelector` →
+`run_tool_loop()` dispatch wired into `/v1/chat/completions` via a new
+`_make_live_step_fn()` (test `_step_fn` override still takes priority);
+worker failures now return HTTP 500 instead of an uncaught exception.
+Fixed a real bug found while wiring this: `_stub_plan()` truncated its
+step description to 80 chars, which becomes the worker's actual
+instruction once live dispatch is wired — any prompt over 80 chars was
+silently cut off; now carries the full task text. Live smoke test on
+Designlab1 WSL (Ollama 0.30.11 @ 127.0.0.1:11435, never started —
+confirmed reachable first): `/v1/models`, `/v1/workers`, and a real
+`/v1/chat/completions` chat-mode request all returned correct
+OpenAI-shaped 200s, the completion dispatched through the real local
+`lfm2.5-thinking` worker (zero cloud spend). Suite 630 → 638, green.
+Evidence: docs/TASKER_CHECKLIST.md → "API Server Launchability --
+tasker-api (2026-07-19)".
 
 **Next task:** SDD_ADDENDUM_PHASE8.md Phase 8.3 — TUI foundation
 (textual TuiApp, WelcomeScreen, HardwareStatusBar; tasker/tui/app.py is
@@ -133,24 +138,31 @@ a stub today). Then 8.4 (SetupWizardScreen + ModelSelectorScreen wired
 to the readiness checker), 8.5 (HarnessPanel). Carried-over candidates:
 wire Anthropic/OpenAI/Fugu providers into the CLI provider_map (or
 pre-filter unroutable workers); budget persistence across restarts;
-TASKER-P1 live runs of tasker-setup (wizard + readiness).
+TASKER-P1 live runs of tasker-setup (wizard + readiness); wire a real
+orchestrator-planned ExecutionPlan into /v1/chat/completions (still
+_stub_plan, one step per request — explicitly out of scope this
+session).
 
-**Files modified this session:** tasker/setup/readiness.py (new),
-tasker/setup/wizard.py (--check-model), tasker/tools/normalizer.py
-(JSON_EXTRACT injection + fallback scan), tasker/workers/providers/
-ollama.py (retry guard), docs/SDD_ADDENDUM_PHASE8.md (B.4.2/B.4.3/
-B.4.3a), tests/unit/test_readiness.py (new, 28),
-tests/unit/test_tool_normalizer.py, tests/unit/test_provider_ollama.py,
-docs/TASKER_CHECKLIST.md, docs/TESTING_GUIDE.md (new H6), CLAUDE.md,
-COWORK_PROMPT.md.
+**Files modified this session:** tasker/api/server.py (main() + live
+dispatch + allowed_modes + stub-plan truncation fix), pyproject.toml
+(tasker-api entry), tests/integration/test_api_server.py (+12),
+docs/TESTING_GUIDE.md (new H7 — H6 already taken by the setup wizard),
+docs/TASKER_CHECKLIST.md, CLAUDE.md, COWORK_PROMPT.md.
 
 **Open decisions / blockers:**
-- Flip lfm2.5-local to tool_protocol: native (probe-confirmed on
-  0.30.11)? Requires end-to-end tool-loop revalidation first — registry
-  untouched this session.
-- Update kimi-k2.7-code-cloud context_window (262144 real) and latency
-  (fast per probe)? Changes live selection behavior — deferred.
-- CLI provider_map wires only OllamaProvider — ANY_CLOUD selection can
+- `_handle_completions` still builds a fresh per-request
+  OllamaSessionBudget/SessionManager, separate from the provider's own
+  shared budget used for GPU-time accounting — pause/resume checkpoint
+  snapshots via the API don't reflect real cumulative cloud usage.
+  Pre-existing, not touched this session.
+- Should /v1/chat/completions eventually plan through a real
+  orchestrator tier instead of _stub_plan's single step? Needed for
+  multi-step COWORK-mode requests through a WebUI to behave like real
+  COWORK — deferred as orchestrator work.
+- Unchanged from before: flip lfm2.5-local to tool_protocol: native
+  (probe-confirmed on 0.30.11, needs tool-loop revalidation first);
+  update kimi-k2.7-code-cloud context_window/latency from probe data;
+  CLI provider_map wires only OllamaProvider — ANY_CLOUD selection can
   legally pick Anthropic/OpenAI/Fugu workers and then fail with "No
   provider for <x>" (observed live under throttle). Wire the remaining
   providers or pre-filter unroutable workers.

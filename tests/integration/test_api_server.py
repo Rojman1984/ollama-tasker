@@ -9,13 +9,27 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from aiohttp import web
 from aiohttp.test_utils import AioHTTPTestCase
 
 from tasker.api.server import create_app
 from tasker.session.checkpoint import CheckpointStore
-from tasker.workers.base import PlanStep
+from tasker.session.concurrency import OllamaCloudConcurrencyManager
+from tasker.workers.base import (
+    Capability,
+    ComputeLocation,
+    LatencyClass,
+    ModelUsage,
+    OllamaPlan,
+    PlanStep,
+    ProviderType,
+    ToolProtocol,
+    WorkerManifest,
+    WorkerResult,
+    WorkerStatus,
+)
 from tasker.workers.registry import WorkerRegistry
 
 
@@ -188,6 +202,198 @@ class TestPostCompletions(ApiServerTestCase):
         body = await resp.json()
         self.assertIn("usage", body)
         self.assertIn("prompt_tokens", body["usage"])
+
+
+# ------------------------------------------------------------------ #
+# Live dispatch: real provider_map/concurrency_mgr wiring (main()'s path),
+# no _step_fn override -- exercises _make_live_step_fn end-to-end with a
+# fake provider standing in for the network call.
+# ------------------------------------------------------------------ #
+
+def _worker(worker_id: str = "local-w1") -> WorkerManifest:
+    return WorkerManifest(
+        id=worker_id,
+        provider=ProviderType.OLLAMA,
+        model_id="lfm2.5-thinking:latest",
+        compute_location=ComputeLocation.LOCAL_HARDWARE,
+        capabilities={Capability.TOOL_USE},
+        tool_protocol=ToolProtocol.LFM25,
+        context_window=32768,
+        cost_input=0.0,
+        cost_output=0.0,
+        ollama_usage_level=None,
+        latency_class=LatencyClass.FAST,
+        available=True,
+        requires_gpu=False,
+        vram_mb=None,
+    )
+
+
+class _FakeProvider:
+    def __init__(self, output: str = "real worker answer", status: WorkerStatus = WorkerStatus.SUCCESS):
+        self._output = output
+        self._status = status
+        self.calls: list = []
+
+    def supports(self, worker) -> bool:
+        return True
+
+    async def execute(self, task, worker) -> WorkerResult:
+        self.calls.append((task, worker))
+        return WorkerResult(
+            task_id=task.task_id,
+            worker_id=worker.id,
+            status=self._status,
+            output=self._output if self._status == WorkerStatus.SUCCESS else None,
+            tool_results=[],
+            usage=ModelUsage(0, 0, 0.0),
+            duration_ms=5,
+            reason=None if self._status == WorkerStatus.SUCCESS else "simulated failure",
+        )
+
+
+class LiveDispatchTestCase(unittest.IsolatedAsyncioTestCase):
+    """Builds create_app() with provider_map/concurrency_mgr set (main()'s
+    production path) instead of a test _step_fn override."""
+
+    async def asyncSetUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        store = CheckpointStore(store_dir=Path(self._tmp.name))
+        self.registry = WorkerRegistry()
+        self.registry.register(_worker())
+        self.concurrency_mgr = OllamaCloudConcurrencyManager(OllamaPlan.PRO)
+
+    async def asyncTearDown(self):
+        self._tmp.cleanup()
+
+    def _app(self, provider, **kwargs):
+        store = CheckpointStore(store_dir=Path(self._tmp.name))
+        return create_app(
+            registry=self.registry,
+            store=store,
+            provider_map={ProviderType.OLLAMA: provider},
+            concurrency_mgr=self.concurrency_mgr,
+            **kwargs,
+        )
+
+    async def test_live_dispatch_returns_provider_output(self):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        provider = _FakeProvider(output="the real answer")
+        app = self._app(provider)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/v1/chat/completions",
+                json={"model": "tasker/chat", "messages": [{"role": "user", "content": "hello"}]},
+            )
+            self.assertEqual(resp.status, 200)
+            body = await resp.json()
+        self.assertEqual(body["choices"][0]["message"]["content"], "the real answer")
+        self.assertEqual(len(provider.calls), 1)
+        # The full user message reaches the worker instruction unTruncated
+        # (regression for the fixed 80-char _stub_plan truncation bug).
+        task, worker = provider.calls[0]
+        self.assertEqual(task.instruction, "hello")
+        self.assertEqual(worker.id, "local-w1")
+
+    async def test_live_dispatch_long_prompt_not_truncated(self):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        provider = _FakeProvider()
+        app = self._app(provider)
+        long_prompt = "x" * 200
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/v1/chat/completions",
+                json={"model": "tasker/chat", "messages": [{"role": "user", "content": long_prompt}]},
+            )
+            self.assertEqual(resp.status, 200)
+        task, _ = provider.calls[0]
+        self.assertEqual(task.instruction, long_prompt)
+
+    async def test_live_dispatch_worker_failure_returns_500(self):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        provider = _FakeProvider(status=WorkerStatus.FAILED)
+        app = self._app(provider)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/v1/chat/completions",
+                json={"model": "tasker/chat", "messages": [{"role": "user", "content": "hi"}]},
+            )
+        self.assertEqual(resp.status, 500)
+
+    async def test_no_provider_map_falls_back_to_stub(self):
+        """Neither _step_fn nor provider_map/concurrency_mgr set -> documented
+        stub response, unchanged from before this session's wiring."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        store = CheckpointStore(store_dir=Path(self._tmp.name))
+        app = create_app(registry=self.registry, store=store)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/v1/chat/completions",
+                json={"model": "tasker/chat", "messages": [{"role": "user", "content": "hi"}]},
+            )
+            self.assertEqual(resp.status, 200)
+            body = await resp.json()
+        self.assertIn("[step 0:", body["choices"][0]["message"]["content"])
+
+    async def test_step_fn_override_wins_over_provider_map(self):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async def override(step):
+            return "override output"
+
+        provider = _FakeProvider()
+        app = self._app(provider, _step_fn=override)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/v1/chat/completions",
+                json={"model": "tasker/chat", "messages": [{"role": "user", "content": "hi"}]},
+            )
+            body = await resp.json()
+        self.assertEqual(body["choices"][0]["message"]["content"], "override output")
+        self.assertEqual(provider.calls, [])
+
+
+# ------------------------------------------------------------------ #
+# allowed_modes (main()'s --mode flag)
+# ------------------------------------------------------------------ #
+
+class AllowedModesTestCase(unittest.IsolatedAsyncioTestCase):
+
+    async def test_models_list_restricted_to_allowed_mode(self):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        app = create_app(allowed_modes={"chat"})
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/v1/models")
+            body = await resp.json()
+        ids = {m["id"] for m in body["data"]}
+        self.assertEqual(ids, {"tasker/chat"})
+
+    async def test_completions_rejects_disallowed_mode(self):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        app = create_app(allowed_modes={"chat"}, _step_fn=_echo_step)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/v1/chat/completions",
+                json={"model": "tasker/cowork", "messages": [{"role": "user", "content": "hi"}]},
+            )
+        self.assertEqual(resp.status, 400)
+
+    async def test_completions_accepts_allowed_mode(self):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        app = create_app(allowed_modes={"chat"}, _step_fn=_echo_step)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/v1/chat/completions",
+                json={"model": "tasker/chat", "messages": [{"role": "user", "content": "hi"}]},
+            )
+        self.assertEqual(resp.status, 200)
 
 
 if __name__ == "__main__":

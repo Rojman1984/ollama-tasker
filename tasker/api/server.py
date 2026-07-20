@@ -21,6 +21,19 @@ delegated to mode runners (CoworkRunner etc.) and the orchestrator tier
 selected by ModeConfigurator.  When no live workers are registered the
 endpoint returns a structured stub response so callers can exercise the
 routing logic without real API keys.
+
+`main()` (the `tasker-api` console script) wires a real, single-step
+worker dispatch into every request the same way cli/shell.py's main()
+wires _run_task()'s dispatch loop: profile resolution (TASKER_PROFILE,
+default tier1_tasker), OLLAMA_BASE_URL env override, a provider_map keyed
+by ProviderType, a shared OllamaSessionBudget/OllamaCloudConcurrencyManager
+on the OllamaProvider, and hardware-cache GPU availability cross-check on
+the worker registry (SDD_ADDENDUM_7.5.md A.3.4). See B.2 in
+SDD_ADDENDUM_PHASE8.md for the console-script convention this follows.
+
+Not yet wired to a real ExecutionPlan from an orchestrator tier (still
+`_stub_plan` -- a single step covering the whole request) -- that is
+orchestrator work, out of scope for making the server launchable.
 See SDD Section 7.5.
 """
 from __future__ import annotations
@@ -29,6 +42,7 @@ import json
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 from aiohttp import web
 
@@ -49,8 +63,14 @@ from tasker.workers.base import (
     OllamaPlan,
     PlanStep,
     StepStatus,
+    WorkerStatus,
+    WorkerTask,
 )
-from tasker.workers.registry import WorkerRegistry
+from tasker.workers.registry import WorkerRegistry, WorkerSelector
+
+_DEFAULT_REGISTRY_YAML = (
+    Path(__file__).parent.parent.parent / "config" / "workers" / "worker_registry.yaml"
+)
 
 _MODES: dict[str, TaskerMode] = {
     "chat":     CHAT_MODE,
@@ -114,10 +134,17 @@ def _parse_task(messages: list[dict]) -> str:
 
 
 def _stub_plan(task: str) -> ExecutionPlan:
-    """Minimal single-step plan used when no live orchestrator is available."""
+    """
+    Minimal single-step plan used when no live orchestrator is available.
+
+    description carries the FULL task text (not truncated) -- when a real
+    step_fn is wired (see _make_live_step_fn), this description becomes the
+    worker's actual instruction, so truncating it would silently cut off
+    the user's real prompt.
+    """
     step = PlanStep(
         index=0,
-        description=f"Execute: {task[:80]}",
+        description=task,
         role=AgentRole.WORKER,
         required_capabilities={Capability.TOOL_USE},
         depends_on=[],
@@ -132,12 +159,63 @@ def _stub_plan(task: str) -> ExecutionPlan:
     )
 
 
+def _make_live_step_fn(mode: TaskerMode, workers: list, provider_map: dict, concurrency_mgr):
+    """
+    Build a real async (PlanStep) -> str dispatcher for CoworkRunner,
+    covering the same WorkerSelector -> WorkerTask -> run_tool_loop path
+    cli/shell.py's _execute_steps() drives for the CLI. Used by
+    _handle_completions() in production (main()-launched servers); tests
+    override with their own _step_fn via create_app().
+    """
+    from tasker.tools.bundles import get_definitions, narrow_bundle_to_step
+    from tasker.tools.loop import run_tool_loop
+
+    async def step_fn(step: PlanStep) -> str:
+        worker = WorkerSelector.select(
+            workers,
+            step.required_capabilities,
+            mode.routing_policy,
+            mode.privacy_tier,
+            slots_available=concurrency_mgr.slots_available,
+            should_throttle=False,
+        )
+        step_tools = get_definitions(
+            narrow_bundle_to_step(mode.tool_bundle, step.description, step.description)
+        )
+        wt = WorkerTask(
+            task_id=str(uuid.uuid4()),
+            step_index=step.index,
+            role=step.role,
+            instruction=step.description,
+            tools=step_tools,
+            context={},
+            routing_policy=mode.routing_policy,
+            privacy_tier=mode.privacy_tier,
+        )
+        provider = provider_map.get(worker.provider)
+        if provider is None:
+            raise RuntimeError(f"No provider registered for {worker.provider.value!r}")
+
+        result = await run_tool_loop(wt, worker, provider, cwd=Path.cwd())
+        if result.status != WorkerStatus.SUCCESS:
+            reason = f": {result.reason}" if result.reason else ""
+            raise RuntimeError(f"Worker {worker.id!r} returned {result.status.value}{reason}")
+        return result.output or ""
+
+    return step_fn
+
+
 # --------------------------------------------------------------------------- #
 # Route handlers
 # --------------------------------------------------------------------------- #
 
 async def _handle_models(request: web.Request) -> web.Response:
-    data = {"object": "list", "data": [_openai_model_entry(m) for m in _MODES.values()]}
+    allowed = request.app.get("allowed_modes")
+    modes = (
+        [m for name, m in _MODES.items() if name in allowed]
+        if allowed is not None else list(_MODES.values())
+    )
+    data = {"object": "list", "data": [_openai_model_entry(m) for m in modes]}
     return web.json_response(data)
 
 
@@ -173,6 +251,13 @@ async def _handle_completions(request: web.Request) -> web.Response:
             400,
             f"Unknown mode {mode_name!r}. Valid modes: {list(_MODES.keys())}",
         )
+    allowed = request.app.get("allowed_modes")
+    if allowed is not None and mode_name not in allowed:
+        return _error_response(
+            400,
+            f"Mode {mode_name!r} not enabled on this server instance "
+            f"(started with --mode {next(iter(allowed))!r}).",
+        )
 
     messages: list[dict] = body.get("messages", [])
     task = _parse_task(messages)
@@ -194,6 +279,17 @@ async def _handle_completions(request: web.Request) -> web.Response:
     )
     mode = _MODES[mode_name]
 
+    # Test override (create_app(_step_fn=...)) always wins. Otherwise, if
+    # main() wired a real provider_map/concurrency_mgr into app state,
+    # dispatch through the same WorkerSelector -> run_tool_loop path
+    # cli/shell.py uses. With neither, fall back to the documented stub
+    # response (no live workers registered).
+    if step_fn is None:
+        provider_map    = request.app.get("provider_map")
+        concurrency_mgr = request.app.get("concurrency_mgr")
+        if provider_map is not None and concurrency_mgr is not None:
+            step_fn = _make_live_step_fn(mode, registry.list_all(), provider_map, concurrency_mgr)
+
     # For COWORK mode, use CoworkRunner for proper checkpoint/session lifecycle.
     # Other modes: run through the same step loop via a minimal CoworkRunner-like
     # wrapper — this keeps the API layer thin and avoids reimplementing dispatch.
@@ -206,11 +302,13 @@ async def _handle_completions(request: web.Request) -> web.Response:
     )
 
     plan = _stub_plan(task)
-    result = await runner.run(task, plan)
+    try:
+        result = await runner.run(task, plan)
+    except Exception as exc:
+        return _error_response(500, f"{type(exc).__name__}: {exc}")
 
     if result is None:
         content = f"[{mode_name}] Session paused — checkpoint saved."
-        finish_reason = "stop"
     else:
         content = result
 
@@ -225,20 +323,38 @@ def create_app(
     registry: WorkerRegistry | None = None,
     store: CheckpointStore | None = None,
     *,
+    provider_map: dict | None = None,
+    concurrency_mgr=None,
+    allowed_modes: set[str] | None = None,
     _step_fn=None,
 ) -> web.Application:
     """
     Build and return the aiohttp Application.
 
-    registry  — WorkerRegistry to expose via GET /v1/workers.
-    store     — CheckpointStore passed to CoworkRunner for pause/resume.
-    _step_fn  — optional async (PlanStep) -> str injected into CoworkRunner;
-                used by integration tests to control per-step behaviour without
-                requiring live workers.
+    registry        — WorkerRegistry to expose via GET /v1/workers.
+    store           — CheckpointStore passed to CoworkRunner for pause/resume.
+    provider_map    — ProviderType -> WorkerProviderBase, for real worker
+                       dispatch (see _make_live_step_fn). Set by main(); tests
+                       normally leave this None and pass _step_fn instead.
+    concurrency_mgr — OllamaCloudConcurrencyManager shared across requests,
+                       required alongside provider_map for real dispatch.
+    allowed_modes   — restrict GET /v1/models and POST /v1/chat/completions
+                       to this subset of mode names (main()'s --mode flag).
+                       None (default) accepts/lists all 5 modes.
+    _step_fn        — optional async (PlanStep) -> str injected into
+                       CoworkRunner; used by integration tests to control
+                       per-step behaviour without requiring live workers.
+                       Takes priority over provider_map-based dispatch.
     """
     app = web.Application()
     app["registry"] = registry or WorkerRegistry()
     app["store"]    = store    or CheckpointStore()
+    if provider_map is not None:
+        app["provider_map"] = provider_map
+    if concurrency_mgr is not None:
+        app["concurrency_mgr"] = concurrency_mgr
+    if allowed_modes is not None:
+        app["allowed_modes"] = allowed_modes
     if _step_fn is not None:
         app["_step_fn"] = _step_fn
 
@@ -247,3 +363,97 @@ def create_app(
     app.router.add_post("/v1/chat/completions",   _handle_completions)
 
     return app
+
+
+# --------------------------------------------------------------------------- #
+# tasker-api CLI entry point
+# --------------------------------------------------------------------------- #
+
+def main() -> None:
+    """
+    Entry point for the `tasker-api` console script. Wired the same way as
+    cli/shell.py's main()/_build_pipeline(): profile resolution
+    (TASKER_PROFILE env, default tier1_tasker), OLLAMA_BASE_URL env
+    override of the profile's ollama_base_url, a provider_map keyed by
+    ProviderType with a shared OllamaSessionBudget + concurrency manager on
+    the OllamaProvider, and a hardware-cache GPU availability cross-check
+    on the worker registry (SDD_ADDENDUM_7.5.md A.3.4) -- skipped if
+    `tasker-hardware detect` has never been run on this machine, same as
+    cli/shell.py.
+    """
+    import argparse
+    import logging
+    import os
+
+    from tasker.modes.base import ModeConfigurator
+    from tasker.session.concurrency import OllamaCloudConcurrencyManager
+    from tasker.workers.base import ProviderType
+    from tasker.workers.providers.ollama import OllamaProvider
+
+    logging.basicConfig(
+        level=os.environ.get("TASKER_LOG_LEVEL", "WARNING").upper(),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+    parser = argparse.ArgumentParser(
+        prog="tasker-api",
+        description="Ollama Tasker OpenAI-compatible API server.",
+    )
+    parser.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=8555, help="Bind port (default: 8555)")
+    parser.add_argument(
+        "--mode", default=None, choices=sorted(_MODES.keys()),
+        help="Restrict the server to a single mode (default: all 5 modes, "
+             "selected per-request via the model field 'tasker/<mode>').",
+    )
+    args = parser.parse_args()
+
+    profile_name = os.environ.get("TASKER_PROFILE", "tier1_tasker")
+    configurator = ModeConfigurator()
+    try:
+        profile = configurator.load_profile(profile_name)
+    except Exception as exc:
+        print(f"Config error: {exc}")
+        raise SystemExit(1)
+
+    # OLLAMA_BASE_URL overrides the profile YAML -- same rule as
+    # cli/shell.py's _build_pipeline (a machine may run Ollama elsewhere,
+    # e.g. Designlab1's WSL server on 127.0.0.1:11435).
+    base_url = os.environ.get("OLLAMA_BASE_URL") or profile.ollama_base_url
+    budget = OllamaSessionBudget(plan=profile.ollama_plan, window_start=datetime.now(tz=timezone.utc))
+    concurrency_mgr = OllamaCloudConcurrencyManager(profile.ollama_plan)
+    provider_map = {ProviderType.OLLAMA: OllamaProvider(base_url, concurrency_mgr, budget)}
+
+    if _DEFAULT_REGISTRY_YAML.exists():
+        registry = WorkerRegistry.load_from_yaml(_DEFAULT_REGISTRY_YAML)
+        # Phase 7.5.6 (SDD_ADDENDUM_7.5.md A.3.4): cross-check requires_gpu
+        # workers against cached hardware detection, if any exists for this
+        # machine -- mirrors cli/shell.py's main(). Uses the cache, never a
+        # fresh detect_gpu() call, to avoid subprocess cost on every launch.
+        from tasker.config.detect import load_cached_detection, load_cached_gpu_info
+
+        if load_cached_detection() is not None:
+            registry.apply_gpu_availability(load_cached_gpu_info())
+    else:
+        registry = WorkerRegistry()
+
+    allowed_modes = {args.mode} if args.mode else None
+    app = create_app(
+        registry=registry,
+        store=CheckpointStore(),
+        provider_map=provider_map,
+        concurrency_mgr=concurrency_mgr,
+        allowed_modes=allowed_modes,
+    )
+
+    print(
+        f"tasker-api: profile={profile_name!r} ollama_base_url={base_url!r} "
+        f"plan={profile.ollama_plan.value} mode={args.mode or 'all'} "
+        f"-> http://{args.host}:{args.port}",
+        flush=True,
+    )
+    web.run_app(app, host=args.host, port=args.port)
+
+
+if __name__ == "__main__":
+    main()

@@ -351,6 +351,86 @@ python -m unittest tests.unit.test_orchestrator_nano -v
 
 *(Update this section at the end of every Cowork or Code session)*
 
+**Last worked on:** Made the OpenAI-compat API server (`tasker/api/server.py`,
+built in Phase 7) actually launchable, so a WebUI can connect. Standalone
+ops/launch task, not part of the SDD_ADDENDUM_PHASE8 numbering. Full
+write-up in `docs/TASKER_CHECKLIST.md` → "API Server Launchability --
+`tasker-api` (2026-07-19)".
+
+**What was built:** `server.py:main()` (new `tasker-api` console script)
+wired the same way as `cli/shell.py`'s `main()`: `TASKER_PROFILE` env
+resolution, `OLLAMA_BASE_URL` env override, a `provider_map` with a
+shared `OllamaSessionBudget`/`OllamaCloudConcurrencyManager` on the
+`OllamaProvider`, hardware-cache GPU availability cross-check on the
+registry. `--host`/`--port` (default `127.0.0.1:8555`) and `--mode`
+(restrict to one of the 5 modes) flags. `create_app()` gained optional
+`provider_map`/`concurrency_mgr`/`allowed_modes` kwargs (test `_step_fn`
+override still wins). New `_make_live_step_fn()` drives a real
+`WorkerSelector` → `WorkerTask` → `run_tool_loop()` dispatch for
+`CoworkRunner`, and `_handle_completions` now wraps `runner.run()` in
+try/except (worker failure → HTTP 500 with reason, was an uncaught
+exception before). Bug fixed in the same pass: `_stub_plan()` truncated
+its step description to 80 chars — harmless while the server only ever
+echoed a stub string, but that description becomes the real worker
+instruction once a live `step_fn` is wired, so any prompt over 80 chars
+was silently being cut off. Now carries the full task text (regression
+test with a 200-char prompt). `pyproject.toml`: added
+`tasker-api = "tasker.api.server:main"`.
+
+**Live smoke test** (Designlab1 WSL, Ollama 0.30.11 @ 127.0.0.1:11435 —
+confirmed reachable first, never started, per the binding Ollama server
+rules above): started `tasker-api` in the background against the real
+WSL server. `GET /v1/models` → 200 (all 5 modes), `GET /v1/workers` → 200
+(real registry), `POST /v1/chat/completions` with `tasker/chat` and a
+real prompt → 200, correct OpenAI `chat.completion` shape, genuine answer
+from the local `lfm2.5-thinking` worker via the real dispatch path (not
+the stub echo), zero cloud spend, ~44s (thinking-model latency, consistent
+with prior sessions). Server stopped cleanly. Fixed the startup banner
+print (`flush=True`) after the first run showed it buffering indefinitely
+under `nohup`.
+
+**Venv discipline this session:** Roland flagged that a previous session
+may have run outside `.venv`. Every python/pip/`tasker-*` command this
+session was preceded by `source .venv/bin/activate` and a `which
+python`/`which pip` check confirming `.venv/bin/*` before proceeding,
+including immediately before `pip install -e .`.
+
+**Tests:** 630 → 638 (12 new/changed in
+`tests/integration/test_api_server.py`: live-dispatch success/failure/
+no-truncation, stub-fallback-when-unwired, step_fn-override-priority,
+`allowed_modes` filtering on both endpoints). Full suite green.
+
+**Files modified:** `tasker/api/server.py` (main() + live dispatch +
+allowed_modes + stub-plan truncation fix), `pyproject.toml` (tasker-api
+entry), `tests/integration/test_api_server.py` (+12),
+`docs/TESTING_GUIDE.md` (new H7 — H6 was already taken by the setup
+wizard from the prior session), `docs/TASKER_CHECKLIST.md`, `CLAUDE.md`,
+`COWORK_PROMPT.md`.
+
+**Next task:** No orchestrator-planned `ExecutionPlan` in the API path
+yet (still `_stub_plan`, one step per request) — wiring the orchestrator
+tier into `/v1/chat/completions` was explicitly out of scope this
+session. SDD_ADDENDUM_PHASE8.md Phase 8.3 (TUI foundation) remains the
+next queued addendum task. No WebUI container/reverse-proxy work done
+(explicitly out of scope, per the task's own framing).
+
+**Blockers:** None.
+
+**Open decisions (also in TASKER_CHECKLIST.md's API Server section):**
+- `_handle_completions` still builds a fresh per-request
+  `OllamaSessionBudget`/`SessionManager`, separate from the provider's
+  own shared budget used for GPU-time accounting — pause/resume
+  checkpoint snapshots via the API don't reflect real cumulative cloud
+  usage. Pre-existing architecture, not touched this session.
+- Should `/v1/chat/completions` eventually plan through a real
+  orchestrator tier instead of `_stub_plan`'s single step? Needed for
+  multi-step COWORK-mode requests through a WebUI to actually behave like
+  COWORK; deferred as orchestrator work.
+
+---
+
+## Previous Session Notes (SDD_ADDENDUM_PHASE8.md Phase 8.2, kept for reference)
+
 **Last worked on:** SDD_ADDENDUM_PHASE8.md Phase 8.2 — Agentic Readiness
 Checker (`tasker/setup/readiness.py` + `tasker-setup --check-model`), the
 *addendum's* 8.2 (third use of that number in this project). Headless

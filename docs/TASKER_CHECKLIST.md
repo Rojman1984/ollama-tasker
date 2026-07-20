@@ -1152,3 +1152,81 @@ Real-world motivation: the 7.5.4-7.5.6 session live-observed
 concluding across repeated turns, exhausting run_tool_loop's max_turns=5"
 -- on a cloud worker each of those wasted turns would have been a budgeted
 call; the guard now stops that pattern at turn 2.
+
+---
+
+## API Server Launchability -- `tasker-api` (2026-07-19)
+
+Scoped task: make the existing OpenAI-compat API server
+(`tasker/api/server.py`, built in Phase 7) actually launchable as a
+standalone process so a WebUI can connect. Not part of the
+SDD_ADDENDUM_PHASE8 numbering -- a standalone launch/ops task.
+
+- [x] `tasker/api/server.py:main()` added, wired the same way as
+      `cli/shell.py`'s `main()`/`_build_pipeline()`: `TASKER_PROFILE` env
+      resolution (default `tier1_tasker`), `OLLAMA_BASE_URL` env override
+      of the profile's Ollama URL, `provider_map` keyed by `ProviderType`
+      with a shared `OllamaSessionBudget` + `OllamaCloudConcurrencyManager`
+      on the `OllamaProvider`, and a hardware-cache GPU availability
+      cross-check on the worker registry (SDD_ADDENDUM_7.5.md A.3.4,
+      skipped if `tasker-hardware detect` has never run).
+- [x] `--host`/`--port` (default `127.0.0.1:8555`) and `--mode` (restrict
+      the server to one of the 5 modes; default accepts all, selected
+      per-request via the `model` field) flags.
+- [x] `create_app()` extended with `provider_map`, `concurrency_mgr`, and
+      `allowed_modes` kwargs (all optional, default `None` -- existing
+      test call sites unaffected). `_step_fn` (test override) still takes
+      priority over the new real-dispatch path.
+- [x] `_make_live_step_fn()`: real `WorkerSelector.select()` ->
+      `WorkerTask` -> `run_tool_loop()` dispatch for `CoworkRunner`,
+      mirroring `cli/shell.py`'s `_execute_steps()` for a single-step
+      request. A worker failure now returns HTTP 500 with the reason
+      instead of propagating an uncaught exception (previously
+      `_handle_completions` had no try/except around `runner.run()`).
+- [x] **Bug fixed while wiring this:** `_stub_plan()`'s step description
+      was `f"Execute: {task[:80]}"` -- fine as a display-only label when
+      the server only ever echoed a stub string, but the moment a real
+      `step_fn` uses `step.description` as the worker's actual
+      instruction, that truncation silently cut off any prompt over 80
+      characters. Now carries the full task text. Regression test added
+      (`test_live_dispatch_long_prompt_not_truncated`, 200-char prompt).
+- [x] `pyproject.toml`: `tasker-api = "tasker.api.server:main"` script
+      entry added. Reinstalled with `pip install -e .` inside the venv
+      (confirmed `which python`/`which pip` resolved to `.venv/bin/*`
+      before running, per explicit instruction this session).
+- [x] `tests/integration/test_api_server.py`: +12 tests (15 -> 23) --
+      live-dispatch success/failure/no-truncation/stub-fallback/
+      step_fn-override-priority, plus `allowed_modes` filtering on both
+      `/v1/models` and `/v1/chat/completions`. All mocked (fake provider),
+      no live Ollama calls per the existing test-suite convention.
+- [x] Full suite green: **638 tests, OK** (was 630 after addendum 8.2).
+- [x] **Live smoke test** (Designlab1 WSL, Ollama 0.30.11 @
+      127.0.0.1:11435 -- confirmed reachable, never started per CLAUDE.md's
+      binding Ollama server rules): started
+      `OLLAMA_BASE_URL=http://127.0.0.1:11435 tasker-api --port 8555` in
+      the background. `GET /v1/models` -> 200, all 5 `tasker/<mode>` ids.
+      `GET /v1/workers` -> 200, real registry (`lfm2.5-local` etc.).
+      `POST /v1/chat/completions` with `model: tasker/chat` and a real
+      user prompt -> 200, correct `chat.completion` OpenAI shape (`id`
+      prefixed `chatcmpl-`, `choices[0].message.role == "assistant"`,
+      `finish_reason: "stop"`), content is a genuine answer from the local
+      `lfm2.5-thinking` worker (routed through `WorkerSelector` ->
+      `run_tool_loop` -> `OllamaProvider.execute()`, not the stub echo) --
+      zero cloud spend, ~44s end-to-end (thinking-model latency, matches
+      prior sessions' measurements). Server stopped cleanly afterward
+      (`kill <pid>`; `web.run_app` shuts down without orphaned processes).
+      Startup banner print given `flush=True` after the first smoke test
+      showed it buffering indefinitely under `nohup`.
+
+**Known open issues (not fixed this session -- out of scope):**
+- `_handle_completions` still builds a fresh per-request
+  `OllamaSessionBudget`/`SessionManager` (unrelated to the provider's own
+  shared budget used for GPU-time unit accounting) -- so pause/resume
+  checkpoint budget snapshots via the API don't reflect the server's
+  actual cumulative Ollama Cloud usage. Pre-existing architecture, not
+  introduced or altered by this task.
+- Still dispatches through `_stub_plan()` (one step covering the whole
+  request), not a real orchestrator-planned `ExecutionPlan` -- wiring the
+  orchestrator tier into the API path is explicitly out of scope for this
+  launchability task ("no new orchestrator work").
+- No WebUI container/reverse-proxy config -- explicitly out of scope.

@@ -134,3 +134,58 @@ tasker-setup --check-model kimi-k2.7-code:cloud --ollama-url http://127.0.0.1:11
 # an un-pulled LOCAL model instead prints "Run: ollama pull <name>" and
 # probes nothing; an un-pulled :cloud model IS probed (pull not required).
 ```
+
+## H7. OpenAI-Compat API Server (`tasker-api`)
+
+> Numbering note: the launch task that produced this section originally
+> asked for "H6", but H6 (Setup Wizard + Readiness Checker) already exists
+> above from an earlier session -- this is H7 to avoid colliding with it,
+> same convention as the COWORK_PROMPT-numbering notes elsewhere in this
+> file.
+
+`tasker-api` (`tasker/api/server.py:main()`) is wired the same way as
+`cli/shell.py`'s `main()`: `TASKER_PROFILE` env (default `tier1_tasker`),
+`OLLAMA_BASE_URL` env override of the profile's Ollama URL, a
+`provider_map` with a shared `OllamaSessionBudget` +
+`OllamaCloudConcurrencyManager` on the `OllamaProvider`, and a
+hardware-cache GPU availability cross-check on the worker registry
+(skipped if `tasker-hardware detect` has never run on this machine).
+Binds `127.0.0.1:8555` by default.
+
+### H7.1 Unit + integration tests
+```bash
+python -m unittest tests.integration.test_api_server -v
+```
+Covers: OpenAI-shaped `/v1/models` and `/v1/chat/completions` responses,
+the documented no-worker stub fallback, `allowed_modes` (`--mode`)
+restricting both endpoints, a mocked-provider live-dispatch path (worker
+selection -> `run_tool_loop` -> response, full untruncated prompt reaches
+the worker instruction -- regression test for a truncation bug fixed
+while wiring this), and a worker failure surfacing as HTTP 500 instead of
+crashing the server.
+
+### H7.2 Live: start the server, exercise it as a WebUI client would
+```bash
+# Never starts Ollama itself (see CLAUDE.md's binding server rules) --
+# point at whichever server is already running. WSL: 127.0.0.1:11435.
+OLLAMA_BASE_URL=http://127.0.0.1:11435 tasker-api --host 127.0.0.1 --port 8555
+# Restrict to one mode (rejects tasker/<other> with 400):
+tasker-api --mode chat
+
+# In another terminal:
+curl http://127.0.0.1:8555/v1/models
+curl http://127.0.0.1:8555/v1/workers
+curl -X POST http://127.0.0.1:8555/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "tasker/chat", "messages": [{"role": "user", "content": "Say hello in exactly three words."}]}'
+```
+Expect (live-verified 2026-07-19, Designlab1 WSL, Ollama 0.30.11 @
+127.0.0.1:11435, `tier1_tasker` profile -> local `lfm2.5-local` worker,
+zero cloud spend): `/v1/models` lists all 5 `tasker/<mode>` ids;
+`/v1/chat/completions` returns a `chat.completion` object with a real
+assistant answer dispatched through `WorkerSelector` ->
+`OllamaProvider.execute()` via `run_tool_loop` (not the stub echo) --
+`lfm2.5-thinking` took ~44s end-to-end for a trivial prompt (thinking
+model, see CLAUDE.md's latency notes). Stop the server with the normal
+signal (`Ctrl-C` interactively, or `kill <pid>` if backgrounded) --
+`web.run_app` shuts down cleanly.

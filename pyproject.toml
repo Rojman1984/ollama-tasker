@@ -26,6 +26,7 @@ tasker = "tasker.tui.app:main"
 tasker-cli = "cli.shell:main"
 tasker-hardware = "tasker.config.detect:cli_main"
 tasker-setup = "tasker.setup.wizard:cli_main"
+tasker-api = "tasker.api.server:main"
 
 [tool.ruff]
 line-length = 100
