@@ -352,6 +352,94 @@ python -m unittest tests.unit.test_orchestrator_nano -v
 
 *(Update this section at the end of every Cowork or Code session)*
 
+**Last worked on:** Cowork honesty + plan-parse resilience bug-fix
+session -- the second P1 from Roland's live cowork testing in the same
+day, queued right after the provider-selection fix below. Full write-up
+in `docs/TASKER_CHECKLIST.md` → "Cowork honesty + plan-parse resilience
+bug fixes (2026-07-20)".
+
+**The bug:** task "create a text file with hello from tasker! and
+provide the path" produced NO file, but the answer claimed "verified at
+example.txt" — a worker hallucinating a side effect and the harness
+presenting it as a plain success. Three scoped fixes:
+
+1. **Plan-parse resilience** — `plan_with_repair()`
+   (`tasker/orchestrator/_parse.py`) tries a tolerant text-repair pass
+   (markdown fences, trailing commas, single-quoted tokens — no extra
+   model call) and then exactly one re-ask with the parse error appended
+   before a tier gives up and falls back to NanoOrchestrator. Wired into
+   all four tiers (`tier1_single.py`, `tier2_dual.py`,
+   `tier3_reasoning.py`, `tier4_cloud.py`) — same `plan()` structure in
+   each, same one-line swap of `parse_plan(...)` for
+   `await plan_with_repair(...)`.
+2. **Fallback carries real intent** — `NanoOrchestrator`'s templates
+   (`tasker/orchestrator/tier0_rules.py`) now embed the actual task text
+   into every step description (`f"{desc}: {task}"`) instead of a purely
+   generic label ("Answer the task"). This run lost "create a text file"
+   to the generic template; `narrow_bundle_to_step()`'s first keyword
+   match now has real signal directly in `step.description`, not just
+   via its `original_task` second-chance argument.
+3. **Honesty guard** — new `tasker/tools/honesty.py`:
+   `check_side_effect_honesty()` flags a step's output when it claims a
+   side effect (a verb like "created"/"wrote"/"ran" plus an object like
+   "file"/"command"/"path", or a filename-shaped token) but
+   `tool_results` is empty — no tool actually ran. Rewrites the output to
+   lead with `[unverified] worker claimed side effects but used no
+   tools.`, preserving the original claim after it. Wired into
+   `tasker/runtime/dispatch.py`'s `_execute_steps()` right after
+   `run_tool_loop()` returns, before the result reaches
+   `results`/`completed_records` — so a resumed session's replay also
+   sees the honest version, not the original bare claim.
+
+**Tests:** 677 → 703 (+26): `test_plan_repair.py` (new, 13),
+`test_honesty.py` (new, 9), `test_orchestrator_nano.py` (+2),
+`test_orchestrator_single.py` (+1), `test_cli_session_wiring.py` (+1).
+Full suite green.
+
+**Live re-run of Roland's exact task** (Designlab1, WSL Ollama
+127.0.0.1:11435, `lfm2.5-thinking:latest`, cowork mode, scratch cwd, zero
+cloud spend): this particular run's planner JSON actually parsed on the
+first attempt (only a harmless capability string — `"tasker!"`, misread
+from the task's own wording — got dropped; Fix 1/2's ladder wasn't
+exercised live by this specific run, though it's unit-tested and sits
+unconditionally in the code path every tier already calls). The tool
+loop's existing non-termination guard stopped a duplicate `file_write`
+call on turn 2, but turn 1's call had already executed for real —
+`text_file.txt` was created on disk with content `hello from tasker!`,
+and the synthesized answer matched reality. Honesty guard correctly left
+it unflagged (a tool call really did run). **A real file was produced
+and the answer was truthful** — the exact bar this session set. Scratch
+dir cleaned up after verification.
+
+**Files modified:** `tasker/orchestrator/_parse.py`
+(`_tolerant_repair`, `_plan_parse_error`, `plan_with_repair`),
+`tasker/orchestrator/tier1_single.py`, `tier2_dual.py`,
+`tier3_reasoning.py`, `tier4_cloud.py` (all four wired to
+`plan_with_repair`), `tasker/orchestrator/tier0_rules.py` (task-embedded
+step descriptions), `tasker/tools/honesty.py` (new),
+`tasker/runtime/dispatch.py` (honesty guard wired into
+`_execute_steps`), `tests/unit/test_plan_repair.py` (new),
+`tests/unit/test_honesty.py` (new), `tests/unit/test_orchestrator_nano.py`,
+`tests/unit/test_orchestrator_single.py`,
+`tests/unit/test_cli_session_wiring.py`, `docs/TESTING_GUIDE.md` (new
+H11), `docs/TASKER_CHECKLIST.md`, `CLAUDE.md`, `COWORK_PROMPT.md`.
+
+**Next task:** SDD_ADDENDUM_PHASE8.md Phase 8.4 — SetupWizardScreen +
+ModelSelectorScreen (unchanged, still queued — today was two
+interrupt-driven live-testing bug-fix sessions, not addendum work).
+
+**Blockers:** None.
+
+**Open decisions:** None new. Fix 1's re-ask ladder wasn't live-exercised
+by this session's own re-run (that run's planner JSON parsed on the
+first try) — worth keeping in mind if a future live run needs to
+specifically confirm the re-ask path end-to-end rather than at the unit
+level.
+
+---
+
+## Previous Session Notes (`tasker-cli shell` provider-wiring + REPL UX fixes, kept for reference)
+
 **Last worked on:** `tasker-cli shell` bug-fix session, prompted by live
 user testing (not a queued addendum phase). Full write-up in
 `docs/TASKER_CHECKLIST.md` → "`tasker-cli shell` bug fixes -- provider

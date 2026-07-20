@@ -18,7 +18,7 @@ from tasker.orchestrator._parse import (
     build_plan_prompt,
     build_retry_prompt,
     build_synthesize_prompt,
-    parse_plan as _parse_plan,
+    plan_with_repair as _plan_with_repair,
     parse_retry as _parse_retry,
 )
 from tasker.orchestrator.base import OrchestratorBase
@@ -58,12 +58,14 @@ class SingleLLMOrchestrator(OrchestratorBase):
         classifier_output: ClassifierResult,
         available_workers: list[WorkerManifest],
     ) -> ExecutionPlan:
-        raw = await self._call_model(_PLAN_SYSTEM, build_plan_prompt(task, classifier_output, available_workers))
-        plan = _parse_plan(task, raw)
+        user_prompt = build_plan_prompt(task, classifier_output, available_workers)
+        raw = await self._call_model(_PLAN_SYSTEM, user_prompt)
+        plan = await _plan_with_repair(task, raw, self._call_model, _PLAN_SYSTEM, user_prompt)
         if plan is None:
-            # _parse_plan already logged a WARNING with the raw response --
-            # here we just mark the resulting plan so callers/tests can tell
-            # "the model's real plan" apart from "the generic Nano template".
+            # _plan_with_repair already tried a tolerant text repair and one
+            # re-ask, logging a WARNING with the raw response -- here we
+            # just mark the resulting plan so callers/tests can tell "the
+            # model's real plan" apart from "the generic Nano template".
             plan = await self._fallback.plan(task, classifier_output, available_workers)
             plan.used_fallback = True
         return plan

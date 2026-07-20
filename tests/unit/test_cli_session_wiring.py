@@ -209,6 +209,73 @@ class TestExecuteStepsSessionWiring(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(reloaded.plan.steps), 2)
 
 
+class _ClaimsFileCreatedProvider(WorkerProviderBase):
+    """A worker that answers as if it wrote a file, without ever calling a
+    tool -- reproduces the live bug: 'create a text file...' produced no
+    file, but the answer claimed 'verified at example.txt'."""
+
+    def supports(self, worker):
+        return True
+
+    async def health_check(self, worker):
+        return True
+
+    async def execute(self, task, worker):
+        return WorkerResult(
+            task_id=task.task_id,
+            worker_id=worker.id,
+            status=WorkerStatus.SUCCESS,
+            output="Done! I created the file and verified it at example.txt.",
+            tool_results=[],
+            usage=ModelUsage(10, 10, 0.0),
+            duration_ms=5,
+        )
+
+
+class TestHonestyGuardWiredIntoExecuteSteps(unittest.IsolatedAsyncioTestCase):
+    """
+    Fix (3) of the 2026-07-20 cowork bug-fix session: _execute_steps must
+    run every step result through the side-effect honesty guard before
+    appending it to results/completed_records, so a claimed-but-unverified
+    side effect never reaches synthesis as a plain success.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.store = CheckpointStore(Path(self._tmp.name))
+        self.config = ModeConfigurator().build("tier1_tasker", "chat")
+        self.budget = OllamaSessionBudget(
+            plan=OllamaPlan.PRO, window_start=datetime.now().astimezone()
+        )
+        self.session_mgr = SessionManager(
+            self.budget, self.store, LogNotifier(), auto_resume=False
+        )
+        self.concurrency_mgr = OllamaCloudConcurrencyManager(OllamaPlan.PRO)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    async def test_unverified_claim_rewritten_before_reaching_results(self):
+        completed: list[dict] = []
+        results, paused = await _execute_steps(
+            "create a text file with hello from tasker! and provide the path",
+            _plan(1), 0, completed,
+            workers=[_local_worker()],
+            mode_name="chat", profile_name="tier1_tasker",
+            config=self.config, budget=self.budget,
+            session_mgr=self.session_mgr,
+            concurrency_mgr=self.concurrency_mgr,
+            provider_map={ProviderType.OLLAMA: _ClaimsFileCreatedProvider()},
+        )
+        self.assertFalse(paused)
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0].output.startswith("[unverified]"))
+        self.assertIn("verified it at example.txt", results[0].output)
+        # the checkpoint record (used for resume/synthesis replay) must
+        # carry the rewritten output too, not the original bare claim.
+        self.assertTrue(completed[0]["output"].startswith("[unverified]"))
+
+
 class TestStepResultSerialization(unittest.TestCase):
 
     def test_roundtrip(self):

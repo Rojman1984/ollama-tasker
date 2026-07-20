@@ -23,7 +23,7 @@ from tasker.orchestrator._parse import (
     build_plan_prompt,
     build_retry_prompt,
     build_synthesize_prompt,
-    parse_plan,
+    plan_with_repair,
     parse_retry,
 )
 from tasker.orchestrator.base import OrchestratorBase
@@ -72,8 +72,9 @@ class DualLLMOrchestrator(OrchestratorBase):
         classifier_output: ClassifierResult,
         available_workers: list[WorkerManifest],
     ) -> ExecutionPlan:
-        raw = await self._call_planner(PLAN_SYSTEM, build_plan_prompt(task, classifier_output, available_workers))
-        result = parse_plan(task, raw)
+        user_prompt = build_plan_prompt(task, classifier_output, available_workers)
+        raw = await self._call_planner(PLAN_SYSTEM, user_prompt)
+        result = await plan_with_repair(task, raw, self._call_planner, PLAN_SYSTEM, user_prompt)
         if result is None:
             result = await self._fallback.plan(task, classifier_output, available_workers)
             result.used_fallback = True

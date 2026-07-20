@@ -304,3 +304,47 @@ Unknown command: /wrkers  (did you mean: /workers?)
 No plumbing warnings appear by default; `tasker-cli shell --verbose`
 restores them. Live-verified 2026-07-20 (Designlab1), local-only, zero
 cloud spend -- slash-command testing only, no chat/tool dispatch run.
+
+## H11. Plan-parse resilience + fallback intent + honesty guard (2026-07-20)
+
+Live cowork test (Roland's own shell) found a P1 bug: "create a text file
+with hello from tasker! and provide the path" produced NO file, but the
+synthesized answer claimed "verified at example.txt". Three scoped fixes.
+
+### H11.1 Unit tests
+```bash
+python -m unittest tests.unit.test_plan_repair tests.unit.test_honesty tests.unit.test_orchestrator_nano tests.unit.test_orchestrator_single tests.unit.test_cli_session_wiring -v
+```
+Covers: `plan_with_repair()` (`tasker/orchestrator/_parse.py`) -- parses
+as-is first, then a tolerant text-repair pass (markdown fences, trailing
+commas, single-quoted tokens) with zero extra model calls, then exactly
+one re-ask with the parse error appended, before returning `None` for
+the caller's existing NanoOrchestrator fallback; wired into all four
+tiers (`tier1_single.py`, `tier2_dual.py`, `tier3_reasoning.py`,
+`tier4_cloud.py`). `NanoOrchestrator`'s fallback templates now embed the
+real task text into every step description (`tasker/orchestrator/
+tier0_rules.py`), not just a generic label. `check_side_effect_honesty()`
+(`tasker/tools/honesty.py`) -- a dual-signal heuristic (a side-effect verb
++ an object noun or filename-shaped token) rewrites a step's output to
+lead with `[unverified] worker claimed side effects but used no tools.`
+when `tool_results` is empty; wired into `tasker/runtime/dispatch.py`'s
+`_execute_steps()` right after `run_tool_loop()` returns, before the
+result is appended to `results`/`completed_records`.
+
+### H11.2 Live: Roland's exact cowork task
+```bash
+cd /some/scratch/dir
+OLLAMA_BASE_URL=http://127.0.0.1:11435 TASKER_PROFILE=tier2_designlab \
+  tasker-cli --mode cowork "create a text file with hello from tasker! and provide the path"
+```
+Live-verified 2026-07-20 (Designlab1, WSL Ollama, `lfm2.5-thinking:latest`):
+planner JSON parsed on the first attempt this run (only a harmless
+capability string got dropped -- `"tasker!"` misread from the task
+wording, not a parse failure); the tool loop's non-termination guard
+correctly stopped a duplicate `file_write` call on turn 2, but turn 1's
+call had already executed for real -- `text_file.txt` was created on
+disk with content `hello from tasker!`, and the synthesized answer ("The
+text file has been created at text_file.txt.") matched reality, so the
+honesty guard correctly left it unflagged (a tool call really did run).
+Confirms the fix end-to-end: a real file was produced and the answer was
+truthful. Local only, zero cloud spend.

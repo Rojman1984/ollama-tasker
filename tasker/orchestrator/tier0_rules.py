@@ -94,10 +94,20 @@ class NanoOrchestrator(OrchestratorBase):
         available_workers: list[WorkerManifest],
     ) -> ExecutionPlan:
         template = _TEMPLATES.get(classifier_output.task_type, _TEMPLATES[TaskType.CONVERSATIONAL])
+        # Fold the user's actual task text into every step description
+        # rather than leaving it purely generic ("Answer the task"). Live
+        # bug: a cowork run whose planner JSON failed to parse fell to this
+        # template, and narrow_bundle_to_step() had to rely entirely on its
+        # original_task second-chance match against a step description that
+        # itself carried zero of the user's intent -- fragile any time that
+        # second-chance argument isn't threaded through by some caller.
+        # Embedding the task directly here means the FIRST keyword match
+        # attempt (against step.description itself) already has the real
+        # wording to work with.
         steps = [
             PlanStep(
                 index=i,
-                description=desc,
+                description=f"{desc}: {task}",
                 role=role,
                 required_capabilities=caps,
                 depends_on=list(range(i)),   # each step depends on all previous

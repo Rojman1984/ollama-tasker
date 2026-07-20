@@ -113,7 +113,37 @@ interim REPL from the session before this one has been superseded.
 | A8.3 | Addendum: Textual TUI skeleton (TuiApp, WelcomeScreen, status bar) | ✅ COMPLETE |
 | A8.4–8.5 | Addendum: SetupWizardScreen + ModelSelectorScreen, HarnessPanel | ⬜ NOT STARTED |
 
-**Last completed task:** `tasker-cli shell` bug-fix session, ✅ COMPLETE
+**Last completed task:** Cowork honesty + plan-parse resilience bug-fix
+session, ✅ COMPLETE (2026-07-20; second P1 from Roland's live cowork
+testing the same day, queued right after the provider-selection fix
+below). Bug: "create a text file with hello from tasker! and provide the
+path" produced NO file, but the answer claimed "verified at
+example.txt". Three scoped fixes: (1) `plan_with_repair()`
+(`tasker/orchestrator/_parse.py`) — a tolerant text-repair pass (no
+extra model call) plus exactly one re-ask with the parse error appended,
+tried before any of the four orchestrator tiers falls back to
+NanoOrchestrator; (2) `NanoOrchestrator`'s fallback templates
+(`tasker/orchestrator/tier0_rules.py`) now embed the real task text into
+every step description instead of a purely generic label, so
+`narrow_bundle_to_step()` has real signal on its first match attempt;
+(3) new `tasker/tools/honesty.py`: `check_side_effect_honesty()` flags a
+step's output when it claims a side effect (creation/write/run verb +
+file/command/path object, or a filename-shaped token) but `tool_results`
+is empty, rewriting it to lead with `[unverified] worker claimed side
+effects but used no tools.` — wired into `_execute_steps()` before a
+result reaches `results`/`completed_records`. Live re-run of Roland's
+exact task (Designlab1, scratch cwd, zero cloud spend): a real
+`text_file.txt` was created with the correct content and the synthesized
+answer matched reality — honesty guard correctly left it unflagged since
+a tool call really did run this time. Suite 677 → 703 (+26). Evidence:
+docs/TASKER_CHECKLIST.md → "Cowork honesty + plan-parse resilience bug
+fixes (2026-07-20)".
+
+---
+
+## Previous completed task (kept for reference)
+
+`tasker-cli shell` bug-fix session, ✅ COMPLETE
 (2026-07-20; live user testing, not a queued addendum phase). P1 fix: a
 chat-mode turn's `WorkerSelector` picked `fugu-ultra` even though
 `tasker-cli shell`'s `provider_map` only wires `OllamaProvider` — the
@@ -188,20 +218,39 @@ ModelSelectorScreen (wraps `tasker/setup/readiness.py`'s
 `WorkerRegistryUpdated`) per B.11. Then Phase 8.5 (HarnessPanel, built
 on `tasker/runtime/dispatch.py`). TASKER-P1 manual verification for 8.3
 still open (no access this session, same as every prior phase that
-needed it). Today's bug-fix session did not touch this queue — it was
-interrupt-driven by live testing, not a step in the addendum sequence.
+needed it). Both of today's bug-fix sessions were interrupt-driven by
+live testing, not a step in the addendum sequence — this queue is
+otherwise unchanged.
 
-**Files modified this session (2026-07-20):**
+**Files modified this session (2026-07-20, second bug-fix pass):**
+`tasker/orchestrator/_parse.py` (`_tolerant_repair`, `_plan_parse_error`,
+`plan_with_repair`), `tasker/orchestrator/tier1_single.py`,
+`tier2_dual.py`, `tier3_reasoning.py`, `tier4_cloud.py` (wired to
+`plan_with_repair`), `tasker/orchestrator/tier0_rules.py`
+(task-embedded step descriptions), `tasker/tools/honesty.py` (new),
+`tasker/runtime/dispatch.py` (honesty guard wired into
+`_execute_steps`), `tests/unit/test_plan_repair.py` (new, 13 tests),
+`tests/unit/test_honesty.py` (new, 9 tests),
+`tests/unit/test_orchestrator_nano.py` (+2),
+`tests/unit/test_orchestrator_single.py` (+1),
+`tests/unit/test_cli_session_wiring.py` (+1), `docs/TESTING_GUIDE.md`
+(new H11), `docs/TASKER_CHECKLIST.md`, `CLAUDE.md`, `COWORK_PROMPT.md`.
+
+*(First bug-fix pass this same day, provider-wiring + REPL UX:*
 `tasker/workers/registry.py` (`apply_provider_availability`),
 `tasker/runtime/dispatch.py` (wired into `_run_task`/`_resume_task`),
 `cli/shell.py` (`_suggest_command`, `--verbose`, `_BOOL_FLAGS` fix to
 `_first_positional`), `tests/unit/test_worker_registry.py` (+5),
 `tests/unit/test_dispatch_provider_wiring.py` (new, 2 tests),
 `tests/unit/test_cli_shell.py` (new, 11 tests), `docs/TESTING_GUIDE.md`
-(new H10), `docs/TASKER_CHECKLIST.md`, `CLAUDE.md`, `COWORK_PROMPT.md`.
-No `pyproject.toml` change needed.
+(new H10)*.)*
 
 **Open decisions / blockers:**
+- Fix 1's re-ask ladder (`plan_with_repair`) wasn't live-exercised by
+  the H11.2 re-run specifically — that run's planner JSON parsed on the
+  first try. Coverage is unit-level today; worth confirming end-to-end
+  with an intentionally-malformed live prompt if a future session wants
+  that specific evidence.
 - Provider-wiring gap is now *safe* (excluded up front, logged, never a
   silent mid-run failure) but not *closed* — Anthropic/OpenAI/Fugu are
   still unreachable from `tasker-cli shell`/`tasker`'s `provider_map`.

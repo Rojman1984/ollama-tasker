@@ -26,7 +26,7 @@ from tasker.orchestrator._parse import (
     build_plan_prompt,
     build_retry_prompt,
     build_synthesize_prompt,
-    parse_plan,
+    plan_with_repair,
     parse_retry,
 )
 from tasker.orchestrator.base import OrchestratorBase
@@ -111,8 +111,9 @@ class CloudOrchestrator(OrchestratorBase):
         classifier_output: ClassifierResult,
         available_workers: list[WorkerManifest],
     ) -> ExecutionPlan:
-        raw = await self._call(PLAN_SYSTEM, build_plan_prompt(task, classifier_output, available_workers))
-        result = parse_plan(task, raw or "") if raw else None
+        user_prompt = build_plan_prompt(task, classifier_output, available_workers)
+        raw = await self._call(PLAN_SYSTEM, user_prompt)
+        result = await plan_with_repair(task, raw, self._call, PLAN_SYSTEM, user_prompt) if raw else None
         if result is None:
             result = await self._fallback.plan(task, classifier_output, available_workers)
             result.used_fallback = True

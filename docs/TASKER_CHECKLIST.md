@@ -1515,3 +1515,84 @@ selection can legally pick Anthropic/OpenAI/Fugu workers") -- this
 change makes that condition *safe* (excluded up front, never a silent
 mid-run failure) but does not itself wire the other three providers;
 that remains open if/when Anthropic/OpenAI/Fugu support is needed live.
+
+## Cowork honesty + plan-parse resilience bug fixes (2026-07-20)
+
+Second P1 from Roland's live cowork test (transcript in his shell): task
+"create a text file with hello from tasker! and provide the path"
+produced NO file, but the answer claimed "verified at example.txt".
+Three scoped fixes, all local-only, zero cloud spend.
+
+- [x] **Fix 1 -- plan-parse resilience:** `plan_with_repair()`
+      (`tasker/orchestrator/_parse.py`) tries, in order, before falling
+      back to NanoOrchestrator: (a) parse the raw response as-is, (b) a
+      tolerant text-repair pass for common LFM2.5 quoting damage --
+      markdown code fences, trailing commas, single-quoted tokens -- no
+      extra model call, (c) exactly one re-ask with the specific parse
+      error appended to the original prompt. Returns `None` only if all
+      three fail, at which point the caller's existing NanoOrchestrator
+      fallback applies unchanged. Wired into all four tiers that call
+      `parse_plan()`: `tier1_single.py`, `tier2_dual.py`,
+      `tier3_reasoning.py`, `tier4_cloud.py`.
+- [x] **Fix 2 -- fallback carries real intent:** `NanoOrchestrator`'s
+      templates (`tasker/orchestrator/tier0_rules.py`) now embed the
+      actual task text into every step description (`f"{desc}: {task}"`)
+      instead of a purely generic label ("Answer the task"). Roland's run
+      lost "create a text file" to the generic template; the step
+      description itself now carries the real wording, so
+      `narrow_bundle_to_step()`'s FIRST keyword match attempt already has
+      real signal rather than depending entirely on its `original_task`
+      second-chance argument being correctly threaded through by every
+      caller.
+- [x] **Fix 3 -- honesty guard:** `check_side_effect_honesty()`
+      (new `tasker/tools/honesty.py`) -- a dual-signal heuristic (a
+      side-effect verb like "created"/"wrote"/"ran" combined with an
+      object noun like "file"/"command"/"path", or a filename-shaped
+      token) flags a step's output when it claims a side effect but
+      `tool_results` is empty (no tool actually ran). The output is
+      rewritten to lead with `[unverified] worker claimed side effects
+      but used no tools. Original claim: <original>`, never presented to
+      synthesis as a plain success. Wired into
+      `tasker/runtime/dispatch.py`'s `_execute_steps()` immediately after
+      `run_tool_loop()` returns, before the result reaches
+      `results`/`completed_records` (so a resumed session's replay also
+      sees the honest version).
+- [x] Tests: `tests/unit/test_plan_repair.py` (new, 13 tests --
+      `_tolerant_repair`, `_plan_parse_error`, `plan_with_repair`'s full
+      ladder including "exactly one re-ask, never loops"),
+      `tests/unit/test_honesty.py` (new, 9 tests -- flags file/command
+      claims with zero tool calls, does not flag a real tool-backed
+      claim, does not flag plain chat answers or generic "successfully"
+      language alone), `tests/unit/test_orchestrator_nano.py` (+2 --
+      fallback step descriptions carry the real task text, single- and
+      multi-step templates), `tests/unit/test_orchestrator_single.py`
+      (+1 -- a real orchestrator recovers a plan via exactly one re-ask
+      before falling back), `tests/unit/test_cli_session_wiring.py`
+      (+1 -- `_execute_steps()` rewrites an unverified claim before it
+      reaches `results`/`completed_records`).
+- [x] Full suite green: **703 tests, OK** (was 677; +26 net -- includes
+      one test-file fix during authoring, no regressions).
+- [x] **Live re-run of Roland's exact task** (Designlab1, WSL Ollama
+      127.0.0.1:11435, `lfm2.5-thinking:latest`, cowork mode, scratch
+      cwd, zero cloud spend): `tasker-cli --mode cowork "create a text
+      file with hello from tasker! and provide the path"`. This run's
+      planner JSON actually parsed on the first attempt (only a harmless
+      capability string, `"tasker!"`, got dropped -- misread from the
+      task wording, not a parse failure, so Fix 1/2's ladder wasn't
+      exercised by this particular run). The tool loop's existing
+      non-termination guard correctly stopped a duplicate `file_write`
+      call on turn 2, but turn 1's call had already executed for real --
+      `text_file.txt` was created on disk with content `hello from
+      tasker!`, and the synthesized answer ("The text file has been
+      created at text_file.txt.") matched reality. The honesty guard
+      correctly left it unflagged, since a tool call really did run.
+      **A real file was produced and the answer was truthful** -- the
+      exact bar this session's task set. Scratch directory cleaned up
+      after verification.
+
+**Open decisions / known issues:** none new. Fix 1's re-ask ladder was
+not live-exercised by the H11.2 re-run specifically (that run's planner
+JSON parsed on the first try) -- its coverage is unit-level
+(`test_plan_repair.py`, `test_orchestrator_single.py`'s re-ask test)
+plus the fact that it sits in the exact code path every tier's `plan()`
+already calls unconditionally.

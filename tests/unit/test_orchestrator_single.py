@@ -117,6 +117,22 @@ class TestSingleLLMOrchestrator(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(plan, ExecutionPlan)
         self.assertGreater(len(plan.steps), 0)
 
+    async def test_plan_recovers_via_reask_before_falling_back(self):
+        calls = []
+        good_plan = json.dumps([
+            {"description": "create the file", "role": "worker", "capabilities": ["tool_use"]},
+        ])
+
+        async def flaky_call(system: str, user: str) -> str:
+            calls.append(user)
+            return "not valid json" if len(calls) == 1 else good_plan
+
+        orc = SingleLLMOrchestrator(model_id="qwen3:1.7b", call_model=flaky_call)
+        plan = await orc.plan("create a file", _classifier(TaskType.CONVERSATIONAL), [])
+        self.assertFalse(plan.used_fallback)
+        self.assertEqual(plan.steps[0].description, "create the file")
+        self.assertEqual(len(calls), 2)   # initial call + exactly one re-ask
+
     async def test_plan_falls_back_to_nano_on_empty_array(self):
         orc = _make_orc("[]")
         plan = await orc.plan("task", _classifier(TaskType.RESEARCH), [])

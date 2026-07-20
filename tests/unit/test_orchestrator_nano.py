@@ -116,6 +116,24 @@ class TestNanoOrchestrator(unittest.IsolatedAsyncioTestCase):
         for step in plan.steps:
             self.assertEqual(plan.dependency_graph[step.index], step.depends_on)
 
+    async def test_step_description_carries_original_task_text(self):
+        # Live bug: a fallback plan's generic template description ("Answer
+        # the task") gave narrow_bundle_to_step() no keyword signal of its
+        # own, relying entirely on a second-chance match against the raw
+        # task text threaded through by the caller. The step description
+        # itself must now carry the user's real wording.
+        task = "create a text file with hello from tasker! and provide the path"
+        cr = _classifier(TaskType.CONVERSATIONAL)
+        plan = await self.orc.plan(task, cr, [])
+        self.assertIn(task, plan.steps[0].description)
+
+    async def test_multi_step_template_embeds_task_in_every_step(self):
+        task = "implement binary search"
+        cr = _classifier(TaskType.CODING)
+        plan = await self.orc.plan(task, cr, [])
+        for step in plan.steps:
+            self.assertIn(task, step.description)
+
     async def test_all_steps_require_tool_use(self):
         for task_type in TaskType:
             cr = _classifier(task_type)

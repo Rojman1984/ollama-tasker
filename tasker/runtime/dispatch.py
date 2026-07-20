@@ -242,6 +242,7 @@ async def _execute_steps(
 
     from tasker.session.checkpoint import Checkpoint
     from tasker.tools.bundles import get_definitions, narrow_bundle_to_step
+    from tasker.tools.honesty import check_side_effect_honesty
     from tasker.tools.loop import run_tool_loop
     from tasker.workers.base import SessionDirective, WorkerStatus, WorkerTask
     from tasker.workers.registry import WorkerSelector
@@ -310,6 +311,10 @@ async def _execute_steps(
             continue
         try:
             result = await run_tool_loop(wt, worker, provider, cwd=Path.cwd())
+            before = result.output
+            result = check_side_effect_honesty(result)
+            if result.output != before:
+                print(f"  [warn] step {step.index}: unverified side-effect claim (no tool calls)")
             status_str = "ok" if result.status == WorkerStatus.SUCCESS else result.status.value
             print(
                 f"  [{status_str}] {worker.id} ({result.duration_ms}ms, "

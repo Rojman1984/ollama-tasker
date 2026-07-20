@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
+from collections.abc import Awaitable, Callable
 
 from tasker.workers.base import (
     AgentRole,
@@ -252,6 +254,105 @@ def parse_plan(task: str, raw: str) -> ExecutionPlan | None:
             raw,
         )
         return None
+
+
+def _tolerant_repair(raw: str) -> str:
+    """
+    Best-effort textual repair of common small-model JSON quoting damage,
+    applied before falling back to a full re-ask. Handles: markdown code
+    fences wrapped around the JSON, trailing commas before a closing
+    bracket/brace, and single-quoted tokens where JSON requires double
+    quotes. This is a plain string transform -- it never itself decides
+    whether the result is valid; the caller re-runs parse_plan() on the
+    output and discards the repair if that still fails.
+    """
+    text = raw.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+        text = re.sub(r"\n?```$", "", text)
+    text = re.sub(r",(\s*[\]}])", r"\1", text)
+    # Single-quoted JSON tokens -> double-quoted. Only matches '...' spans
+    # bordered by JSON structural characters (so an apostrophe inside an
+    # already-double-quoted string, e.g. "don't", is left untouched).
+    text = re.sub(r"(?<=[:\[{,]\s)'([^']*)'", r'"\1"', text)
+    text = re.sub(r"'([^']*)'(?=\s*[:,\]}])", r'"\1"', text)
+    return text.strip()
+
+
+def _plan_parse_error(raw: str) -> str:
+    """Short human-readable reason parse_plan() rejected *raw*, for a re-ask prompt."""
+    try:
+        data = json.loads(raw.strip())
+    except json.JSONDecodeError as exc:
+        return f"invalid JSON: {exc.msg} at line {exc.lineno} column {exc.colno}"
+    if not isinstance(data, list):
+        return "the top-level value must be a JSON array, not an object or scalar"
+    if not data:
+        return "the JSON array must not be empty"
+    return "one or more array elements were missing the required object structure"
+
+
+async def plan_with_repair(
+    task: str,
+    raw: str,
+    call_model: Callable[[str, str], Awaitable[str | None]],
+    system_prompt: str,
+    user_prompt: str,
+) -> ExecutionPlan | None:
+    """
+    Plan-parse resilience ladder, tried before a caller falls back to the
+    generic NanoOrchestrator template (SDD 5.3a). Live bug: a cowork run's
+    planner response failed to parse, the run fell straight to
+    NanoOrchestrator, and lost the user's actual instruction ("create a
+    text file...") to that template's generic step description -- the
+    resulting worker step then had no keyword signal to narrow its tool
+    bundle against. This ladder tries progressively more expensive
+    recovery before giving up:
+
+      1. Parse *raw* as-is (the normal path -- already attempted by every
+         caller before this is invoked, repeated here so this function is
+         a complete drop-in replacement for "parse_plan(task, raw)").
+      2. A tolerant text-repair pass for common quoting damage (single
+         quotes, trailing commas, stray code fences) -- no extra model
+         call, so free to always attempt.
+      3. One re-ask: the identical prompt plus the specific parse error,
+         asked once more. Costs exactly one extra model call (one extra
+         Ollama Cloud budget unit if the orchestrator model is cloud-hosted).
+
+    Returns None only if all three fail -- the caller's existing
+    NanoOrchestrator fallback then applies unchanged, including marking
+    used_fallback=True.
+    """
+    plan = parse_plan(task, raw)
+    if plan is not None:
+        return plan
+
+    repaired = _tolerant_repair(raw)
+    if repaired != raw.strip():
+        plan = parse_plan(task, repaired)
+        if plan is not None:
+            logger.info("plan_with_repair: tolerant repair pass recovered a valid plan.")
+            return plan
+
+    parse_error = _plan_parse_error(raw)
+    retry_prompt = (
+        f"{user_prompt}\n\n"
+        f"Your previous response could not be parsed as valid JSON "
+        f"({parse_error}). Respond ONLY with a valid JSON array per the "
+        f"original instructions -- no markdown, no explanation."
+    )
+    retry_raw = await call_model(system_prompt, retry_prompt)
+    if retry_raw:
+        plan = parse_plan(task, retry_raw)
+        if plan is not None:
+            logger.info("plan_with_repair: re-ask recovered a valid plan.")
+            return plan
+
+    logger.warning(
+        "plan_with_repair: exhausted repair + re-ask, still unparseable -- "
+        "falling back to NanoOrchestrator template."
+    )
+    return None
 
 
 def parse_retry(raw: str) -> RetryDecision | None:
