@@ -15,7 +15,7 @@ Non-interactive surface (argparse):
 
 Interactive REPL slash commands:
   /mode /workers /policy /secure /budget /checkpoint /resume /model
-  /effort /status /help
+  /models /effort /context /status /help
 
 See SDD Section 7.6.
 """
@@ -52,10 +52,72 @@ from tasker.workers.registry import WorkerRegistry
 
 _KNOWN_COMMANDS = (
     "/mode", "/workers", "/policy", "/secure", "/budget",
-    "/checkpoint", "/resume", "/model", "/effort", "/status",
-    "/help", "/quit", "/exit",
+    "/checkpoint", "/resume", "/model", "/models", "/effort",
+    "/context", "/status", "/help", "/quit", "/exit",
 )
 _DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
+
+
+def _format_hms(td) -> str:
+    total = int(td.total_seconds())
+    h, rem = divmod(max(0, total), 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}"
+
+
+def _print_budget(mode: str, pipeline) -> None:
+    """/budget (SDD 5.6.1a): the REPL session builds one pipeline per mode
+    up front (see _ensure_pipeline in _repl()), so budget tracking starts
+    at 0.0 the moment a mode is entered, not "not active" until a task
+    happens to run."""
+    if pipeline is None:
+        print("(budget unavailable -- pipeline failed to build for this mode, see earlier Config error)")
+        return
+    _, config, budget, _, _, _, _ = pipeline
+    print(
+        f"mode={mode}  budget={budget.usage_consumed:.1f}/{budget.session_limit:.0f} units "
+        f"({budget.usage_pct:.1%})  plan={budget.plan.value}  "
+        f"window_remaining={_format_hms(budget.window_remaining)}"
+    )
+
+
+def _print_models(registry: WorkerRegistry) -> None:
+    """/models (alias `/model list`) -- SDD 5.6.1a: DEFAULT/LOCAL/CLOUD
+    groups with tool protocol, max context, and a "fits in VRAM" hint for
+    local workers whose declared context_window exceeds what the cached
+    GPU detection estimates will actually fit."""
+    from tasker.config.detect import load_cached_gpu_info
+    from tasker.workers.base import ComputeLocation
+    from tasker.workers.providers.ollama import resolve_num_ctx
+
+    workers = registry.list_all()
+    if not workers:
+        print("(no workers registered)")
+        return
+
+    gpu = load_cached_gpu_info()
+    groups: dict[str, list] = {"DEFAULT": [], "LOCAL": [], "CLOUD": []}
+    for w in workers:
+        if w.id == DEFAULT_CHAT_WORKER_ID:
+            groups["DEFAULT"].append(w)
+        elif w.compute_location == ComputeLocation.LOCAL_HARDWARE:
+            groups["LOCAL"].append(w)
+        else:
+            groups["CLOUD"].append(w)
+
+    for label in ("DEFAULT", "LOCAL", "CLOUD"):
+        members = groups[label]
+        if not members:
+            continue
+        print(f"{label}:")
+        for w in members:
+            num_ctx, capped = resolve_num_ctx(w, gpu)
+            hint = f"  (fits ~{num_ctx} of {w.context_window} in VRAM)" if capped else ""
+            status = "available" if w.available else "unavailable"
+            print(
+                f"  {w.id:30s}  {w.tool_protocol.value:12s}  "
+                f"max_context={w.context_window:<8d}  {status}{hint}"
+            )
 
 
 def _pull_progress_printer():
@@ -160,13 +222,46 @@ def _repl(
     policy_explicit = initial_policy is not None
     secure = False
 
-    # CHAT mode direct-dispatch state (SDD 5.3a): chat_model/chat_effort
-    # are session-scoped REPL levers (/model, /effort), never persisted.
-    # chat_history accumulates real multi-turn conversation context across
-    # turns in this REPL session -- passed to every chat dispatch call.
+    # CHAT mode direct-dispatch state (SDD 5.3a): chat_model/chat_effort/
+    # chat_context_override are session-scoped REPL levers (/model,
+    # /effort, /context), never persisted. chat_history accumulates real
+    # multi-turn conversation context across turns in this REPL session --
+    # passed to every chat dispatch call.
     chat_model: str | None = None
     chat_effort: str = _DEFAULT_EFFORT
+    chat_context_override: int | None = None
     chat_history: list[dict] = []
+
+    # One pipeline per mode, built up front rather than lazily on first
+    # task (SDD 5.6.1a) -- so /budget reflects a real, zero-initialized
+    # budget object from the moment a mode is entered, not a static
+    # "not active" placeholder. A pipeline is cached across turns within
+    # this REPL session so budget usage genuinely accumulates; switching
+    # /policy after a mode's pipeline is already built does not
+    # retroactively rebuild it (documented limitation, same simplification
+    # the prior TUI REPL used).
+    pipelines: dict[str, tuple] = {}
+
+    def _ensure_pipeline(m: str):
+        if m not in pipelines:
+            built = _build_pipeline(
+                m, store, _resolve_policy_override(policy) if policy_explicit else None,
+            )
+            if built is not None:
+                pipelines[m] = built
+        return pipelines.get(m)
+
+    def _evict_if_paused(m: str) -> None:
+        """A paused pipeline is evicted from the cache so the next task in
+        this mode starts fresh (a fresh budget window, SDD 9.4) rather than
+        sitting in PAUSED forever within this REPL process."""
+        from tasker.session.manager import SessionState
+
+        cached = pipelines.get(m)
+        if cached is not None and cached[3].state == SessionState.PAUSED:
+            del pipelines[m]
+
+    _ensure_pipeline(mode)
 
     print(f"Tasker REPL  |  mode={mode}  policy={policy}  secure={secure}")
     print("Type /help for commands, Ctrl-C or /quit to exit.\n")
@@ -192,6 +287,7 @@ def _repl(
             elif cmd == "/mode":
                 if arg:
                     mode = arg.lower()
+                    _ensure_pipeline(mode)
                     print(f"Mode set to: {mode}")
                 else:
                     print(f"Current mode: {mode}")
@@ -210,6 +306,7 @@ def _repl(
                 if secure:
                     mode   = "secure"
                     policy = "private"
+                    _ensure_pipeline(mode)
                 print(f"Secure mode: {'ON — LOCAL_ONLY enforced' if secure else 'OFF'}")
 
             elif cmd == "/workers":
@@ -221,7 +318,7 @@ def _repl(
                     print(f"  {w.id:30s}  {w.model_id:25s}  {w.compute_location.value:12s}  {status}")
 
             elif cmd == "/budget":
-                print("(budget tracking not active in REPL — start a task to initialise)")
+                _print_budget(mode, pipelines.get(mode))
 
             elif cmd == "/checkpoint":
                 checkpoints = store.list_all()
@@ -239,7 +336,9 @@ def _repl(
                                 policy if policy_explicit else None)
 
             elif cmd == "/model":
-                if arg:
+                if arg == "list":
+                    _print_models(registry)
+                elif arg:
                     worker = registry.get(arg)
                     if worker is not None:
                         chat_model = arg
@@ -258,6 +357,9 @@ def _repl(
                         f"(default, effort={chat_effort})"
                     )
 
+            elif cmd == "/models":
+                _print_models(registry)
+
             elif cmd == "/effort":
                 if arg:
                     level = arg.lower()
@@ -269,26 +371,50 @@ def _repl(
                 else:
                     print(f"Current CHAT effort: {chat_effort}")
 
+            elif cmd == "/context":
+                if arg:
+                    try:
+                        tokens = int(arg)
+                        if tokens <= 0:
+                            raise ValueError
+                    except ValueError:
+                        print("Usage: /context <positive integer tokens>")
+                    else:
+                        chat_context_override = tokens
+                        print(f"CHAT context override set to: {chat_context_override} tokens")
+                elif chat_context_override:
+                    print(f"Current CHAT context override: {chat_context_override} tokens")
+                else:
+                    print(
+                        "No CHAT context override set -- using each worker's "
+                        "manifest context_window (capped by VRAM for local "
+                        "workers, see /models)"
+                    )
+
             elif cmd == "/status":
                 chat_model_desc = chat_model or f"{DEFAULT_CHAT_WORKER_ID} (default)"
+                context_desc = f"{chat_context_override} tokens" if chat_context_override else "auto"
                 print(
                     f"mode={mode}  policy={policy}  secure={secure}  "
-                    f"chat_model={chat_model_desc}  chat_effort={chat_effort}"
+                    f"chat_model={chat_model_desc}  chat_effort={chat_effort}  "
+                    f"chat_context={context_desc}"
                 )
 
             elif cmd == "/help":
                 print(
                     "  /mode <mode>        switch mode (chat|code|cowork|research|secure)\n"
                     "  /workers            list registered workers\n"
+                    "  /models             list workers by DEFAULT/LOCAL/CLOUD (alias: /model list)\n"
                     "  /policy <policy>    change routing policy\n"
                     "  /secure [on|off]    toggle SECURE mode\n"
-                    "  /budget             show session budget\n"
+                    "  /budget             show session budget (initializes at 0.0)\n"
                     "  /checkpoint         list checkpoints\n"
                     "  /resume <id|--last> resume from checkpoint\n"
                     "  /model <worker_id>  pin CHAT mode to an exact worker\n"
                     "                      (an unregistered but valid-looking\n"
                     "                      Ollama tag offers to pull + onboard it)\n"
                     "  /effort <low|med|high>  redirect CHAT mode's default worker\n"
+                    "  /context <tokens>   override CHAT mode's num_ctx for this session\n"
                     "  /status             show current session state\n"
                     "  /help               this message\n"
                     "  /quit               exit"
@@ -304,12 +430,19 @@ def _repl(
         elif mode == "chat":
             # CHAT mode bypasses plan()/synthesize() entirely (SDD 5.3a) --
             # a direct call to the chat worker with the raw message and
-            # this REPL session's running conversation history.
+            # this REPL session's running conversation history. Reuses
+            # this mode's cached pipeline (see _ensure_pipeline) so budget
+            # usage genuinely accumulates across turns.
             asyncio.run(_run_chat_task(
                 line, registry, store, chat_history,
                 _resolve_policy_override(policy) if policy_explicit else None,
+                pipeline=_ensure_pipeline(mode),
                 model_override=chat_model, effort=chat_effort,
+                context_override=chat_context_override,
             ))
+            # No _evict_if_paused() here -- CHAT's direct-dispatch path
+            # never calls SessionManager.tick()/pause (SDD 5.3a), so its
+            # cached pipeline's session_mgr can never reach PAUSED.
 
         else:
             # Non-slash input in every other mode: treat as a task, full
@@ -317,7 +450,9 @@ def _repl(
             asyncio.run(_run_task(
                 line, mode, registry, store,
                 _resolve_policy_override(policy) if policy_explicit else None,
+                pipeline=_ensure_pipeline(mode),
             ))
+            _evict_if_paused(mode)
 
 
 # --------------------------------------------------------------------------- #

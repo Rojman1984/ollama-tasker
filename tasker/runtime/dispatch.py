@@ -182,7 +182,12 @@ def _build_pipeline(mode_name: str, store: CheckpointStore, policy_override=None
     # serves on 127.0.0.1:11435 via a systemd port.conf drop-in).
     base_url = os.environ.get("OLLAMA_BASE_URL") or profile.ollama_base_url
     concurrency_mgr = OllamaCloudConcurrencyManager(profile.ollama_plan)
-    ollama_provider = OllamaProvider(base_url, concurrency_mgr, budget)
+    # Cached GPU detection (same source WorkerRegistry.apply_gpu_availability()
+    # uses via _load_registry()) -- lets OllamaProvider apply its local-only
+    # num_ctx VRAM ceiling (SDD 5.6.1a) without a live subprocess call.
+    from tasker.config.detect import load_cached_gpu_info
+
+    ollama_provider = OllamaProvider(base_url, concurrency_mgr, budget, gpu=load_cached_gpu_info())
     provider_map = {ProviderType.OLLAMA: ollama_provider}
     orchestrator = build_orchestrator(config, provider_map)
 
@@ -541,6 +546,7 @@ async def _run_chat_task(
     pipeline=None,
     model_override: str | None = None,
     effort: str = _DEFAULT_EFFORT,
+    context_override: int | None = None,
 ) -> None:
     """
     CHAT mode direct dispatch (SDD 5.3a): one call to the chat worker with
@@ -553,6 +559,11 @@ async def _run_chat_task(
     *history* is mutated in place (user turn appended before dispatch,
     assistant turn appended after a successful reply) so the caller's
     REPL session accumulates real multi-turn context across calls.
+
+    *context_override* -- the REPL's /context <tokens> lever (SDD
+    5.6.1a) -- is threaded into WorkerTask.context["num_ctx_override"],
+    which OllamaProvider.execute() honors ahead of its own VRAM-ceiling
+    resolution.
     """
     from tasker.tools.bundles import get_definitions, narrow_bundle_to_step
     from tasker.tools.honesty import check_side_effect_honesty
@@ -579,13 +590,16 @@ async def _run_chat_task(
 
     history.append({"role": "user", "content": task})
     step_tools = get_definitions(narrow_bundle_to_step(config.mode.tool_bundle, task))
+    wt_context: dict = {"messages": list(history)}
+    if context_override:
+        wt_context["num_ctx_override"] = context_override
     wt = WorkerTask(
         task_id=str(uuid.uuid4()),
         step_index=0,
         role=AgentRole.WORKER,
         instruction=task,
         tools=step_tools,
-        context={"messages": list(history)},
+        context=wt_context,
         routing_policy=config.mode.routing_policy,
         privacy_tier=config.mode.privacy_tier,
     )

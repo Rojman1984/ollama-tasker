@@ -1735,3 +1735,69 @@ small and fast; a future session wanting live success-path evidence
 should pull a real tool-capable model instead (e.g. a small
 `qwen2.5`/`llama3.1` variant), which will take longer and use more
 bandwidth/disk.
+
+## REPL/TUI UX sprint, part 2 -- context controls (2026-07-20)
+
+Part 2 of 3 (see part 1's entry above for the sprint's origin).
+
+- [x] **SDD-first:** new SDD 5.6.1a "Context Window Control (`num_ctx`)"
+      documents the precedence order (`num_ctx_override` >
+      local-VRAM-ceiling > manifest `context_window`), the cloud
+      exemption, the GPU data source (same cached detection
+      `apply_gpu_availability()` uses), and the deliberately-rough
+      bytes-per-token estimate's rationale. SDD 7.6's REPL command list
+      updated with `/models`, `/context`, and `/budget`'s new
+      initializes-at-0.0 semantics.
+- [x] `tasker/workers/providers/ollama.py`: `resolve_num_ctx(worker,
+      gpu)` -- cloud exempt (always full manifest value); local capped
+      by remaining VRAM (after the worker's declared `vram_mb`, unified-
+      memory reserve applied first) estimated via a documented rough
+      bytes-per-token constant; no GPU data means no cap (no basis).
+      `OllamaProvider.__init__` gained an optional `gpu: GPUInfo | None`
+      (never auto-loaded -- kept out of the constructor to stay
+      deterministic in tests; real wiring happens in `_build_pipeline()`
+      / `tasker/api/server.py`'s `main()`, both now pass
+      `load_cached_gpu_info()`). `execute()` now always sends
+      `options.num_ctx` -- previously never sent at all, so Ollama
+      silently applied its own 4096 default. `task.context["num_ctx_override"]`
+      (the REPL's `/context` lever) wins over everything.
+- [x] `cli/shell.py`: new `/context <tokens>` (CHAT-mode-scoped, same
+      pattern as `/model`/`/effort`), new `/models` command (+ `/model
+      list` alias) listing DEFAULT/LOCAL/CLOUD groups with tool
+      protocol, max context, and a VRAM-fit hint via `resolve_num_ctx()`;
+      `/budget` now reads a real per-mode pipeline instead of a static
+      placeholder. The REPL now builds one pipeline per mode up front
+      (`_ensure_pipeline()`, called at startup and on every `/mode`/
+      `/secure` switch) and reuses it across turns in that mode -- so
+      `/budget` shows real, accumulating (initially zero) numbers from
+      the moment a mode is entered, not "not active" until a task
+      happens to run, and both CHAT and non-CHAT dispatch calls now pass
+      `pipeline=` to reuse it. `_evict_if_paused()` drops a non-CHAT
+      mode's cached pipeline once its `SessionManager` reaches `PAUSED`,
+      so the next task in that mode starts fresh rather than sitting in
+      `PAUSED` forever within the REPL process (CHAT's own direct-
+      dispatch path never pauses by design, so it's exempt).
+- [x] Tests: `tests/unit/test_provider_ollama.py` (+13 --
+      `TestResolveNumCtx`, `TestOllamaProviderNumCtxPayload`),
+      `tests/unit/test_cli_shell_context.py` (new, 20 tests).
+- [x] Full suite green: **781 tests, OK** (was 748).
+- [x] **Live smoke** (Designlab1, WSL Ollama 127.0.0.1:11435, real cached
+      GPU detection, zero cloud spend): `/budget` showed real
+      `0.0/3000 units (0.0%)` before any task ran; `/models` correctly
+      grouped DEFAULT/CLOUD and showed a real, data-driven VRAM-fit hint
+      on `lfm2.5-local` (`fits ~32768 of 128000 in VRAM` -- this
+      machine's real GTX 1050 Ti 4096MB genuinely caps its 128000-token
+      manifest declaration); two chat turns (one before, one after
+      `/context 4096`) both answered normally with budget staying 0.0
+      throughout (correct -- local calls never consume Ollama Cloud
+      budget).
+
+**Open decisions / known issues:** `/context`/`/model`/`/effort` remain
+CHAT-mode-scoped only (matching the prior sprint's SDD 5.3a pattern) --
+non-CHAT modes' worker selection/context is unaffected by any of these
+levers; extending them to COWORK/CODE/RESEARCH's step-based dispatch
+would need a different design (per-step, not per-session). A `/policy`
+change after a mode's pipeline is already cached does not retroactively
+rebuild that pipeline within the same REPL session (documented
+limitation, same simplification the prior TUI REPL used for its own
+per-mode budget caching).

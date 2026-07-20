@@ -12,6 +12,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 
+from tasker.config.gpu_backends import GPUInfo
 from tasker.session.budget import OllamaSessionBudget
 from tasker.session.concurrency import OllamaCloudConcurrencyManager
 from tasker.tools.normalizer import ToolCallNormalizer
@@ -27,6 +28,58 @@ from tasker.workers.base import (
     WorkerTask,
 )
 from tasker.workers.providers.base import WorkerProviderBase
+
+# Same reserve as WorkerRegistry.apply_gpu_availability() (SDD_ADDENDUM_7.5.md
+# A.3.4) -- a unified-memory GPU's memory_mb is TOTAL SYSTEM RAM, not a
+# dedicated pool, so a fixed reserve is subtracted before treating any of it
+# as usable. Duplicated here (not imported from tasker.workers.registry) to
+# avoid a workers.providers -> workers.registry import, which registry.py
+# doesn't currently need but could plausibly grow into one day.
+_UNIFIED_MEMORY_RESERVE_MB = 6_144
+
+# Deliberately rough, not a precise memory model: a conservative
+# bytes-per-context-token upper bound for KV-cache growth on the small
+# (1-8B) local models this project targets, used only to avoid requesting
+# a context window that cannot possibly fit in a local GPU's remaining
+# VRAM after model weights. An occasionally-too-conservative cap is far
+# better than an OOM crash mid-response.
+_KV_CACHE_BYTES_PER_TOKEN_ESTIMATE = 128 * 1024
+
+
+def resolve_num_ctx(worker: WorkerManifest, gpu: GPUInfo | None) -> tuple[int, bool]:
+    """
+    Resolve the num_ctx to request for *worker* (SDD 5.6.1a).
+
+    Cloud workers (any compute_location other than LOCAL_HARDWARE) are
+    exempt from the VRAM ceiling -- always use the manifest's full
+    context_window, since there's no local GPU constraint to reason
+    about. A local worker is capped to what *gpu*'s remaining VRAM (after
+    the worker's own declared vram_mb) is estimated to fit, if that
+    estimate is lower than the manifest's context_window; with no GPU
+    data available (gpu is None, or it reports no memory_mb), the
+    manifest's value is used as-is -- no cap without a basis for one.
+
+    Returns (num_ctx, capped) -- capped is a "fits in VRAM" hint: False
+    means the manifest's own context_window was used unmodified (no cap
+    applied, or it already fit); True means it was reduced.
+    """
+    requested = worker.context_window
+    if worker.compute_location != ComputeLocation.LOCAL_HARDWARE:
+        return requested, False
+    if gpu is None or not gpu.memory_mb:
+        return requested, False
+
+    usable_mb = gpu.memory_mb
+    if gpu.is_unified_memory:
+        usable_mb = max(0, usable_mb - _UNIFIED_MEMORY_RESERVE_MB)
+    remaining_mb = max(0, usable_mb - (worker.vram_mb or 0))
+    if remaining_mb <= 0:
+        return requested, False
+
+    estimated_max_ctx = int((remaining_mb * 1024 * 1024) // _KV_CACHE_BYTES_PER_TOKEN_ESTIMATE)
+    if estimated_max_ctx <= 0 or estimated_max_ctx >= requested:
+        return requested, False
+    return estimated_max_ctx, True
 
 logger = logging.getLogger(__name__)
 
@@ -146,12 +199,19 @@ class OllamaProvider(WorkerProviderBase):
         concurrency_mgr: OllamaCloudConcurrencyManager | None = None,
         budget: OllamaSessionBudget | None = None,
         *,
+        gpu: GPUInfo | None = None,
         _post_fn: _PostFn | None = None,
         _get_fn: _GetFn | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._concurrency = concurrency_mgr
         self._budget = budget
+        # gpu is caller-supplied, never auto-loaded here -- OllamaProvider
+        # stays free of hidden cache-file I/O so its behavior is fully
+        # deterministic in tests. Production wiring (_build_pipeline() in
+        # tasker/runtime/dispatch.py) passes the real cached GPUInfo, the
+        # same source WorkerRegistry.apply_gpu_availability() already uses.
+        self._gpu = gpu
         self._post_fn = _post_fn or self._default_post
         self._get_fn = _get_fn or self._default_get
 
@@ -208,6 +268,26 @@ class OllamaProvider(WorkerProviderBase):
             }
             if ollama_tools:
                 payload["tools"] = ollama_tools
+
+            # num_ctx (SDD 5.6.1a): task.context["num_ctx_override"] (the
+            # REPL's /context <tokens> lever) always wins when set; otherwise
+            # resolve_num_ctx() applies the local-only VRAM ceiling against
+            # the manifest's own context_window. num_ctx was never sent at
+            # all before this -- Ollama silently applied its own server
+            # default (observed live: 4096, far below several workers'
+            # declared context_window).
+            override = task.context.get("num_ctx_override")
+            if override:
+                num_ctx, capped = int(override), False
+            else:
+                num_ctx, capped = resolve_num_ctx(worker, self._gpu)
+            if capped:
+                logger.warning(
+                    "OllamaProvider: %s context capped to %d tokens (VRAM "
+                    "estimate) from manifest's %d.",
+                    worker.model_id, num_ctx, worker.context_window,
+                )
+            payload["options"] = {"num_ctx": num_ctx}
 
             # 240s default: live-measured against lfm2.5-thinking:latest, a
             # single call routinely takes 90-120+s (heavy <think> output

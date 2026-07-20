@@ -495,6 +495,46 @@ Handles both `LOCAL_HARDWARE` and `OLLAMA_CLOUD` compute locations. The Ollama A
 - Returns `WorkerResult(status=DEFERRED)` immediately if no slot available (never blocks)
 - Raises `OllamaQueueFullError` on HTTP 429; harness catches and triggers fallback
 
+#### 5.6.1a Context Window Control (`num_ctx`)
+
+**Status:** Added after live REPL/TUI UX testing found `num_ctx` was
+never sent at all — Ollama silently applied its own server default
+(observed live: 4096), regardless of a worker's declared
+`context_window`, sometimes far below it.
+
+`OllamaProvider.execute()` now always sends `options.num_ctx`, resolved
+by `resolve_num_ctx(worker, gpu)`:
+
+- **Precedence:** `WorkerTask.context["num_ctx_override"]` (the REPL's
+  `/context <tokens>` lever) always wins when set.
+- **Cloud workers** (any `compute_location` other than
+  `LOCAL_HARDWARE`) are exempt from any ceiling — always use the
+  manifest's full `context_window`. There's no local GPU constraint to
+  reason about for a remote model.
+- **Local workers** are capped to what the resolved `GPUInfo`'s
+  remaining VRAM (after the worker's own declared `vram_mb`) is
+  estimated to fit, via a deliberately rough
+  bytes-per-context-token constant — *not* a precise memory model, just
+  enough to avoid requesting a context window that cannot possibly fit
+  and OOM mid-response. With no GPU data available (no cache, or the
+  cache reports no `memory_mb`), the manifest's value is used as-is —
+  no cap without a basis for one. The same unified-memory reserve as
+  `WorkerRegistry.apply_gpu_availability()` (`SDD_ADDENDUM_7.5.md`
+  A.3.4) is applied before capping.
+- **GPU data source:** the same machine-local hardware-detection cache
+  every other GPU-aware code path uses
+  (`tasker.config.detect.load_cached_gpu_info()`) — read once at
+  provider construction (`_build_pipeline()` in
+  `tasker/runtime/dispatch.py`), never a live subprocess call per
+  request. `OllamaProvider` itself never auto-loads this — its
+  constructor takes an optional `gpu: GPUInfo | None` so the provider
+  stays fully deterministic in tests; production wiring supplies the
+  real cached value.
+
+`resolve_num_ctx()` returns `(num_ctx, capped)` — `capped` is a "fits in
+VRAM" hint surfaced in the REPL's `/models` listing (Section 7.6) for
+local workers whose full manifest `context_window` doesn't fit.
+
 #### 5.6.2 AnthropicProvider
 
 Wraps the Anthropic Messages API. Uses native tool_calls protocol. Handles streaming and non-streaming responses uniformly.
@@ -1080,15 +1120,26 @@ tasker shell                           # enter interactive REPL
 # Interactive REPL slash commands
 /mode <mode>          switch mode
 /workers              show active worker pool with status
+/models               list workers by DEFAULT/LOCAL/CLOUD group, with
+                       tool protocol, max context, and a "fits in VRAM"
+                       hint for local workers (alias: /model list; 5.6.1a)
 /policy <policy>      change routing policy
 /secure [on|off]      toggle SECURE mode
-/budget               show current session budget
+/budget               show current session budget -- initializes at 0.0
+                       the moment a mode is entered (one pipeline built
+                       per mode up front, not lazily on first task; 5.6.1a)
 /checkpoint           manually checkpoint current session
 /resume <id>          resume from checkpoint
-/model <worker_id>    pin CHAT mode to an exact worker (see 5.3a)
+/model <worker_id>    pin CHAT mode to an exact worker (see 5.3a); an
+                       unregistered but Ollama-tag-shaped id offers
+                       dynamic onboarding (pull + probe + register,
+                       SDD_ADDENDUM_PHASE8.md B.4.7)
 /effort <low|med|high> redirect CHAT mode's default worker selection
-/status               show full session status (now includes CHAT's
-                       current model + effort)
+/context <tokens>     override CHAT mode's num_ctx for this REPL
+                       session (5.6.1a); precedes the VRAM ceiling and
+                       the manifest's own context_window
+/status               show full session status (CHAT's current model,
+                       effort, and context override)
 /help                 list all slash commands
 ```
 

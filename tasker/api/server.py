@@ -422,7 +422,15 @@ def main() -> None:
     base_url = os.environ.get("OLLAMA_BASE_URL") or profile.ollama_base_url
     budget = OllamaSessionBudget(plan=profile.ollama_plan, window_start=datetime.now(tz=timezone.utc))
     concurrency_mgr = OllamaCloudConcurrencyManager(profile.ollama_plan)
-    provider_map = {ProviderType.OLLAMA: OllamaProvider(base_url, concurrency_mgr, budget)}
+    # Cached GPU detection (SDD 5.6.1a) -- same source as the requires_gpu
+    # worker cross-check just below.
+    from tasker.config.detect import load_cached_gpu_info as _load_cached_gpu_info
+
+    provider_map = {
+        ProviderType.OLLAMA: OllamaProvider(
+            base_url, concurrency_mgr, budget, gpu=_load_cached_gpu_info(),
+        )
+    }
 
     if _DEFAULT_REGISTRY_YAML.exists():
         registry = WorkerRegistry.load_from_yaml(_DEFAULT_REGISTRY_YAML)

@@ -6,6 +6,7 @@ All HTTP is mocked via _post_fn / _get_fn injection.
 import json
 import unittest
 
+from tasker.config.gpu_backends import GPUInfo
 from tasker.session.concurrency import OllamaCloudConcurrencyManager
 from tasker.workers.base import (
     AgentRole,
@@ -25,7 +26,7 @@ from tasker.workers.base import (
     WorkerStatus,
     WorkerTask,
 )
-from tasker.workers.providers.ollama import OllamaProvider, format_tool_result_message
+from tasker.workers.providers.ollama import OllamaProvider, format_tool_result_message, resolve_num_ctx
 
 
 # ------------------------------------------------------------------ #
@@ -138,10 +139,12 @@ def _make_post_sequence(responses: list[tuple[int, dict]], captured: list | None
 
 
 def _provider(post_status=200, post_response=None, get_status=200, get_response=None,
-              concurrency_mgr=None, captured_payloads: list | None = None) -> OllamaProvider:
+              concurrency_mgr=None, captured_payloads: list | None = None,
+              gpu=None) -> OllamaProvider:
     return OllamaProvider(
         base_url="http://localhost:11434",
         concurrency_mgr=concurrency_mgr,
+        gpu=gpu,
         _post_fn=_make_post(post_status, post_response or _ok_response(), captured_payloads),
         _get_fn=_make_get(get_status, get_response or {"models": []}),
     )
@@ -524,6 +527,125 @@ class TestOllamaProviderBudgetRecording(unittest.IsolatedAsyncioTestCase):
         p = _provider(post_response=_ok_response())
         result = await p.execute(_task(), _manifest(ComputeLocation.OLLAMA_CLOUD))
         self.assertEqual(result.status, WorkerStatus.SUCCESS)
+
+
+class TestResolveNumCtx(unittest.TestCase):
+    """resolve_num_ctx() -- SDD 5.6.1a's local-only VRAM ceiling."""
+
+    def test_cloud_worker_always_gets_full_manifest_context_no_gpu(self):
+        m = _manifest(ComputeLocation.OLLAMA_CLOUD)
+        m.context_window = 200_000
+        num_ctx, capped = resolve_num_ctx(m, gpu=None)
+        self.assertEqual(num_ctx, 200_000)
+        self.assertFalse(capped)
+
+    def test_cloud_worker_exempt_even_with_tiny_gpu(self):
+        m = _manifest(ComputeLocation.OLLAMA_CLOUD)
+        m.context_window = 200_000
+        gpu = GPUInfo(vendor="nvidia", name="tiny", memory_mb=2048, is_unified_memory=False)
+        num_ctx, capped = resolve_num_ctx(m, gpu=gpu)
+        self.assertEqual(num_ctx, 200_000)
+        self.assertFalse(capped)
+
+    def test_local_worker_no_gpu_data_uses_manifest_value_uncapped(self):
+        m = _manifest(ComputeLocation.LOCAL_HARDWARE)
+        m.context_window = 32768
+        num_ctx, capped = resolve_num_ctx(m, gpu=None)
+        self.assertEqual(num_ctx, 32768)
+        self.assertFalse(capped)
+
+    def test_local_worker_gpu_with_no_memory_mb_uses_manifest_value(self):
+        m = _manifest(ComputeLocation.LOCAL_HARDWARE)
+        m.context_window = 32768
+        gpu = GPUInfo(vendor="nvidia", name="?", memory_mb=None, is_unified_memory=False)
+        num_ctx, capped = resolve_num_ctx(m, gpu=gpu)
+        self.assertEqual(num_ctx, 32768)
+        self.assertFalse(capped)
+
+    def test_local_worker_plenty_of_vram_not_capped(self):
+        m = _manifest(ComputeLocation.LOCAL_HARDWARE)
+        m.context_window = 8192
+        m.vram_mb = 1000
+        gpu = GPUInfo(vendor="nvidia", name="big", memory_mb=24_000, is_unified_memory=False)
+        num_ctx, capped = resolve_num_ctx(m, gpu=gpu)
+        self.assertEqual(num_ctx, 8192)
+        self.assertFalse(capped)
+
+    def test_local_worker_small_gpu_gets_capped(self):
+        m = _manifest(ComputeLocation.LOCAL_HARDWARE)
+        m.context_window = 200_000   # absurdly large relative to the GPU
+        m.vram_mb = 2000
+        gpu = GPUInfo(vendor="nvidia", name="small", memory_mb=4096, is_unified_memory=False)
+        num_ctx, capped = resolve_num_ctx(m, gpu=gpu)
+        self.assertTrue(capped)
+        self.assertLess(num_ctx, 200_000)
+        self.assertGreater(num_ctx, 0)
+
+    def test_local_worker_no_vram_remaining_after_weights_uncapped_no_basis(self):
+        m = _manifest(ComputeLocation.LOCAL_HARDWARE)
+        m.context_window = 8192
+        m.vram_mb = 5000
+        gpu = GPUInfo(vendor="nvidia", name="tiny", memory_mb=4096, is_unified_memory=False)
+        num_ctx, capped = resolve_num_ctx(m, gpu=gpu)
+        self.assertEqual(num_ctx, 8192)
+        self.assertFalse(capped)
+
+    def test_unified_memory_reserve_applied_before_capping(self):
+        m = _manifest(ComputeLocation.LOCAL_HARDWARE)
+        m.context_window = 200_000
+        m.vram_mb = 2000
+        # 8GB total "VRAM" (really system RAM) -- after the 6144MB unified
+        # reserve, only ~1.9GB is usable, well under context_window's needs.
+        gpu = GPUInfo(vendor="amd_apu", name="apu", memory_mb=8192, is_unified_memory=True)
+        num_ctx, capped = resolve_num_ctx(m, gpu=gpu)
+        self.assertTrue(capped)
+
+
+class TestOllamaProviderNumCtxPayload(unittest.IsolatedAsyncioTestCase):
+    """execute() actually sends the resolved num_ctx in options -- this
+    was never sent at all before (Ollama silently applied its own 4096
+    server default)."""
+
+    async def test_local_worker_sends_manifest_context_when_no_gpu_data(self):
+        captured: list = []
+        p = _provider(post_response=_ok_response(), captured_payloads=captured, gpu=None)
+        await p.execute(_task(), _manifest(ComputeLocation.LOCAL_HARDWARE))
+        self.assertEqual(captured[0]["options"], {"num_ctx": 32768})
+
+    async def test_cloud_worker_sends_full_manifest_context_regardless_of_gpu(self):
+        captured: list = []
+        gpu = GPUInfo(vendor="nvidia", name="tiny", memory_mb=2048, is_unified_memory=False)
+        p = _provider(post_response=_ok_response(), captured_payloads=captured, gpu=gpu)
+        await p.execute(_task(), _manifest(ComputeLocation.OLLAMA_CLOUD))
+        self.assertEqual(captured[0]["options"], {"num_ctx": 32768})
+
+    async def test_num_ctx_override_in_task_context_wins(self):
+        captured: list = []
+        p = _provider(post_response=_ok_response(), captured_payloads=captured)
+        task = _task(context={"num_ctx_override": 2048})
+        await p.execute(task, _manifest(ComputeLocation.LOCAL_HARDWARE))
+        self.assertEqual(captured[0]["options"], {"num_ctx": 2048})
+
+    async def test_num_ctx_override_wins_over_vram_cap_too(self):
+        captured: list = []
+        gpu = GPUInfo(vendor="nvidia", name="small", memory_mb=4096, is_unified_memory=False)
+        p = _provider(post_response=_ok_response(), captured_payloads=captured, gpu=gpu)
+        m = _manifest(ComputeLocation.LOCAL_HARDWARE)
+        m.context_window = 200_000
+        m.vram_mb = 2000
+        task = _task(context={"num_ctx_override": 16384})
+        await p.execute(task, m)
+        self.assertEqual(captured[0]["options"], {"num_ctx": 16384})
+
+    async def test_capped_local_worker_sends_reduced_num_ctx(self):
+        captured: list = []
+        gpu = GPUInfo(vendor="nvidia", name="small", memory_mb=4096, is_unified_memory=False)
+        p = _provider(post_response=_ok_response(), captured_payloads=captured, gpu=gpu)
+        m = _manifest(ComputeLocation.LOCAL_HARDWARE)
+        m.context_window = 200_000
+        m.vram_mb = 2000
+        await p.execute(_task(), m)
+        self.assertLess(captured[0]["options"]["num_ctx"], 200_000)
 
 
 if __name__ == "__main__":

@@ -448,3 +448,53 @@ unit-tested (`test_onboarding.py`'s
 than forcing a second, larger tool-capable download live. Local only;
 zero Ollama Cloud spend (the one live `/api/pull` was against a local,
 not `:cloud`-tagged, tag).
+
+## H14. Context controls -- num_ctx wiring, /context, /models, /budget init (2026-07-20)
+
+New sprint (REPL/TUI UX package), part 2 of 3.
+
+### H14.1 Unit tests
+```bash
+python -m unittest tests.unit.test_provider_ollama.TestResolveNumCtx tests.unit.test_provider_ollama.TestOllamaProviderNumCtxPayload tests.unit.test_cli_shell_context -v
+```
+Covers: `resolve_num_ctx()` (`tasker/workers/providers/ollama.py`) --
+cloud workers always get the manifest's full `context_window` regardless
+of GPU data; local workers with no GPU data are left uncapped (no basis
+to cap on); local workers get capped when the VRAM estimate is lower
+than the manifest's value, including the unified-memory reserve applied
+first; `OllamaProvider.execute()` actually sends the resolved value in
+`options.num_ctx` (was never sent at all before), and
+`task.context["num_ctx_override"]` wins over everything, including the
+VRAM cap. `cli/shell.py`: `_print_budget()` (initializes at 0.0, shows
+accumulated usage, handles a failed-to-build pipeline gracefully),
+`_print_models()` (DEFAULT/LOCAL/CLOUD grouping, tool protocol + max
+context columns, the VRAM-fit hint), `/context <tokens>` (set/get/reject
+non-positive), `/models` and its `/model list` alias, and the REPL's
+per-mode pipeline caching (`_ensure_pipeline`/`_evict_if_paused`) -- one
+`_build_pipeline()` call per mode for the whole session (not per turn),
+the same pipeline object reused across chat turns so budget genuinely
+accumulates, and a pipeline whose session went `PAUSED` is evicted so
+the next task in that mode rebuilds fresh.
+
+### H14.2 Live: real VRAM ceiling + budget + context override
+```bash
+OLLAMA_BASE_URL=http://127.0.0.1:11435 TASKER_PROFILE=tier2_designlab tasker-cli shell
+tasker> /budget
+tasker> /models
+tasker> Hello
+tasker> /budget
+tasker> /context 4096
+tasker> Hi again
+```
+Live-verified 2026-07-20 (Designlab1, WSL Ollama, real cached GPU
+detection -- GTX 1050 Ti 4096MB): `/budget` showed `budget=0.0/3000
+units (0.0%)` *before* any task ran, not the old "not active" message.
+`/models` correctly grouped `lfm2.5-local` under DEFAULT and all 8
+`:cloud`/`direct_cloud` workers under CLOUD, and showed a real,
+data-driven VRAM-fit hint on `lfm2.5-local`: `(fits ~32768 of 128000 in
+VRAM)` -- its manifest declares a 128000 context window, but this
+machine's real GPU cache correctly capped the estimate to 32768. Both
+chat turns answered normally (budget stayed 0.0 -- correct, local calls
+never consume Ollama Cloud budget), including the second turn after
+`/context 4096` was set, confirming the override was accepted and sent
+without breaking the call. Local only, zero cloud spend.
