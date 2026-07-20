@@ -366,6 +366,70 @@ so Tier 4 is reached only via a purpose-built profile such as
 
 ---
 
+### 5.3a CHAT Mode Direct Dispatch
+
+**Status:** Added after a live bug report (Roland's cowork/chat test
+session): a CHAT-mode "Hello" was routed through the full orchestrator
+pipeline (`plan()` → step dispatch → `synthesize()`) like every other
+mode. Three problems observed live: (1) the worker's instruction was the
+*planner's generated step description* ("Processing available
+workers..."), not the user's actual message — a pure hallucination
+artifact of round-tripping a one-line greeting through a JSON planning
+call; (2) three sequential LLM calls (plan, worker turn, synthesize) took
+~56s to first response for what should be an instant reply; (3) CHAT's
+multi-turn nature (a REPL conversation) had no representation in the
+pipeline at all — every turn was dispatched as an independent, context-
+free task.
+
+**Rule:** CHAT mode never calls `OrchestratorBase.plan()` or
+`synthesize()`. It is the one mode that bypasses the orchestrator tier
+entirely — a single direct call to a chat worker via the same
+`run_tool_loop()` machinery every other mode's step dispatch uses, with
+the user's raw message as `WorkerTask.instruction` and the running REPL
+conversation as `WorkerTask.context["messages"]`. CODE, COWORK, RESEARCH,
+and SECURE are unaffected — they still plan/execute-steps/synthesize as
+before; this bypass is CHAT-specific because CHAT is the only mode
+defined as a single-turn conversational exchange with no multi-step
+decomposition to plan in the first place (see 5.1's Mode Definitions
+table: CHAT's own tier is 0/1, meaning even its "orchestrator" is either
+no model at all or a single small model — round-tripping through it to
+plan a one-step "answer the question" plan was pure overhead).
+
+**Conversation history:** owned by the REPL session (`cli/shell.py`'s
+`_repl()`), not by any persisted session/checkpoint state — a chat
+history list accumulates `{"role": "user"|"assistant", "content": ...}`
+turns across the interactive session and is passed to the worker every
+turn via `WorkerTask.context["messages"]`, matching the existing
+non-chat convention (`_build_messages()` in
+`tasker/workers/providers/ollama.py` already prefers `context["messages"]`
+over re-appending `instruction` when history is present — chat dispatch
+needed no provider changes). History is in-memory only, cleared when the
+REPL process exits; SDD 9's checkpoint/resume machinery is a COWORK-mode
+concern and does not apply here — a chat turn is never checkpointed or
+paused mid-flight.
+
+**Worker selection:** default is the always-loaded local worker
+(`lfm2.5-local`) so a plain greeting never needs a cold model load or a
+cloud call. Two REPL levers redirect it, both scoped to the current
+session only (not persisted):
+  - `/model <worker_id>` — pin an exact worker by registry id. Always
+    wins over the default and over `/effort`.
+  - `/effort <low|med|high>` — when no `/model` is pinned, `med` (the
+    REPL default) keeps the always-loaded local default; `low` re-selects
+    via `RoutingPolicy.SPEED_OPTIMIZED`, `high` via
+    `RoutingPolicy.CAPABILITY_FIRST` — reusing `WorkerSelector`'s
+    existing ranking logic rather than hardcoding a specific "stronger"
+    model id, so it stays correct as the worker registry changes.
+    `high` may select a cloud worker if one ranks highest by capability
+    score; this is intentional (the whole point of the lever is letting
+    the user redirect to a stronger model), not a bug — a user choosing
+    `/effort high` is choosing to potentially spend cloud budget.
+
+Both are shown in `/status`. See Section 7.6 for the exact REPL command
+syntax.
+
+---
+
 ### 5.4 Worker Registry
 
 **Responsibility:** Maintains the catalog of all registered workers. Supports capability filtering, liveness checks, and manifest serialization.
@@ -1021,7 +1085,10 @@ tasker shell                           # enter interactive REPL
 /budget               show current session budget
 /checkpoint           manually checkpoint current session
 /resume <id>          resume from checkpoint
-/status               show full session status
+/model <worker_id>    pin CHAT mode to an exact worker (see 5.3a)
+/effort <low|med|high> redirect CHAT mode's default worker selection
+/status               show full session status (now includes CHAT's
+                       current model + effort)
 /help                 list all slash commands
 ```
 

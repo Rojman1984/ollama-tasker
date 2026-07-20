@@ -24,10 +24,12 @@ from tasker.workers.base import WorkerResult
 # generic, but "successfully" + "file"/"command" rarely appears unless a
 # real side-effect claim is being made.
 _SIDE_EFFECT_VERBS = frozenset({
-    "created", "creates", "wrote", "written", "writes", "saved", "saves",
-    "executed", "executes", "ran", "run", "committed", "commits",
-    "deleted", "deletes", "modified", "modifies", "updated", "updates",
-    "verified", "verifies", "generated", "generates",
+    "create", "created", "creates", "write", "wrote", "written", "writes",
+    "save", "saved", "saves", "execute", "executed", "executes",
+    "run", "ran", "commit", "committed", "commits", "delete", "deleted",
+    "deletes", "modify", "modified", "modifies", "update", "updated",
+    "updates", "verify", "verified", "verifies", "generate", "generated",
+    "generates",
 })
 _SIDE_EFFECT_OBJECTS = frozenset({
     "file", "files", "path", "directory", "folder", "command", "script",
@@ -46,7 +48,7 @@ def _claims_side_effect(output: str) -> bool:
     return has_verb and has_object
 
 
-def check_side_effect_honesty(result: WorkerResult) -> WorkerResult:
+def check_side_effect_honesty(result: WorkerResult, *context_texts: str) -> WorkerResult:
     """
     If *result* claims a side effect in its output text but its
     tool_results is empty (no tool was actually invoked this step),
@@ -55,8 +57,21 @@ def check_side_effect_honesty(result: WorkerResult) -> WorkerResult:
     unverified claim as a plain success. Mutates and returns *result*;
     a result with no such claim, or one backed by at least one tool
     call, is returned unchanged.
+
+    *context_texts* -- typically the original task and/or the step
+    description -- gate the guard: it only ever fires when at least one
+    of them itself implies a side effect was requested. Live bug: gating
+    on the model's OUTPUT text alone false-positived on a plain "Hello"
+    greeting whose reply merely *mentioned* file/command language (e.g.
+    an offer like "let me know if you'd like me to create a file")
+    without claiming to have done anything -- nothing about the request
+    itself asked for a side effect, so the guard should never have looked
+    at the answer's wording in the first place. Passing no context_texts
+    at all disables the guard entirely (safer default than firing blind).
     """
     if result.tool_results:
+        return result
+    if not any(_claims_side_effect(text) for text in context_texts if text):
         return result
     if not _claims_side_effect(result.output or ""):
         return result

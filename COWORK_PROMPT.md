@@ -113,7 +113,46 @@ interim REPL from the session before this one has been superseded.
 | A8.3 | Addendum: Textual TUI skeleton (TuiApp, WelcomeScreen, status bar) | ✅ COMPLETE |
 | A8.4–8.5 | Addendum: SetupWizardScreen + ModelSelectorScreen, HarnessPanel | ⬜ NOT STARTED |
 
-**Last completed task:** Cowork honesty + plan-parse resilience bug-fix
+**Last completed task:** CHAT mode direct dispatch + `/model` + `/effort`
++ honesty-guard gating, ✅ COMPLETE (2026-07-20; third live bug from
+Roland the same day, this time from his own chat-mode test — one
+dispatch, three issues). Bug: a plain "Hello" was routed through the
+full orchestrator pipeline; the worker received the *planner's generated
+step description* ("Processing available workers...") instead of the
+user's actual message, and three sequential LLM calls took ~56s to first
+response. SDD-first: new SDD 5.3a documents CHAT's plan/synthesize
+bypass, REPL-owned conversation history, and the `/model`/`/effort`
+worker-selection contract; SDD 7.6's REPL command list updated. Fix 1:
+new `_run_chat_task()` (`tasker/runtime/dispatch.py`) — exactly one
+`run_tool_loop()` call with the raw message as `instruction` and the
+REPL's running history as `context["messages"]`, no plan()/synthesize()
+at all; `cli/shell.py`'s `_repl()` owns `chat_history` and routes
+chat-mode input through it, every other mode unaffected. Fix 2: default
+chat worker is the always-loaded `lfm2.5-local`; `/model <worker_id>`
+pins an exact worker (always wins); `/effort <low|med|high>` (default
+`med`) re-selects via `SPEED_OPTIMIZED`/`COST_OPTIMIZED`/
+`CAPABILITY_FIRST` when no `/model` is pinned, reusing existing
+`WorkerSelector` ranking rather than hardcoding a "stronger model" id;
+`/status` now shows `chat_model`/`chat_effort`. Fix 3:
+`check_side_effect_honesty()` gained a `*context_texts` gate — only
+fires when the request itself implied a side effect, fixing a false
+positive where a "Hello" reply's friendly offer to "run commands or
+create files" tripped the guard even though nothing was actually
+claimed; also fixed the verb set's missing present-tense forms
+("create"/"write"/"run") that would have silently defeated the gate.
+Suite 703 → 730 (+27). Live acceptance (Designlab1, zero cloud spend):
+`tasker-cli --mode chat "Hello"` → 4.24s real time, conversational
+reply, zero warnings, no `[unverified]` warning; multi-turn history
+live-verified via `tasker-cli shell` ("My name is Roland." → "What is my
+name?" correctly referenced "Roland"). Evidence:
+docs/TASKER_CHECKLIST.md → "CHAT mode direct dispatch + `/model` +
+`/effort` + honesty-guard gating (2026-07-20)".
+
+---
+
+## Previous completed task (kept for reference)
+
+Cowork honesty + plan-parse resilience bug-fix
 session, ✅ COMPLETE (2026-07-20; second P1 from Roland's live cowork
 testing the same day, queued right after the provider-selection fix
 below). Bug: "create a text file with hello from tasker! and provide the
@@ -218,9 +257,22 @@ ModelSelectorScreen (wraps `tasker/setup/readiness.py`'s
 `WorkerRegistryUpdated`) per B.11. Then Phase 8.5 (HarnessPanel, built
 on `tasker/runtime/dispatch.py`). TASKER-P1 manual verification for 8.3
 still open (no access this session, same as every prior phase that
-needed it). Both of today's bug-fix sessions were interrupt-driven by
-live testing, not a step in the addendum sequence — this queue is
+needed it). All three of today's bug-fix sessions were interrupt-driven
+by live testing, not a step in the addendum sequence — this queue is
 otherwise unchanged.
+
+**Files modified this session (2026-07-20, third bug-fix pass —
+CHAT mode direct dispatch):** `docs/SDD.md` (new 5.3a, 7.6 REPL
+commands), `tasker/runtime/dispatch.py` (`_run_chat_task`,
+`_select_chat_worker`, `DEFAULT_CHAT_WORKER_ID`, `_EFFORT_LEVELS`, and
+the `_execute_steps()` honesty-guard call site updated to pass
+`task`/`step.description` as context), `cli/shell.py` (`/model`,
+`/effort`, `/status`, chat-mode dispatch routing, `chat_history` state),
+`tasker/tools/honesty.py` (`*context_texts` gate, expanded verb set),
+`tests/unit/test_chat_dispatch.py` (new, 12 tests),
+`tests/unit/test_cli_shell.py` (+11), `tests/unit/test_honesty.py` (+4),
+`docs/TESTING_GUIDE.md` (new H12), `docs/TASKER_CHECKLIST.md`,
+`CLAUDE.md`, `COWORK_PROMPT.md`.
 
 **Files modified this session (2026-07-20, second bug-fix pass):**
 `tasker/orchestrator/_parse.py` (`_tolerant_repair`, `_plan_parse_error`,
@@ -246,6 +298,13 @@ otherwise unchanged.
 (new H10)*.)*
 
 **Open decisions / blockers:**
+- CHAT's direct-dispatch path has no `SessionManager.tick()`/pause/
+  checkpoint involvement by design (a chat turn is a single instant
+  call); cloud budget from a chat call routed to a cloud worker (via
+  `/effort high` or an explicit `/model`) is still recorded on the
+  shared budget but never throttle/pause-gated the way COWORK's step
+  loop is — worth reconsidering if that becomes a real
+  budget-exhaustion vector in practice.
 - Fix 1's re-ask ladder (`plan_with_repair`) wasn't live-exercised by
   the H11.2 re-run specifically — that run's planner JSON parsed on the
   first try. Coverage is unit-level today; worth confirming end-to-end

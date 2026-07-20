@@ -352,6 +352,96 @@ python -m unittest tests.unit.test_orchestrator_nano -v
 
 *(Update this section at the end of every Cowork or Code session)*
 
+**Last worked on:** CHAT mode direct dispatch + `/model` + `/effort` +
+honesty-guard gating -- the third live bug from Roland the same day, this
+time from his own chat-mode test (one dispatch, three issues). Full
+write-up in `docs/TASKER_CHECKLIST.md` → "CHAT mode direct dispatch +
+`/model` + `/effort` + honesty-guard gating (2026-07-20)".
+
+**The bug:** a plain "Hello" in CHAT mode was routed through the full
+orchestrator pipeline like every other mode. The worker received the
+*planner's generated step description* ("Processing available
+workers...") instead of the user's actual message — a pure hallucination
+artifact of round-tripping a one-line greeting through a JSON planning
+call — and three sequential LLM calls (plan, worker turn, synthesize)
+took ~56s to first response.
+
+**SDD-first:** new SDD 5.3a "CHAT Mode Direct Dispatch" — CHAT never
+calls `plan()`/`synthesize()`, conversation history is REPL-session-owned
+(in-memory only, no checkpoint/resume), `/model`/`/effort` worker-
+selection contract. SDD 7.6's REPL command list updated.
+
+**Fix 1 — direct dispatch:** new `_run_chat_task()`
+(`tasker/runtime/dispatch.py`) makes exactly one `run_tool_loop()` call
+with the raw user message as `instruction` and the REPL's running
+history as `context["messages"]`. `cli/shell.py`'s `_repl()` owns
+`chat_history: list[dict]`, routing chat-mode input through
+`_run_chat_task()`; every other mode is unaffected (still full
+plan/execute-steps/synthesize via `_run_task()`). One-shot CLI
+(`tasker-cli --mode chat "<msg>"`) also uses `_run_chat_task()` with a
+fresh empty history per call.
+
+**Fix 2 — `/model` + `/effort`:** default chat worker is the
+always-loaded local model (`lfm2.5-local`). `/model <worker_id>` pins an
+exact worker, always wins. `/effort <low|med|high>` (default `med`)
+re-selects via `SPEED_OPTIMIZED`/`COST_OPTIMIZED`/`CAPABILITY_FIRST`
+when no `/model` is pinned — reuses existing `WorkerSelector` ranking
+rather than hardcoding a "stronger model" id. `/status` now shows
+`chat_model=...  chat_effort=...`.
+
+**Fix 3 — honesty guard over-firing:** `check_side_effect_honesty()`
+(`tasker/tools/honesty.py`) gained a `*context_texts` gate — only fires
+when the *request itself* (task/step description) implied a side
+effect, not merely because the reply's wording happened to contain
+file/command-shaped words. Root cause of the false positive: a "Hello"
+got a friendly reply offering to "run any commands or create files" — an
+offer, not a claim — and the old heuristic only ever looked at the
+answer. Also fixed while gating: the verb set was missing base/
+present-tense forms ("create", "write", "run" — only past-tense
+"created"/"wrote" existed), which would have silently defeated the gate
+on present-tense task wording like "create a text file...".
+
+**Tests:** 703 → 730 (+27): `test_chat_dispatch.py` (new, 12),
+`test_cli_shell.py` (+11), `test_honesty.py` (+4). Full suite green.
+
+**Live acceptance** (Designlab1, WSL Ollama 127.0.0.1:11435,
+`lfm2.5-thinking:latest`, zero cloud spend): `tasker-cli --mode chat
+"Hello"` → **4.24s real time** (well under the 10s bar), conversational
+reply, zero warnings under default quiet logging and none beyond
+pre-existing unrelated logs even at `TASKER_LOG_LEVEL=WARNING` — no
+`[unverified]` warning. Multi-turn history live-verified via `tasker-cli
+shell`: "My name is Roland." then "What is my name?" correctly
+referenced "Roland". `/status` showed `chat_model=lfm2.5-local
+(default)  chat_effort=med`.
+
+**Files modified:** `docs/SDD.md` (new 5.3a, 7.6 REPL commands),
+`tasker/runtime/dispatch.py` (`_run_chat_task`, `_select_chat_worker`,
+`DEFAULT_CHAT_WORKER_ID`, `_EFFORT_LEVELS`), `cli/shell.py` (`/model`,
+`/effort`, `/status`, chat-mode dispatch routing, `chat_history` state),
+`tasker/tools/honesty.py` (`*context_texts` gate, expanded verb set),
+`tasker/runtime/dispatch.py`'s `_execute_steps()` call site (passes
+`task`/`step.description` as context), `tests/unit/test_chat_dispatch.py`
+(new), `tests/unit/test_cli_shell.py`, `tests/unit/test_honesty.py`,
+`docs/TESTING_GUIDE.md` (new H12), `docs/TASKER_CHECKLIST.md`, CLAUDE.md,
+COWORK_PROMPT.md.
+
+**Next task:** SDD_ADDENDUM_PHASE8.md Phase 8.4 — SetupWizardScreen +
+ModelSelectorScreen (unchanged, still queued — today was three
+interrupt-driven live-testing bug-fix sessions, not addendum work).
+
+**Blockers:** None.
+
+**Open decisions:** CHAT's direct-dispatch path has no
+`SessionManager.tick()`/pause/checkpoint involvement by design (a chat
+turn is a single instant call); cloud budget from a chat call routed to
+a cloud worker (via `/effort high` or an explicit `/model`) is still
+recorded but never throttle/pause-gated the way COWORK's step loop is —
+worth reconsidering if that becomes a real budget-exhaustion vector.
+
+---
+
+## Previous Session Notes (Cowork honesty + plan-parse resilience bug fixes, kept for reference)
+
 **Last worked on:** Cowork honesty + plan-parse resilience bug-fix
 session -- the second P1 from Roland's live cowork testing in the same
 day, queued right after the provider-selection fix below. Full write-up

@@ -348,3 +348,56 @@ text file has been created at text_file.txt.") matched reality, so the
 honesty guard correctly left it unflagged (a tool call really did run).
 Confirms the fix end-to-end: a real file was produced and the answer was
 truthful. Local only, zero cloud spend.
+
+## H12. CHAT mode direct dispatch + /model + /effort + honesty-guard gating (2026-07-20)
+
+Third live bug this day, from Roland's own chat-mode test: CHAT was
+routed through the full orchestrator pipeline like every other mode. The
+worker received the planner's generated step description ("Processing
+available workers...") instead of the user's actual "Hello" -- a pure
+hallucination artifact -- and three sequential LLM calls (plan, worker
+turn, synthesize) took ~56s to first response. Same session also fixed
+the honesty guard over-firing on a plain greeting.
+
+### H12.1 Unit tests
+```bash
+python -m unittest tests.unit.test_chat_dispatch tests.unit.test_cli_shell tests.unit.test_honesty -v
+```
+Covers: `_select_chat_worker()` (`tasker/runtime/dispatch.py`) -- `/model`
+always wins; default is the always-loaded local worker
+(`lfm2.5-local`) at effort `med`; `low`/`high` effort re-select via
+`SPEED_OPTIMIZED`/`CAPABILITY_FIRST` when no `/model` is pinned; an
+unknown or unavailable `/model` id raises cleanly.  `_run_chat_task()`
+-- the worker receives the user's raw message as `instruction`, never a
+planner artifact; exactly one provider call (no plan/synthesize calls --
+proven by passing a pipeline whose orchestrator slot is `None` and
+confirming no `AttributeError`); conversation history accumulates across
+turns and is threaded to the next call; a failed turn does not poison
+history with an unanswered user message.  `cli/shell.py`'s `_repl()` --
+`/model`, `/effort`, `/status` (now showing `chat_model`/`chat_effort`),
+and that chat-mode input dispatches through `_run_chat_task()` while
+every other mode still dispatches through the full `_run_task()`
+pipeline, unaffected.  `tasker/tools/honesty.py`'s gating fix -- the
+guard now only fires when the *task or step text itself* implies a side
+effect (a regression test reproduces the exact false positive: a
+friendly greeting reply that merely offers "let me know if you'd like me
+to run any commands or create files" no longer trips the guard, since
+nothing about a plain "Hello" implied one).
+
+### H12.2 Live acceptance: a chat greeting answers fast, cleanly, no warnings
+```bash
+OLLAMA_BASE_URL=http://127.0.0.1:11435 TASKER_PROFILE=tier2_designlab \
+  tasker-cli --mode chat "Hello"
+```
+Live-verified 2026-07-20 (Designlab1, WSL Ollama,
+`lfm2.5-thinking:latest`): **4.24s real time** (well under the 10s bar),
+a genuinely conversational reply, zero warnings printed (default quiet
+logging) and none present even at `TASKER_LOG_LEVEL=WARNING` beyond
+pre-existing, unrelated provider-wiring/tool-narrowing logs -- no
+`[unverified]` honesty-guard warning. Multi-turn history also
+live-verified through `tasker-cli shell`: "My name is Roland." followed
+by "What is my name?" produced a reply that correctly referenced
+"Roland", confirming `WorkerTask.context["messages"]` carried real
+conversation history across REPL turns. `/status` showed
+`chat_model=lfm2.5-local (default)  chat_effort=med` as expected. Local
+only, zero cloud spend.

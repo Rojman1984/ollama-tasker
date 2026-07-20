@@ -312,7 +312,7 @@ async def _execute_steps(
         try:
             result = await run_tool_loop(wt, worker, provider, cwd=Path.cwd())
             before = result.output
-            result = check_side_effect_honesty(result)
+            result = check_side_effect_honesty(result, task, step.description)
             if result.output != before:
                 print(f"  [warn] step {step.index}: unverified side-effect claim (no tool calls)")
             status_str = "ok" if result.status == WorkerStatus.SUCCESS else result.status.value
@@ -472,3 +472,136 @@ async def _resume_task(
         print(f"\n{output}")
     except Exception as exc:
         print(f"Synthesis error: {exc}")
+
+
+# --------------------------------------------------------------------------- #
+# CHAT mode direct dispatch (SDD 5.3a)
+# --------------------------------------------------------------------------- #
+
+DEFAULT_CHAT_WORKER_ID = "lfm2.5-local"
+
+_EFFORT_LEVELS = ("low", "med", "high")
+_DEFAULT_EFFORT = "med"
+
+
+def _effort_policy(effort: str):
+    from tasker.workers.base import RoutingPolicy
+
+    return {
+        "low":  RoutingPolicy.SPEED_OPTIMIZED,
+        "med":  RoutingPolicy.COST_OPTIMIZED,
+        "high": RoutingPolicy.CAPABILITY_FIRST,
+    }.get(effort, RoutingPolicy.COST_OPTIMIZED)
+
+
+def _select_chat_worker(
+    registry: WorkerRegistry,
+    config,
+    concurrency_mgr,
+    model_override: str | None,
+    effort: str,
+):
+    """
+    CHAT mode's worker choice (SDD 5.3a). /model always wins when set.
+    Otherwise the default is the always-loaded local worker as long as
+    effort is "med" (the REPL default) -- redirecting to a different,
+    often costlier, worker only happens on explicit user intent, either
+    /model or a non-default /effort.
+    """
+    from tasker.workers.base import Capability, TaskerPolicyError
+    from tasker.workers.registry import WorkerSelector
+
+    if model_override:
+        worker = registry.get(model_override)
+        if worker is None or not worker.available:
+            raise TaskerPolicyError(
+                f"Model '{model_override}' not found or unavailable — "
+                f"use /workers to see registered worker ids."
+            )
+        return worker
+
+    default = registry.get(DEFAULT_CHAT_WORKER_ID)
+    if effort == _DEFAULT_EFFORT and default is not None and default.available:
+        return default
+
+    return WorkerSelector.select(
+        registry.list_all(), {Capability.TOOL_USE}, _effort_policy(effort),
+        config.mode.privacy_tier, slots_available=concurrency_mgr.slots_available,
+        should_throttle=False,
+    )
+
+
+async def _run_chat_task(
+    task: str,
+    registry: WorkerRegistry,
+    store: CheckpointStore,
+    history: list[dict],
+    policy_override=None,
+    *,
+    pipeline=None,
+    model_override: str | None = None,
+    effort: str = _DEFAULT_EFFORT,
+) -> None:
+    """
+    CHAT mode direct dispatch (SDD 5.3a): one call to the chat worker with
+    the user's raw message and the running REPL conversation history --
+    no orchestrator plan()/synthesize() calls. Root cause fixed: those
+    two extra LLM calls added ~tens of seconds on top of the worker's own
+    turn, and the worker was receiving a planner-generated step
+    description instead of the user's actual message.
+
+    *history* is mutated in place (user turn appended before dispatch,
+    assistant turn appended after a successful reply) so the caller's
+    REPL session accumulates real multi-turn context across calls.
+    """
+    from tasker.tools.bundles import get_definitions, narrow_bundle_to_step
+    from tasker.tools.honesty import check_side_effect_honesty
+    from tasker.tools.loop import run_tool_loop
+    from tasker.workers.base import AgentRole, WorkerStatus, WorkerTask
+
+    if pipeline is None:
+        pipeline = _build_pipeline("chat", store, policy_override)
+        if pipeline is None:
+            return
+    profile_name, config, budget, session_mgr, concurrency_mgr, provider_map, orchestrator = pipeline
+    registry.apply_provider_availability(provider_map)
+
+    try:
+        worker = _select_chat_worker(registry, config, concurrency_mgr, model_override, effort)
+    except Exception as exc:
+        print(f"Worker selection failed: {exc}")
+        return
+
+    provider = provider_map.get(worker.provider)
+    if provider is None:
+        print(f"No provider for {worker.provider.value}")
+        return
+
+    history.append({"role": "user", "content": task})
+    step_tools = get_definitions(narrow_bundle_to_step(config.mode.tool_bundle, task))
+    wt = WorkerTask(
+        task_id=str(uuid.uuid4()),
+        step_index=0,
+        role=AgentRole.WORKER,
+        instruction=task,
+        tools=step_tools,
+        context={"messages": list(history)},
+        routing_policy=config.mode.routing_policy,
+        privacy_tier=config.mode.privacy_tier,
+    )
+    try:
+        result = await run_tool_loop(wt, worker, provider, cwd=Path.cwd())
+    except Exception as exc:
+        print(f"Execution error: {exc}")
+        history.pop()   # the user turn never got a reply -- don't poison future context
+        return
+
+    result = check_side_effect_honesty(result, task)
+    if result.status != WorkerStatus.SUCCESS:
+        print(f"[{result.status.value}] {result.reason or '(no reason given)'}")
+        history.pop()
+        return
+
+    answer = result.output or "(no output)"
+    print(f"\n{answer}")
+    history.append({"role": "assistant", "content": answer})

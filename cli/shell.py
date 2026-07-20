@@ -14,7 +14,8 @@ Non-interactive surface (argparse):
   tasker shell
 
 Interactive REPL slash commands:
-  /mode /workers /policy /secure /budget /checkpoint /resume /status /help
+  /mode /workers /policy /secure /budget /checkpoint /resume /model
+  /effort /status /help
 
 See SDD Section 7.6.
 """
@@ -38,15 +39,20 @@ from tasker.runtime.dispatch import (
     _print_workers,
     _resolve_policy_override,
     _resume_task,
+    _run_chat_task,
     _run_task,
     _serialize_step_result,
+    DEFAULT_CHAT_WORKER_ID,
+    _EFFORT_LEVELS,
+    _DEFAULT_EFFORT,
 )
 from tasker.session.checkpoint import CheckpointStore
 from tasker.workers.registry import WorkerRegistry
 
 _KNOWN_COMMANDS = (
     "/mode", "/workers", "/policy", "/secure", "/budget",
-    "/checkpoint", "/resume", "/status", "/help", "/quit", "/exit",
+    "/checkpoint", "/resume", "/model", "/effort", "/status", "/help",
+    "/quit", "/exit",
 )
 _MODE_NAMES = frozenset({"chat", "code", "cowork", "research", "secure"})
 
@@ -98,6 +104,14 @@ def _repl(
     # one (CLI flag or /policy) — otherwise each mode's YAML policy governs.
     policy_explicit = initial_policy is not None
     secure = False
+
+    # CHAT mode direct-dispatch state (SDD 5.3a): chat_model/chat_effort
+    # are session-scoped REPL levers (/model, /effort), never persisted.
+    # chat_history accumulates real multi-turn conversation context across
+    # turns in this REPL session -- passed to every chat dispatch call.
+    chat_model: str | None = None
+    chat_effort: str = _DEFAULT_EFFORT
+    chat_history: list[dict] = []
 
     print(f"Tasker REPL  |  mode={mode}  policy={policy}  secure={secure}")
     print("Type /help for commands, Ctrl-C or /quit to exit.\n")
@@ -169,8 +183,39 @@ def _repl(
                     _cmd_resume(registry, store, rest,
                                 policy if policy_explicit else None)
 
+            elif cmd == "/model":
+                if arg:
+                    worker = registry.get(arg)
+                    if worker is None:
+                        print(f"Unknown worker id: {arg!r}  (see /workers)")
+                    else:
+                        chat_model = arg
+                        print(f"CHAT model pinned to: {chat_model}")
+                elif chat_model:
+                    print(f"Current CHAT model: {chat_model} (explicit)")
+                else:
+                    print(
+                        f"Current CHAT model: {DEFAULT_CHAT_WORKER_ID} "
+                        f"(default, effort={chat_effort})"
+                    )
+
+            elif cmd == "/effort":
+                if arg:
+                    level = arg.lower()
+                    if level not in _EFFORT_LEVELS:
+                        print(f"Usage: /effort <{'|'.join(_EFFORT_LEVELS)}>")
+                    else:
+                        chat_effort = level
+                        print(f"CHAT effort set to: {chat_effort}")
+                else:
+                    print(f"Current CHAT effort: {chat_effort}")
+
             elif cmd == "/status":
-                print(f"mode={mode}  policy={policy}  secure={secure}")
+                chat_model_desc = chat_model or f"{DEFAULT_CHAT_WORKER_ID} (default)"
+                print(
+                    f"mode={mode}  policy={policy}  secure={secure}  "
+                    f"chat_model={chat_model_desc}  chat_effort={chat_effort}"
+                )
 
             elif cmd == "/help":
                 print(
@@ -181,6 +226,8 @@ def _repl(
                     "  /budget             show session budget\n"
                     "  /checkpoint         list checkpoints\n"
                     "  /resume <id|--last> resume from checkpoint\n"
+                    "  /model <worker_id>  pin CHAT mode to an exact worker\n"
+                    "  /effort <low|med|high>  redirect CHAT mode's default worker\n"
                     "  /status             show current session state\n"
                     "  /help               this message\n"
                     "  /quit               exit"
@@ -193,8 +240,19 @@ def _repl(
                 else:
                     print(f"Unknown command: {cmd}  (type /help)")
 
+        elif mode == "chat":
+            # CHAT mode bypasses plan()/synthesize() entirely (SDD 5.3a) --
+            # a direct call to the chat worker with the raw message and
+            # this REPL session's running conversation history.
+            asyncio.run(_run_chat_task(
+                line, registry, store, chat_history,
+                _resolve_policy_override(policy) if policy_explicit else None,
+                model_override=chat_model, effort=chat_effort,
+            ))
+
         else:
-            # Non-slash input: treat as a task in the current mode
+            # Non-slash input in every other mode: treat as a task, full
+            # orchestrator plan -> execute-steps -> synthesize pipeline.
             asyncio.run(_run_task(
                 line, mode, registry, store,
                 _resolve_policy_override(policy) if policy_explicit else None,
@@ -361,10 +419,18 @@ def main() -> None:
     args, remaining = _tp.parse_known_args()
     task = " ".join(remaining).strip()
     if task:
-        asyncio.run(
-            _run_task(task, args.mode, registry, store,
-                      _resolve_policy_override(args.policy))
-        )
+        if args.mode == "chat":
+            # One-shot CLI invocation: fresh (empty) history each call --
+            # multi-turn context only accumulates within a REPL session.
+            asyncio.run(
+                _run_chat_task(task, registry, store, [],
+                                _resolve_policy_override(args.policy))
+            )
+        else:
+            asyncio.run(
+                _run_task(task, args.mode, registry, store,
+                          _resolve_policy_override(args.policy))
+            )
     else:
         _build_parser().print_help()
 

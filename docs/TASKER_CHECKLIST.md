@@ -1596,3 +1596,95 @@ JSON parsed on the first try) -- its coverage is unit-level
 (`test_plan_repair.py`, `test_orchestrator_single.py`'s re-ask test)
 plus the fact that it sits in the exact code path every tier's `plan()`
 already calls unconditionally.
+
+## CHAT mode direct dispatch + /model + /effort + honesty-guard gating (2026-07-20)
+
+Third live bug this day, from Roland's own chat-mode test (one dispatch,
+three issues). Local only, zero cloud spend.
+
+- [x] **SDD-first:** new SDD 5.3a "CHAT Mode Direct Dispatch" documents
+      the bypass rule (CHAT never calls `plan()`/`synthesize()`), the
+      conversation-history ownership model (REPL-session-scoped,
+      in-memory only, no checkpoint/resume involvement), and the
+      `/model`/`/effort` worker-selection contract. SDD 7.6's REPL
+      command list updated with `/model`/`/effort` and `/status`'s new
+      fields.
+- [x] **Fix 1 -- CHAT direct dispatch:** new `_run_chat_task()`
+      (`tasker/runtime/dispatch.py`) makes exactly one `run_tool_loop()`
+      call to the chat worker with the user's raw message as
+      `WorkerTask.instruction` and the REPL session's running
+      conversation history as `WorkerTask.context["messages"]` -- no
+      orchestrator `plan()`/`synthesize()` calls at all. Root cause
+      fixed: the worker was previously receiving a *planner-generated
+      step description* instead of the user's actual message (pure
+      hallucination artifact of round-tripping a one-line greeting
+      through a JSON planning call), and three sequential LLM calls took
+      ~56s to first response. `cli/shell.py`'s `_repl()` now owns a
+      `chat_history: list[dict]` that accumulates real turns across the
+      session and routes chat-mode input through `_run_chat_task()`
+      while every other mode is unaffected (still the full
+      plan/execute-steps/synthesize pipeline via `_run_task()`). The
+      one-shot CLI path (`tasker-cli --mode chat "<msg>"`) also uses
+      `_run_chat_task()`, with a fresh empty history per invocation
+      (multi-turn only makes sense within one REPL session).
+- [x] **Fix 2 -- `/model` and `/effort`:** default chat worker is the
+      always-loaded local model (`lfm2.5-local`, `DEFAULT_CHAT_WORKER_ID`
+      in `dispatch.py`). `/model <worker_id>` pins an exact worker,
+      always winning over everything else. `/effort <low|med|high>` (REPL
+      default `med`) re-selects via `WorkerSelector` using
+      `SPEED_OPTIMIZED`/`COST_OPTIMIZED`/`CAPABILITY_FIRST` respectively
+      when no `/model` is pinned -- reusing existing selection/ranking
+      logic instead of hardcoding a "stronger model" id, so it stays
+      correct as the registry changes. `/status` now shows
+      `chat_model=...` and `chat_effort=...`.
+- [x] **Fix 3 -- honesty guard over-firing:** `check_side_effect_honesty()`
+      (`tasker/tools/honesty.py`) gained a `*context_texts` gate -- the
+      guard now only fires when the *request itself* (task and/or step
+      description) implied a side effect, not merely because the
+      worker's reply happened to contain file/command-shaped words. Root
+      cause of the false positive: a plain "Hello" got a friendly reply
+      offering "let me know if you'd like me to run any commands or
+      create files" -- an offer, not a claim, but the old heuristic only
+      looked at the answer's wording and had no way to tell the
+      difference. `_execute_steps()`'s call site now passes both `task`
+      and `step.description` as context; `_run_chat_task()` passes
+      `task`. No `context_texts` at all disables the guard (safer
+      default than firing blind). Also fixed while gating: the verb set
+      was missing base/present-tense forms ("create", "write", "run",
+      etc. -- only past-tense "created"/"wrote" were present), which
+      would have silently defeated the gate on present-tense task
+      wording like "create a text file...".
+- [x] Tests: `tests/unit/test_chat_dispatch.py` (new, 12 tests --
+      `_select_chat_worker`'s full selection ladder, `_run_chat_task`'s
+      raw-message/no-orchestrator-calls/history-accumulation/
+      failure-doesn't-poison-history behavior), `tests/unit/
+      test_cli_shell.py` (+11 -- `/model`, `/effort`, `/status`, and
+      chat-vs-other-mode dispatch routing, driven through `_repl()`
+      directly with a scripted `input()` sequence), `tests/unit/
+      test_honesty.py` (+4 -- the greeting false-positive regression, the
+      no-context-disables-the-guard default, falsy-context handling,
+      multi-context-text gating).
+- [x] Full suite green: **730 tests, OK** (was 703 after the previous
+      bug-fix session earlier the same day; +27 net -- includes the
+      honesty-guard gating fix's own +4, counted once).
+- [x] **Live acceptance** (Designlab1, WSL Ollama 127.0.0.1:11435,
+      `lfm2.5-thinking:latest`, zero cloud spend): `tasker-cli --mode
+      chat "Hello"` answered conversationally in **4.24s real time**
+      (well under the 10s bar) with zero warnings under default quiet
+      logging, and none beyond pre-existing unrelated logs even at
+      `TASKER_LOG_LEVEL=WARNING` -- no `[unverified]` honesty-guard
+      warning. Multi-turn history live-verified through `tasker-cli
+      shell`: "My name is Roland." then "What is my name?" produced a
+      reply correctly referencing "Roland". `/status` showed
+      `chat_model=lfm2.5-local (default)  chat_effort=med`.
+
+**Open decisions / known issues:** none new. CHAT mode's direct-dispatch
+path deliberately has no `SessionManager.tick()`/pause/checkpoint
+involvement (SDD 5.3a) -- a chat turn is a single instant call, never a
+multi-step plan that could need to checkpoint mid-flight; cloud budget
+from a chat call routed through a cloud worker (e.g. via `/effort high`
+or an explicit `/model`) is still recorded by the shared
+`OllamaSessionBudget` on the provider, just never throttle/pause-gated
+the way COWORK's step loop is. Worth reconsidering if `/effort high`
+chat usage on Ollama Cloud becomes a real budget-exhaustion vector in
+practice.
