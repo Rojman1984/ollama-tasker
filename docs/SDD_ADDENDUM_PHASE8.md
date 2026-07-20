@@ -399,6 +399,28 @@ Add WorkerRole to WorkerManifest.to_dict() / from_dict() serialization.
 
 ## B.5 TUI Architecture
 
+### B.5.0 Interim: rudimentary stdlib REPL (deliberate scoped deviation)
+
+Before the Textual TUI below was built, `tasker/tui/app.py` (behind the
+`tasker` console script) shipped a stdlib-only, prompt-loop REPL instead
+of a "coming soon" stub — so `tasker` is immediately usable rather than
+sitting idle until B.5.1-B.5.4 land. Modeled on Claude Code's own CLI UX:
+a persistent prompt showing the active mode, slash commands
+(`/mode`, `/workers`, `/budget`, `/resume`, `/checkpoints`, `/help`,
+`/quit`), and budget/session visibility through those commands plus live
+per-step output during execution. It drives the exact same production
+pipeline as `cli/shell.py` via a new shared helper module,
+`tasker/runtime/dispatch.py` (the pipeline-building and dispatch logic
+that used to live only in `cli/shell.py`, moved there so both entry
+points share one implementation with no behavior fork).
+
+Same deviation pattern as `tasker/setup/wizard.py`'s Step 7
+redefinition (see that module's docstring): a documented, deliberate
+interim choice, not an omission. This section (`tasker/tui/app.py`
+module docstring has the full detail) is superseded once B.5.1-B.5.4 are
+implemented — the REPL is not meant to be the permanent `tasker` UX, the
+full-screen Textual app below is.
+
 ### B.5.1 Framework: Textual
 
 Textual (https://textual.textualize.io) is the correct choice for this phase:

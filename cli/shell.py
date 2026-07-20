@@ -24,388 +24,38 @@ import argparse
 import asyncio
 import os
 import sys
-import uuid
-from pathlib import Path
 
+from tasker.runtime.dispatch import (
+    _DEFAULT_STORE_DIR,
+    _REGISTRY_YAML,
+    _POLICY_ALIASES,
+    _build_pipeline,
+    _build_session,
+    _deserialize_step_result,
+    _execute_steps,
+    _load_registry,
+    _print_checkpoints,
+    _print_workers,
+    _resolve_policy_override,
+    _resume_task,
+    _run_task,
+    _serialize_step_result,
+)
 from tasker.session.checkpoint import CheckpointStore
-from tasker.workers.base import RoutingPolicy
 from tasker.workers.registry import WorkerRegistry
 
 # --------------------------------------------------------------------------- #
 # Singletons shared between CLI surface and REPL
 # --------------------------------------------------------------------------- #
-
-_DEFAULT_STORE_DIR = Path(".tasker") / "checkpoints"
-_REGISTRY_YAML = Path(__file__).parent.parent / "config" / "workers" / "worker_registry.yaml"
-
-_POLICY_ALIASES: dict[str, str] = {
-    "local":      "private",
-    "cost":       "cost_optimized",
-    "capability": "capability_first",
-    "speed":      "speed_optimized",
-    "hybrid":     "hybrid",
-    "private":    "private",
-}
-
-
-# --------------------------------------------------------------------------- #
-# Task execution
-# --------------------------------------------------------------------------- #
-
-def _resolve_policy_override(policy_str: str | None):
-    """Map a CLI/REPL policy string (or alias) to a RoutingPolicy, or None."""
-    if not policy_str:
-        return None
-    from tasker.modes.base import _POLICY_MAP
-
-    return _POLICY_MAP.get(_POLICY_ALIASES.get(policy_str.lower(), policy_str.lower()))
-
-
-def _build_session(profile, store: CheckpointStore):
-    """
-    Construct the per-run session stack: budget + SessionManager.
-
-    TASKER_BUDGET_PRELOAD (float GPU-time units) pre-loads usage_consumed so
-    throttle (90%) and pause (100%) behaviour can be exercised live without
-    burning hours of real Ollama Cloud GPU time -- the code path from there
-    on (tick(), pause flow, checkpoint write) is the real one. Unset in
-    normal operation.
-    """
-    from datetime import datetime
-
-    from tasker.session.budget import OllamaSessionBudget
-    from tasker.session.manager import SessionManager
-    from tasker.session.notifier import TerminalNotifier
-
-    budget = OllamaSessionBudget(
-        plan=profile.ollama_plan,
-        window_start=datetime.now().astimezone(),
-    )
-    preload = os.environ.get("TASKER_BUDGET_PRELOAD")
-    if preload:
-        try:
-            budget.usage_consumed = float(preload)
-            budget.weekly_usage_consumed = float(preload)
-        except ValueError:
-            print(f"Ignoring non-numeric TASKER_BUDGET_PRELOAD={preload!r}")
-    # auto_resume=False: the one-shot CLI process exits after a pause, so an
-    # in-process asyncio resume timer could never fire. Resume is manual:
-    # `tasker resume <id>` / `tasker resume --last`.
-    session_mgr = SessionManager(budget, store, TerminalNotifier(), auto_resume=False)
-    return budget, session_mgr
-
-
-def _build_pipeline(mode_name: str, store: CheckpointStore, policy_override=None):
-    """
-    Shared construction for fresh runs and resumes: config, budget,
-    SessionManager, concurrency manager, provider map, orchestrator.
-    Returns None (after printing the error) on config failure.
-    """
-    import dataclasses
-
-    from tasker.modes.base import ModeConfigurator
-    from tasker.orchestrator.factory import build_orchestrator
-    from tasker.session.concurrency import OllamaCloudConcurrencyManager
-    from tasker.workers.base import ProviderType
-    from tasker.workers.providers.ollama import OllamaProvider
-
-    profile_name = os.environ.get("TASKER_PROFILE", "tier1_tasker")
-    configurator = ModeConfigurator()
-    try:
-        profile = configurator.load_profile(profile_name)
-        mode_cfg = configurator.load_mode(mode_name)
-    except Exception as exc:
-        print(f"Config error: {exc}")
-        return None
-
-    if policy_override is not None:
-        mode_cfg = dataclasses.replace(mode_cfg, routing_policy=policy_override)
-
-    config = configurator.resolve(profile, mode_cfg)
-    # config.mode.tool_bundle is already the correct per-mode set -- SECURE's
-    # bundle is pre-stripped of network tools at the YAML/TaskerMode level
-    # (see tasker/tools/bundles.py secure_bundle()/SECURE_BUNDLE), so no
-    # extra stripping is needed here. Per-step narrowing (see
-    # narrow_bundle_to_step()) happens inside the step loop, once each
-    # step's description is known.
-    budget, session_mgr = _build_session(profile, store)
-
-    # One shared concurrency manager for the whole run -- covers both
-    # regular worker dispatch (via WorkerSelector/run_tool_loop) and
-    # orchestrator-level plan/synthesize/retry calls (via
-    # build_orchestrator()'s call_model closures), since both paths route
-    # through this same OllamaProvider instance. The shared budget is
-    # threaded into the same provider so *every* OLLAMA_CLOUD call
-    # (worker or orchestrator) records GPU-time units.
-    #
-    # OLLAMA_BASE_URL overrides the profile YAML -- the YAML records the
-    # standard port, but a machine may run Ollama elsewhere (Designlab1
-    # serves on 127.0.0.1:11435 via a systemd port.conf drop-in).
-    base_url = os.environ.get("OLLAMA_BASE_URL") or profile.ollama_base_url
-    concurrency_mgr = OllamaCloudConcurrencyManager(profile.ollama_plan)
-    ollama_provider = OllamaProvider(base_url, concurrency_mgr, budget)
-    provider_map = {ProviderType.OLLAMA: ollama_provider}
-    orchestrator = build_orchestrator(config, provider_map)
-
-    return profile_name, config, budget, session_mgr, concurrency_mgr, provider_map, orchestrator
-
-
-def _serialize_step_result(step_index: int, result) -> dict:
-    """Minimal WorkerResult record stored in Checkpoint.completed_steps."""
-    return {
-        "step_index": step_index,
-        "task_id": result.task_id,
-        "worker_id": result.worker_id,
-        "status": result.status.value,
-        "output": result.output,
-        "duration_ms": result.duration_ms,
-    }
-
-
-def _deserialize_step_result(record: dict):
-    """Rebuild a synthesis-grade WorkerResult from a checkpoint record."""
-    from tasker.workers.base import ModelUsage, WorkerResult, WorkerStatus
-
-    return WorkerResult(
-        task_id=record["task_id"],
-        worker_id=record["worker_id"],
-        status=WorkerStatus(record["status"]),
-        output=record["output"],
-        tool_results=[],
-        usage=ModelUsage(0, 0, 0.0),
-        duration_ms=record["duration_ms"],
-    )
-
-
-async def _execute_steps(
-    task: str,
-    plan,
-    start_index: int,
-    completed_records: list[dict],
-    *,
-    workers: list,
-    mode_name: str,
-    profile_name: str,
-    config,
-    budget,
-    session_mgr,
-    concurrency_mgr,
-    provider_map,
-) -> tuple[list, bool]:
-    """
-    Drive plan steps from start_index, calling SessionManager.tick() before
-    every dispatch (SDD 9.1). On a PAUSE/HOLD directive: checkpoint the
-    in-progress plan, run the full pause flow, and return (results, True).
-    completed_records is mutated in place so the checkpoint carries every
-    finished step, including ones completed before a resume.
-    """
-    from datetime import datetime
-
-    from tasker.session.checkpoint import Checkpoint
-    from tasker.tools.bundles import get_definitions, narrow_bundle_to_step
-    from tasker.tools.loop import run_tool_loop
-    from tasker.workers.base import SessionDirective, WorkerStatus, WorkerTask
-    from tasker.workers.registry import WorkerSelector
-
-    results = []
-    for step in plan.steps:
-        if step.index < start_index:
-            continue
-
-        directive = session_mgr.tick()
-        if directive in (SessionDirective.PAUSE, SessionDirective.HOLD):
-            cp = Checkpoint.new(
-                mode=mode_name,
-                hardware_profile=profile_name,
-                original_task=task,
-                budget_snapshot=budget.snapshot(),
-                plan=plan,
-                completed_steps=list(completed_records),
-                current_step_index=step.index,
-                resume_at=budget.window_start + budget.window_duration,
-                auto_resume=False,
-            )
-            await session_mgr.pause(cp)
-            print(
-                f"\n⏸  Session budget exhausted ({budget.usage_pct:.1%}) — paused "
-                f"before step {step.index}.\n"
-                f"   Checkpoint: {cp.id}\n"
-                f"   Resume:     tasker resume {cp.id}   (or: tasker resume --last)"
-            )
-            return results, True
-
-        throttled = directive == SessionDirective.CONTINUE_LOCAL_ONLY
-        if throttled:
-            print(f"  [throttle] budget at {budget.usage_pct:.1%} — routing local-biased")
-
-        print(f"  Step {step.index}: {step.description[:70]}...")
-        try:
-            worker = WorkerSelector.select(
-                workers,
-                step.required_capabilities,
-                config.mode.routing_policy,
-                config.mode.privacy_tier,
-                slots_available=concurrency_mgr.slots_available,
-                should_throttle=throttled,
-            )
-        except Exception as exc:
-            print(f"  Worker selection failed: {exc}")
-            continue
-
-        step_tools = get_definitions(
-            narrow_bundle_to_step(config.mode.tool_bundle, step.description, task)
-        )
-        wt = WorkerTask(
-            task_id=str(uuid.uuid4()),
-            step_index=step.index,
-            role=step.role,
-            instruction=step.description,
-            tools=step_tools,
-            context={},
-            routing_policy=config.mode.routing_policy,
-            privacy_tier=config.mode.privacy_tier,
-        )
-        provider = provider_map.get(worker.provider)
-        if provider is None:
-            print(f"  No provider for {worker.provider.value}")
-            continue
-        try:
-            result = await run_tool_loop(wt, worker, provider, cwd=Path.cwd())
-            status_str = "ok" if result.status == WorkerStatus.SUCCESS else result.status.value
-            print(
-                f"  [{status_str}] {worker.id} ({result.duration_ms}ms, "
-                f"budget {budget.usage_pct:.1%})"
-            )
-            results.append(result)
-            completed_records.append(_serialize_step_result(step.index, result))
-        except Exception as exc:
-            print(f"  Execution error: {exc}")
-
-    return results, False
-
-
-async def _run_task(
-    task: str,
-    mode_name: str,
-    registry: WorkerRegistry,
-    store: CheckpointStore,
-    policy_override=None,
-) -> None:
-    """Dispatch a task through the orchestrator → provider pipeline."""
-    from tasker.workers.base import Capability, ClassifierResult, TaskType
-
-    pipeline = _build_pipeline(mode_name, store, policy_override)
-    if pipeline is None:
-        return
-    profile_name, config, budget, session_mgr, concurrency_mgr, provider_map, orchestrator = pipeline
-
-    all_workers = registry.list_all()
-    classifier_output = ClassifierResult(
-        task_type=TaskType.CONVERSATIONAL,
-        complexity_score=0.3,
-        required_capabilities={Capability.TOOL_USE},
-        suggested_workers=[],
-        estimated_duration_s=15.0,
-    )
-
-    print(f"[{mode_name}] Planning with {type(orchestrator).__name__}...")
-    try:
-        plan = await orchestrator.plan(task, classifier_output, all_workers)
-    except Exception as exc:
-        print(f"Planning failed: {type(exc).__name__}: {exc}")
-        return
-
-    fallback_note = "  (fallback: NanoOrchestrator template — model plan unparseable)" \
-        if plan.used_fallback else ""
-    print(f"  {len(plan.steps)} step(s), used_fallback={plan.used_fallback}{fallback_note}")
-
-    completed_records: list[dict] = []
-    results, paused = await _execute_steps(
-        task, plan, 0, completed_records,
-        workers=all_workers,
-        mode_name=mode_name, profile_name=profile_name, config=config,
-        budget=budget, session_mgr=session_mgr,
-        concurrency_mgr=concurrency_mgr, provider_map=provider_map,
-    )
-    if paused:
-        return
-
-    if not results:
-        print("No results to synthesize.")
-        return
-
-    print("\nSynthesizing...")
-    try:
-        output = await orchestrator.synthesize(task, results)
-        print(f"\n{output}")
-    except Exception as exc:
-        print(f"Synthesis error: {exc}")
-
-
-async def _resume_task(
-    checkpoint_id: str,
-    registry: WorkerRegistry,
-    store: CheckpointStore,
-    policy_override=None,
-) -> None:
-    """
-    Real resume flow (SDD 9.4): load the checkpoint, rebuild the pipeline for
-    the checkpointed mode (fresh 5-hour budget window — a resume normally
-    happens after the window reset that caused the pause), replay completed
-    step results, and continue from current_step_index.
-    """
-    cp = store.load(checkpoint_id)
-    if cp is None:
-        print(f"Checkpoint not found: {checkpoint_id}")
-        return
-
-    print(
-        f"Resuming checkpoint {cp.id}  [{cp.mode}]  task={cp.original_task!r}\n"
-        f"  paused with budget at {cp.budget_snapshot.usage_pct:.0%} "
-        f"({cp.budget_snapshot.plan} plan), "
-        f"{len(cp.completed_steps)}/{len(cp.plan.steps)} step(s) completed"
-    )
-
-    # Checkpoints store the profile *file* name so the resumed process can
-    # reload the exact same hardware profile regardless of this process's
-    # TASKER_PROFILE. Override the env var for _build_pipeline's benefit.
-    os.environ["TASKER_PROFILE"] = cp.hardware_profile
-    pipeline = _build_pipeline(cp.mode, store, policy_override)
-    if pipeline is None:
-        return
-    profile_name, config, budget, session_mgr, concurrency_mgr, provider_map, orchestrator = pipeline
-
-    # Run the real SessionManager resume flow (notifier event, budget window
-    # validation, PAUSED -> RESUMING -> RUNNING) against the loaded checkpoint.
-    resumed = await session_mgr.resume(cp.id)
-    if resumed is None:
-        print(f"SessionManager could not load checkpoint {cp.id}")
-        return
-
-    prior_results = [_deserialize_step_result(r) for r in cp.completed_steps]
-    completed_records: list[dict] = list(cp.completed_steps)
-
-    new_results, paused = await _execute_steps(
-        cp.original_task, cp.plan, cp.current_step_index, completed_records,
-        workers=registry.list_all(),
-        mode_name=cp.mode, profile_name=cp.hardware_profile, config=config,
-        budget=budget, session_mgr=session_mgr,
-        concurrency_mgr=concurrency_mgr, provider_map=provider_map,
-    )
-    if paused:
-        return
-
-    results = prior_results + new_results
-    if not results:
-        print("No results to synthesize.")
-        return
-
-    print("\nSynthesizing...")
-    try:
-        output = await orchestrator.synthesize(cp.original_task, results)
-        print(f"\n{output}")
-    except Exception as exc:
-        print(f"Synthesis error: {exc}")
+#
+# The pipeline-building and task-dispatch logic (_build_session,
+# _build_pipeline, _execute_steps, _run_task, _resume_task, and friends)
+# lives in tasker/runtime/dispatch.py, shared verbatim with
+# tasker/tui/app.py's REPL -- both entry points drive the identical
+# production path. Re-imported here unchanged (same names, including the
+# leading underscore) so this module's own namespace and existing tests
+# (tests/unit/test_cli_session_wiring.py imports these from cli.shell) are
+# unaffected by the move.
 
 
 # --------------------------------------------------------------------------- #
@@ -568,28 +218,8 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _cmd_workers(registry: WorkerRegistry) -> None:
-    workers = registry.list_all()
-    if not workers:
-        print("No workers registered.")
-        return
-    print(f"{'ID':<30}  {'MODEL':<25}  {'LOCATION':<14}  STATUS")
-    print("-" * 80)
-    for w in workers:
-        status = "available" if w.available else "unavailable"
-        print(f"{w.id:<30}  {w.model_id:<25}  {w.compute_location.value:<14}  {status}")
-
-
-def _cmd_checkpoints(store: CheckpointStore) -> None:
-    checkpoints = store.list_all()
-    if not checkpoints:
-        print("No checkpoints found.")
-        return
-    print(f"{'ID':<38}  {'MODE':<10}  {'CREATED':<18}  TASK")
-    print("-" * 90)
-    for cp in checkpoints:
-        ts = cp.created_at.strftime("%Y-%m-%d %H:%M")
-        print(f"{cp.id:<38}  {cp.mode:<10}  {ts:<18}  {cp.original_task[:30]}")
+_cmd_workers = _print_workers
+_cmd_checkpoints = _print_checkpoints
 
 
 def _cmd_resume(
@@ -645,22 +275,7 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    if _REGISTRY_YAML.exists():
-        registry = WorkerRegistry.load_from_yaml(_REGISTRY_YAML)
-        # Phase 7.5.6 (SDD_ADDENDUM_7.5.md A.3.4): cross-check requires_gpu
-        # workers against the cached hardware detection, if one exists for
-        # this machine. Deliberately uses the cache (not a fresh detect_gpu()
-        # call) to avoid adding a subprocess-call cost to every CLI
-        # invocation (A.3.1's caching rationale) -- if no cache has been
-        # written yet (`tasker-hardware detect` never run), the cross-check
-        # is skipped entirely and workers keep their YAML-declared
-        # `available` value, same as before this feature existed.
-        from tasker.config.detect import load_cached_detection, load_cached_gpu_info
-
-        if load_cached_detection() is not None:
-            registry.apply_gpu_availability(load_cached_gpu_info())
-    else:
-        registry = WorkerRegistry()
+    registry = _load_registry()
     store = CheckpointStore(_DEFAULT_STORE_DIR)
 
     first = _first_positional()

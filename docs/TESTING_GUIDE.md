@@ -189,3 +189,52 @@ assistant answer dispatched through `WorkerSelector` ->
 model, see CLAUDE.md's latency notes). Stop the server with the normal
 signal (`Ctrl-C` interactively, or `kill <pid>` if backgrounded) --
 `web.run_app` shuts down cleanly.
+
+## H8. Rudimentary TUI REPL (`tasker`)
+
+`tasker` (`tasker/tui/app.py:main()`) is a stdlib-only interactive REPL
+-- a deliberate scoped interim ahead of the full Textual TUI
+(SDD_ADDENDUM_PHASE8.md B.5.1+, still not started). Drives the same
+production pipeline as `tasker-cli` via the shared
+`tasker/runtime/dispatch.py` module. See that module's and
+`tasker/tui/app.py`'s docstrings for the per-mode budget-persistence
+model.
+
+### H8.1 Unit tests
+```bash
+python -m unittest tests.unit.test_tui_app -v
+# Also confirms the cli/shell.py <-> tasker/runtime/dispatch.py refactor
+# didn't change CLI behavior:
+python -m unittest tests.unit.test_cli_session_wiring tests.unit.test_harness_modes -v
+```
+Covers: per-mode pipeline build-once/reuse/eviction-on-pause in
+`_dispatch()`, `/budget`'s no-pipeline vs. live-pipeline output, every
+slash command driven through `_repl()` via a mocked `input()` sequence,
+and `main()`'s wiring. No live Ollama calls.
+
+### H8.2 Live: interactive session
+```bash
+# Never starts Ollama itself. WSL: 127.0.0.1:11435.
+OLLAMA_BASE_URL=http://127.0.0.1:11435 tasker
+```
+```
+tasker (chat)> /budget
+tasker (chat)> Say hello in exactly three words.
+tasker (chat)> /budget
+tasker (chat)> /mode cowork
+tasker (cowork)> List the files in the current directory using a bash command.
+tasker (cowork)> /budget
+tasker (cowork)> /quit
+```
+Expect (live-verified 2026-07-19, Designlab1 WSL, Ollama 0.30.11 @
+127.0.0.1:11435): the chat task dispatches through a real
+`SingleLLMOrchestrator` plan -> `lfm2.5-local` worker -> synthesis
+(zero cloud spend, local calls never consume Ollama Cloud budget by
+design); `/budget` before any task shows profile/plan only, `/budget`
+after shows real live `0.0/3000 units` (correctly zero -- local, not
+cloud); `/mode cowork` updates the prompt to `tasker (cowork)>`; the
+cowork task exercises a real `run_tool_loop` bash-tool dispatch (may hit
+the Phase 8.3 tool-loop non-termination guard on this model -- that's
+expected, not a failure); `/quit` exits cleanly. Also testable
+non-interactively via a piped scripted input file (`tasker <
+commands.txt`) for automated smoke runs.

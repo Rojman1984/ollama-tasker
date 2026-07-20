@@ -91,9 +91,11 @@ Do not write any code until you have read both documents.
 **SDD Version:** 0.1.0-draft (docs/SDD.md)
 **Current Phase:** SDD_ADDENDUM_PHASE8 (setup wizard / readiness checker /
 TUI). Cloud-path E2E validation (COWORK_PROMPT task list 8.1–8.3) and
-addendum 8.1–8.2 are complete; addendum 8.3–8.5 (TUI) remain. A
-standalone launch/ops task (API server launchability, not addendum-
-numbered) was completed in between — see below.
+addendum 8.1–8.2 are complete. Addendum 8.3–8.5 (the full Textual TUI)
+remain ⬜, but `tasker` is no longer a stub — a scoped interim REPL now
+covers that entry point (see below and new B.5.0 in the addendum). Two
+standalone launch/ops tasks (API server launchability, TUI REPL — neither
+addendum-numbered) were completed in between.
 
 **Phase completion state:**
 
@@ -108,49 +110,59 @@ numbered) was completed in between — see below.
 | 7 | Hardening (+ Addenda A/B, 7.5.x hardware detection) | ✅ COMPLETE |
 | 8 | Cloud-path E2E validation (task list 8.1–8.3) | ✅ COMPLETE |
 | A8.1–8.2 | Addendum: setup wizard + readiness checker | ✅ COMPLETE |
-| A8.3–8.5 | Addendum: TUI foundation, model selector, harness panel | ⬜ NOT STARTED |
+| A8.3–8.5 | Addendum: full Textual TUI, model selector, harness panel | ⬜ NOT STARTED |
 
-**Last completed task:** API server launchability, ✅ COMPLETE
-(2026-07-19; standalone ops/launch task, not addendum-numbered).
-`tasker/api/server.py:main()` (new `tasker-api` console script) wired
-the same way as `cli/shell.py`'s `main()`: TASKER_PROFILE resolution,
-OLLAMA_BASE_URL override, provider_map with shared budget/concurrency
-manager on OllamaProvider, hardware-cache GPU availability cross-check.
-`--host`/`--port`/`--mode` flags. Real `WorkerSelector` →
-`run_tool_loop()` dispatch wired into `/v1/chat/completions` via a new
-`_make_live_step_fn()` (test `_step_fn` override still takes priority);
-worker failures now return HTTP 500 instead of an uncaught exception.
-Fixed a real bug found while wiring this: `_stub_plan()` truncated its
-step description to 80 chars, which becomes the worker's actual
-instruction once live dispatch is wired — any prompt over 80 chars was
-silently cut off; now carries the full task text. Live smoke test on
-Designlab1 WSL (Ollama 0.30.11 @ 127.0.0.1:11435, never started —
-confirmed reachable first): `/v1/models`, `/v1/workers`, and a real
-`/v1/chat/completions` chat-mode request all returned correct
-OpenAI-shaped 200s, the completion dispatched through the real local
-`lfm2.5-thinking` worker (zero cloud spend). Suite 630 → 638, green.
-Evidence: docs/TASKER_CHECKLIST.md → "API Server Launchability --
-tasker-api (2026-07-19)".
+**Last completed task:** Rudimentary TUI REPL, ✅ COMPLETE (2026-07-19;
+standalone ops task, not addendum-numbered — a deliberate B.5.0 interim
+ahead of the Textual work in A8.3–8.5 above). `tasker/tui/app.py`
+replaced the "coming in Phase 8.3" stub with a real stdlib-only REPL:
+`/mode [chat|code|cowork|research|secure]` (shown in the prompt),
+`/workers`, `/budget`, `/resume <id>|--last`, `/checkpoints`, `/help`,
+`/quit`/`/exit`; non-slash input dispatches through the real orchestrator
+→ provider pipeline. Extracted `cli/shell.py`'s pipeline/dispatch logic
+into a new shared module, `tasker/runtime/dispatch.py`, reused by both
+`tasker-cli` and `tasker` (zero behavior change to the CLI, confirmed by
+the full suite staying green immediately after the extraction).
+New: each mode lazily caches its own pipeline across turns within one
+REPL session, so `/budget` shows real accumulating usage instead of
+resetting every call — honestly scoped as per-mode, not the true
+single-account budget (SDD 5.10). Live smoke test on Designlab1 WSL
+(Ollama 0.30.11 @ 127.0.0.1:11435, never started): a scripted session
+ran a real chat task (`SingleLLMOrchestrator` → `lfm2.5-local`, zero
+cloud spend) and a real cowork task (`run_tool_loop` bash dispatch,
+which live-triggered the Phase 8.3 tool-loop non-termination guard as
+designed), with `/budget` correctly showing live usage and per-mode
+window scoping throughout. Suite 638 → 668, green. Evidence:
+docs/TASKER_CHECKLIST.md → "Rudimentary TUI REPL -- tasker/tui/app.py
+(2026-07-19)".
 
-**Next task:** SDD_ADDENDUM_PHASE8.md Phase 8.3 — TUI foundation
-(textual TuiApp, WelcomeScreen, HardwareStatusBar; tasker/tui/app.py is
-a stub today). Then 8.4 (SetupWizardScreen + ModelSelectorScreen wired
-to the readiness checker), 8.5 (HarnessPanel). Carried-over candidates:
-wire Anthropic/OpenAI/Fugu providers into the CLI provider_map (or
-pre-filter unroutable workers); budget persistence across restarts;
-TASKER-P1 live runs of tasker-setup (wizard + readiness); wire a real
-orchestrator-planned ExecutionPlan into /v1/chat/completions (still
-_stub_plan, one step per request — explicitly out of scope this
-session).
+**Next task:** SDD_ADDENDUM_PHASE8.md Phase 8.3–8.5 — the full Textual
+TUI (WelcomeScreen, HardwareStatusBar, SetupWizardScreen,
+ModelSelectorScreen, HarnessPanel) that supersedes this REPL; only
+`tasker/runtime/dispatch.py` is expected to carry forward into it, not
+`_repl()`/`_dispatch()`. Carried-over candidates: wire Anthropic/OpenAI/
+Fugu providers into the CLI/TUI provider_map (or pre-filter unroutable
+workers); budget persistence across process restarts; TASKER-P1 live
+runs of tasker-setup/tasker; orchestrator-planned ExecutionPlan in the
+API path (still _stub_plan, one step per request).
 
-**Files modified this session:** tasker/api/server.py (main() + live
-dispatch + allowed_modes + stub-plan truncation fix), pyproject.toml
-(tasker-api entry), tests/integration/test_api_server.py (+12),
-docs/TESTING_GUIDE.md (new H7 — H6 already taken by the setup wizard),
-docs/TASKER_CHECKLIST.md, CLAUDE.md, COWORK_PROMPT.md.
+**Files modified this session:** tasker/runtime/__init__.py (new),
+tasker/runtime/dispatch.py (new — extracted from cli/shell.py),
+cli/shell.py (re-imports from the shared module, no behavior change),
+tasker/tui/app.py (real REPL, was a stub), tests/unit/test_tui_app.py
+(new, 30 tests), docs/SDD_ADDENDUM_PHASE8.md (new B.5.0),
+docs/TESTING_GUIDE.md (new H8), docs/TASKER_CHECKLIST.md, CLAUDE.md,
+COWORK_PROMPT.md. No pyproject.toml change needed (`tasker =
+"tasker.tui.app:main"` already pointed here).
 
 **Open decisions / blockers:**
-- `_handle_completions` still builds a fresh per-request
+- Per-mode (not per-account) budget scoping in the REPL — a real
+  architectural simplification, should be revisited if/when the true
+  SDD 5.10 single-account model needs representing in an interactive
+  session.
+- No `--mode`/other CLI flags on `tasker` itself (always starts in
+  chat) — not requested this session.
+- `_handle_completions` (API server) still builds a fresh per-request
   OllamaSessionBudget/SessionManager, separate from the provider's own
   shared budget used for GPU-time accounting — pause/resume checkpoint
   snapshots via the API don't reflect real cumulative cloud usage.

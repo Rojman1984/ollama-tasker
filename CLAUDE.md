@@ -351,6 +351,104 @@ python -m unittest tests.unit.test_orchestrator_nano -v
 
 *(Update this section at the end of every Cowork or Code session)*
 
+**Last worked on:** Rudimentary interactive TUI REPL at `tasker/tui/app.py`
+(behind the `tasker` console script), replacing the Phase 8.1
+"coming in Phase 8.3" stub. Deliberate scoped deviation from
+SDD_ADDENDUM_PHASE8.md B.5 (full Textual TUI, still Phase 8.3-8.5, not
+started) -- documented SDD-first as new B.5.0. Full write-up in
+`docs/TASKER_CHECKLIST.md` → "Rudimentary TUI REPL -- `tasker/tui/app.py`
+(2026-07-19)".
+
+**What was built:** Extracted `cli/shell.py`'s pipeline-building/dispatch
+logic (`_build_pipeline`, `_build_session`, `_execute_steps`, `_run_task`,
+`_resume_task`, serialization helpers, policy resolution) plus two new
+helpers (`_load_registry()`, `_print_workers()`/`_print_checkpoints()`)
+into a new shared module, `tasker/runtime/dispatch.py`. `cli/shell.py`
+re-imports every name unchanged (same names, leading underscore and all)
+so its own tests and behavior are untouched -- verified by running the
+full suite green immediately after the extraction, before any TUI code
+was added. `_run_task()` gained a backward-compatible optional
+`pipeline=` kwarg so a caller can reuse a pre-built pipeline instead of
+always constructing a fresh one.
+
+`tasker/tui/app.py` is now a real REPL: `/mode [chat|code|cowork|
+research|secure]` (get/set, mode shown in the prompt as `tasker
+(mode)>`), `/workers`, `/budget`, `/resume <id>|--last`, `/checkpoints`,
+`/help`, `/quit`/`/exit`; non-slash input dispatches as a task in the
+active mode through the real orchestrator → provider pipeline, same as
+`tasker-cli`. The one genuinely new piece of behavior (not just reuse):
+each mode lazily builds and caches its own pipeline on first use, reused
+across turns in that mode, so `/budget` shows real accumulating usage
+instead of resetting every call the way `cli/shell.py`'s CLI and
+`tasker/api/server.py`'s API both do. Honestly scoped as per-mode, not
+the true single-account budget (SDD 5.10) — documented, not silently
+glossed over. A paused pipeline is evicted from the cache so the next
+task in that mode starts fresh rather than sitting in `HOLD` forever.
+
+**Live smoke test** (Designlab1 WSL, Ollama 0.30.11 @ 127.0.0.1:11435 —
+confirmed reachable first, never started): a scripted stdin session
+through the real `tasker` entry point. `/budget` before any task showed
+config-only info; a chat-mode task ("Say hello in exactly three words.")
+dispatched through a real `SingleLLMOrchestrator` plan → `lfm2.5-local`
+worker (7.3s) → synthesis, zero cloud spend; `/budget` after showed real
+live usage (`0.0/3000 units`, correctly zero since local calls don't
+consume Ollama Cloud budget); `/mode cowork` updated the prompt; a
+cowork-mode task ("list files via bash") exercised a real
+`run_tool_loop` dispatch and **live-triggered the Phase 8.3 tool-loop
+non-termination guard** (identical consecutive tool call on turn 2,
+terminated early as designed) after one empty-content retry, then
+synthesized a correct answer; final `/budget` showed cowork's own
+separate window, correctly demonstrating the per-mode (not global)
+scoping; `/quit` exited cleanly. No stray files (the cowork task was
+read-only by design).
+
+**Venv discipline:** every python/pip/`tasker-*` command this session
+was preceded by `source .venv/bin/activate` + `which python`/`which pip`
+confirmation, per the standing instruction from the prior session.
+
+**Tests:** 638 → 668 (30 new in `tests/unit/test_tui_app.py`; the
+`tasker/runtime/dispatch.py` extraction itself added none, by design —
+it's a pure move). Full suite green throughout, including immediately
+after the extraction (before any new TUI code existed) to confirm zero
+behavior change to `cli/shell.py`.
+
+**Files modified:** `tasker/runtime/__init__.py` (new),
+`tasker/runtime/dispatch.py` (new — extracted from `cli/shell.py`),
+`cli/shell.py` (imports from the shared module, no behavior change),
+`tasker/tui/app.py` (real REPL, was a stub), `tests/unit/test_tui_app.py`
+(new, 30 tests), `docs/SDD_ADDENDUM_PHASE8.md` (new B.5.0),
+`docs/TASKER_CHECKLIST.md`, `docs/TESTING_GUIDE.md` (new H8), CLAUDE.md,
+COWORK_PROMPT.md. No `pyproject.toml` change needed — `tasker =
+"tasker.tui.app:main"` already pointed here from the Phase 8.1 stub;
+reinstalled with `pip install -e .` anyway to pick up the new
+`tasker/runtime/` package.
+
+**Next task:** SDD_ADDENDUM_PHASE8.md Phase 8.3-8.5 — the full Textual
+TUI (WelcomeScreen, HardwareStatusBar, SetupWizardScreen,
+ModelSelectorScreen, HarnessPanel) that supersedes this REPL. This
+REPL's `_repl()`/`_dispatch()` logic is not expected to carry forward
+into the Textual screens (different interaction model); only
+`tasker/runtime/dispatch.py` is expected to be reused there too. Other
+carried-over candidates: wire Anthropic/OpenAI/Fugu providers into the
+CLI/TUI provider_map; budget persistence across process restarts;
+orchestrator-planned `ExecutionPlan` in the API path (still
+`_stub_plan`); TASKER-P1 live runs of `tasker-setup`/`tasker`.
+
+**Blockers:** None.
+
+**Open decisions (also in TASKER_CHECKLIST.md's Rudimentary TUI REPL
+section):**
+- Per-mode (not per-account) budget scoping in the REPL — a real
+  architectural simplification, should be revisited if/when the true
+  SDD 5.10 single-account model needs representing in an interactive
+  session.
+- No `--mode`/other CLI flags on `tasker` itself (always starts in
+  `chat`) — not requested this session, trivial to add later.
+
+---
+
+## Previous Session Notes (API server launchability, kept for reference)
+
 **Last worked on:** Made the OpenAI-compat API server (`tasker/api/server.py`,
 built in Phase 7) actually launchable, so a WebUI can connect. Standalone
 ops/launch task, not part of the SDD_ADDENDUM_PHASE8 numbering. Full
