@@ -1854,3 +1854,66 @@ harness. Tab-completion's candidate set is currently limited to
 commands/modes/worker-ids per B.5.5's REPL-only scope this sprint; it
 does not complete file paths or arbitrary task text, which was never in
 scope.
+
+## REPL/TUI UX sprint addendum -- chat rewind buffer / session transcript (2026-07-20)
+
+Addendum to part 3, from the same live-testing session: text rolling
+off screen with no way to recover it.
+
+- [x] **SDD-first:** new SDD 7.6a "Chat Rewind Buffer (Session
+      Transcript)" documents the in-memory `Transcript`, the
+      auto-write-as-you-go disk behavior (file created with a header at
+      REPL start, every `record()` appended immediately -- nothing lost
+      even on a crash), the degrade-to-memory-only fallback on an
+      unwritable path, `/transcript [n]`'s paged reprint, and the
+      `_Tee`-captured "assistant" entry (full dispatch-call stdout for
+      that turn, not a synthesized answer string). SDD 7.6's REPL
+      command list updated with `/transcript`.
+- [x] New `tasker/runtime/transcript.py`: `TranscriptEntry`, `Transcript`
+      (`record()`, `exchanges()`, `render_exchanges()`),
+      `default_transcript_path()` (`~/.tasker/transcripts/
+      <YYYYMMDD-HHMMSS>.md`). No `cli/shell.py`/Textual coupling --
+      reusable by a future TUI `HarnessPanel` (8.5).
+- [x] `cli/shell.py`: `Transcript` created at REPL startup, path
+      mentioned in the startup banner; every slash command recorded as
+      an "event" entry; every chat/task turn's user message and full
+      captured stdout (via new `_Tee` class mirroring output to both the
+      terminal and an in-memory buffer) recorded as "user"/"assistant";
+      new `/transcript [n]` command using a new simple terminal pager
+      (`_page_lines()`, `-- more --` between terminal-height chunks, `q`
+      to stop early); `/help` updated.
+- [x] **Bug caught and fixed before shipping** (same class as H15's):
+      the first pass of `_repl()`-driving tests across all four
+      `test_cli_shell*.py` files silently created a real
+      `~/.tasker/transcripts/*.md` file on the machine running the
+      suite. Fixed by mocking `default_transcript_path` in every
+      existing REPL-driving test (7 call sites across
+      `test_cli_shell.py`/`test_cli_shell_context.py`), alongside new
+      dedicated tests in `test_cli_shell_transcript.py` that
+      deliberately exercise real (tmp-directory) file writes to prove
+      the feature actually works, while everything else stays
+      in-memory-only.
+- [x] Tests: `tests/unit/test_transcript.py` (new, 17 tests),
+      `tests/unit/test_cli_shell_transcript.py` (new, 18 tests).
+- [x] Full suite green: **828 tests, OK** (was 793).
+- [x] **Live smoke** (Designlab1, WSL Ollama, scratch `$HOME` so the
+      real `~/.tasker/transcripts` was never touched, zero cloud spend):
+      startup banner correctly showed the transcript path; a real chat
+      turn completed normally; `/transcript` correctly reprinted it;
+      the on-disk markdown file, read back after the session, contained
+      the full session in order (`/status` and `/transcript` and
+      `/quit` as event lines, the user message and reply as You:/
+      Tasker: lines) -- confirming incremental auto-write, not just an
+      in-memory feature.
+
+**Open decisions / known issues:** the pager's default page size is
+derived from the real terminal height (`shutil.get_terminal_size()`) --
+not exercised by the live smoke test's piped-stdin session (which has
+no real terminal size, falls back to the 80x24 default); a future
+session with a real interactive terminal could confirm the pager
+actually adapts to an unusual terminal height. `/transcript`'s paging
+uses the REPL's own `input()` for its "-- more --" prompt, which means
+it also benefits from (and is subject to) the readline integration from
+the base part-3 work -- e.g. Ctrl-C during a pager prompt is handled
+explicitly (stops paging cleanly), consistent with the REPL's own
+Ctrl-C handling elsewhere.

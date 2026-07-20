@@ -161,6 +161,7 @@ class TestReplContextAndBudgetCommands(unittest.TestCase):
              mock.patch("cli.shell._run_task"), \
              mock.patch("cli.shell._build_pipeline", return_value=self._fake_pipeline()), \
              mock.patch("cli.shell._init_readline"), \
+             mock.patch("cli.shell.default_transcript_path", return_value=None), \
              mock.patch("cli.shell._save_history"), \
              redirect_stdout(out):
             _repl(registry, store, initial_mode=initial_mode)
@@ -199,6 +200,7 @@ class TestReplContextAndBudgetCommands(unittest.TestCase):
              mock.patch("cli.shell._run_chat_task") as m_chat, \
              mock.patch("cli.shell._build_pipeline", return_value=self._fake_pipeline()), \
              mock.patch("cli.shell._init_readline"), \
+             mock.patch("cli.shell.default_transcript_path", return_value=None), \
              mock.patch("cli.shell._save_history"), \
              redirect_stdout(io.StringIO()):
             _repl(registry, store, initial_mode="chat")
@@ -214,6 +216,7 @@ class TestReplContextAndBudgetCommands(unittest.TestCase):
              mock.patch("cli.shell._build_pipeline", return_value=self._fake_pipeline()), \
              mock.patch("tasker.config.detect.load_cached_gpu_info", return_value=None), \
              mock.patch("cli.shell._init_readline"), \
+             mock.patch("cli.shell.default_transcript_path", return_value=None), \
              mock.patch("cli.shell._save_history"), \
              redirect_stdout(io.StringIO()) as out:
             _repl(registry, store, initial_mode="chat")
@@ -243,6 +246,7 @@ class TestPipelineCachingAndEviction(unittest.TestCase):
              mock.patch("cli.shell._run_chat_task") as m_chat, \
              mock.patch("cli.shell._build_pipeline", return_value=pipeline) as m_build, \
              mock.patch("cli.shell._init_readline"), \
+             mock.patch("cli.shell.default_transcript_path", return_value=None), \
              mock.patch("cli.shell._save_history"), \
              redirect_stdout(io.StringIO()):
             _repl(registry, store, initial_mode="chat")
@@ -268,6 +272,7 @@ class TestPipelineCachingAndEviction(unittest.TestCase):
              mock.patch("cli.shell._run_task") as m_task, \
              mock.patch("cli.shell._build_pipeline", side_effect=[pipeline1, pipeline2]) as m_build, \
              mock.patch("cli.shell._init_readline"), \
+             mock.patch("cli.shell.default_transcript_path", return_value=None), \
              mock.patch("cli.shell._save_history"), \
              redirect_stdout(io.StringIO()):
             _repl(registry, store, initial_mode="code")

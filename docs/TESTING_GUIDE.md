@@ -565,3 +565,63 @@ copy-to-clipboard fallback if Textual's own mouse capture defeats native
 selection for that widget). See B.5.5 for the full requirement list.
 Checked off nothing (spec only) -- B.11's Phase 8.4/8.5 checklists
 gained a line each pointing back at B.5.5.
+
+## H16. Chat rewind buffer -- session transcript, /transcript, auto-save (2026-07-20)
+
+Addendum to part 3 of the REPL/TUI UX sprint, from the same live-testing
+session: REPL output scrolls off the terminal and, until this, was
+simply gone once it left scrollback.
+
+### H16.1 Unit tests
+```bash
+python -m unittest tests.unit.test_transcript tests.unit.test_cli_shell_transcript -v
+```
+Covers: `Transcript` (`tasker/runtime/transcript.py`) -- `record()`
+appends entries in memory and (when a path is set) to disk immediately,
+not only at some later flush; `exchanges()` groups a "user" entry with
+everything logged until the next "user" entry (event entries in between
+stay in the same exchange; leading events before the first user entry
+form their own group); `render_exchanges(n)` returns the full session or
+just the last `n` exchanges; a path whose parent can't be created (e.g.
+blocked by a file where a directory is expected) degrades to
+in-memory-only rather than crashing. `cli/shell.py`: `_Tee` mirrors
+stdout to multiple streams; `_page_lines()` (the terminal pager) prints
+short output with no pause, paginates longer output with `-- more --`
+prompts, stops early on `q`, and doesn't crash on Ctrl-C during the
+prompt; `_print_transcript()`; the REPL's startup banner mentions the
+transcript path when disk writing is active (and omits the line when
+it's degraded to in-memory-only); every slash command is recorded as an
+"event", every chat/task turn as "user"+"assistant" (captured via the
+Tee, so warnings/budget lines printed alongside the answer are captured
+too, not just a synthesized "final answer" string); `/transcript [n]`
+reprints and accepts/rejects arguments correctly. Every REPL-driving
+test in this file and the three existing `test_cli_shell*.py` files now
+mocks `default_transcript_path` (to a tmp path or `None`) alongside the
+existing `_init_readline`/`_save_history` mocks -- same discipline as
+H15's history-file fix, guarding against a real
+`~/.tasker/transcripts/*.md` file being silently created during test
+runs (caught live while writing these tests, fixed before it shipped).
+
+### H16.2 Live: real chat turn, transcript file, /transcript reprint
+```bash
+export HOME=<scratch dir>   # keep the real ~/.tasker/transcripts untouched
+export OLLAMA_BASE_URL=http://127.0.0.1:11435
+export TASKER_PROFILE=tier2_designlab
+tasker-cli shell
+tasker> /status
+tasker> Hello
+tasker> /transcript
+tasker> /quit
+```
+Live-verified 2026-07-20 (Designlab1, WSL Ollama, scratch `$HOME`, zero
+cloud spend): startup banner printed `Transcript:  <scratch>/.tasker/
+transcripts/20260720-133025.md`; a real chat turn ("Hello" -> a genuine
+conversational reply) completed normally; `/transcript` reprinted the
+exchange correctly; the on-disk file, read back after the session,
+contained the full session in the expected markdown shape --
+`/status` and `/transcript` and `/quit` as italic event lines, the user
+message and assistant reply as bold You:/Tasker: lines, in the correct
+order -- confirming the transcript really is written incrementally as
+the session runs, not just held in memory. The real `~/.tasker/
+transcripts` was confirmed untouched throughout (scratch `$HOME` used
+for the whole live test).

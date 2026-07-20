@@ -113,9 +113,23 @@ interim REPL from the session before this one has been superseded.
 | A8.3 | Addendum: Textual TUI skeleton (TuiApp, WelcomeScreen, status bar) | ✅ COMPLETE |
 | A8.4–8.5 | Addendum: SetupWizardScreen + ModelSelectorScreen, HarnessPanel | ⬜ NOT STARTED |
 
-**Last completed task:** REPL/TUI UX sprint, ✅ COMPLETE (2026-07-20;
-three parts, one commit each, from Roland's live-testing session,
-following directly after the three same-day bug-fix sessions below).
+**Last completed task:** REPL/TUI UX sprint + addendum, ✅ COMPLETE
+(2026-07-20; three parts plus a same-day addendum, one commit each,
+from Roland's live-testing session, following directly after the three
+same-day bug-fix sessions below). Addendum — chat rewind buffer: new
+`tasker/runtime/transcript.py` `Transcript` records every prompt,
+response, and slash command, auto-writing to
+`~/.tasker/transcripts/<timestamp>.md` as the session runs (not just at
+exit); new `/transcript [n]` command reprints recent exchanges, paged;
+startup banner mentions the transcript path; the "assistant" entry
+captures a turn's full stdout via a new `_Tee` class, not a synthesized
+answer. SDD 7.6a. Caught and fixed the same class of bug as part 3's
+own history-file issue (tests silently creating a real transcript file)
+before shipping. Suite 793 → 828 (+35). Live-verified (scratch `$HOME`,
+zero cloud spend): real chat turn, `/transcript` reprint, and the
+on-disk markdown file all confirmed correct.
+
+Original three parts:
 Part 1 — `/model` dynamic onboarding: an unregistered `/model <tag>`
 shaped like a real Ollama tag now offers to pull it (HTTP `/api/pull`,
 never the `ollama` CLI), probe it for tool-calling readiness, and
@@ -281,32 +295,41 @@ this section's lists.)
 
 ---
 
-**Next task (current):** SDD_ADDENDUM_PHASE8.md Phase 8.4 —
-SetupWizardScreen (wraps `tasker/setup/wizard.py`'s `run_wizard()`) +
-ModelSelectorScreen (wraps `tasker/setup/readiness.py`'s
-`ReadinessChecker`), plus the Textual message bus
-(`WizardStepCompleted`, `ReadinessCheckCompleted`,
-`WorkerRegistryUpdated`) per B.11. Then Phase 8.5 (HarnessPanel, built
-on `tasker/runtime/dispatch.py`). TASKER-P1 manual verification for 8.3
-still open (no access this session, same as every prior phase that
-needed it). It now also carries B.5.5's keyboard-binding/text-selection
-requirements (spec added this session, not yet implemented). All three
-bug-fix sessions plus this REPL/TUI UX sprint were interrupt-driven by
-live testing, not a step in the addendum sequence — this queue is
-otherwise unchanged.
+**Next task (current):** research-mode grounding sprint, queued by
+Roland immediately after this REPL/TUI UX work (before session-end docs
+were written for it) — (1) real WEB_SEARCH tool executor via Brave
+Search API (`BRAVE_API_KEY` env var only), RETRIEVE/citation plumbing
+carrying source URLs; (2) RESEARCH-mode grounding enforcement: plans
+must include retrieval steps, worker prompts receive tool results,
+synthesis must cite actual results, honesty guard extended for
+zero-retrieval factual claims, `/mode research` announces when no
+search backend is configured instead of silently fabricating, planner
+step descriptions must not themselves assert factual content. SDD-first
+for the research-mode contract. This is now the front of the queue,
+ahead of SDD_ADDENDUM_PHASE8.md Phase 8.4 (SetupWizardScreen +
+ModelSelectorScreen, still queued behind it, now also carrying B.5.5's
+keyboard-binding/text-selection requirements). TASKER-P1 manual
+verification for 8.3 still open (no access this session, same as every
+prior phase that needed it). All three bug-fix sessions plus the
+REPL/TUI UX sprint (three parts + addendum) were interrupt-driven by
+live testing, not a step in the addendum sequence.
 
-**Files modified this session (2026-07-20, REPL/TUI UX sprint, 3
-commits):** `tasker/setup/onboarding.py` (new), `tasker/workers/
-providers/ollama.py` (`resolve_num_ctx`, `gpu` param, `options.num_ctx`),
-`tasker/runtime/dispatch.py` (gpu wiring, `context_override` param),
-`tasker/api/server.py` (gpu wiring), `cli/shell.py` (major — `/model`
-onboarding, `/models`, `/context`, `/budget` real init, per-mode
-pipeline caching, readline integration), `docs/SDD.md` (5.6.1a),
-`docs/SDD_ADDENDUM_PHASE8.md` (B.4.7, B.5.5), `docs/TESTING_GUIDE.md`
-(H13, H14, H15), `tests/unit/test_onboarding.py` (new, 14),
-`tests/unit/test_cli_shell.py` (+4), `tests/unit/test_provider_ollama.py`
-(+13), `tests/unit/test_cli_shell_context.py` (new, 20),
+**Files modified this session (2026-07-20, REPL/TUI UX sprint, 4
+commits -- 3 parts + transcript addendum):** `tasker/setup/onboarding.py`
+(new), `tasker/workers/providers/ollama.py` (`resolve_num_ctx`, `gpu`
+param, `options.num_ctx`), `tasker/runtime/dispatch.py` (gpu wiring,
+`context_override` param), `tasker/api/server.py` (gpu wiring),
+`tasker/runtime/transcript.py` (new), `cli/shell.py` (major — `/model`
+onboarding, `/models`, `/context`, `/transcript`, `/budget` real init,
+per-mode pipeline caching, readline integration, `_Tee`), `docs/SDD.md`
+(5.6.1a, 7.6a), `docs/SDD_ADDENDUM_PHASE8.md` (B.4.7, B.5.5),
+`docs/TESTING_GUIDE.md` (H13, H14, H15, H16),
+`tests/unit/test_onboarding.py` (new, 14), `tests/unit/test_cli_shell.py`
+(+4), `tests/unit/test_provider_ollama.py` (+13),
+`tests/unit/test_cli_shell_context.py` (new, 20),
 `tests/unit/test_cli_shell_readline.py` (new, 12),
+`tests/unit/test_transcript.py` (new, 17),
+`tests/unit/test_cli_shell_transcript.py` (new, 18),
 `docs/TASKER_CHECKLIST.md`, `CLAUDE.md`, `COWORK_PROMPT.md`.
 
 **Files modified this session (2026-07-20, third bug-fix pass —

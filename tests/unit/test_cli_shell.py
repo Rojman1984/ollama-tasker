@@ -123,6 +123,7 @@ class TestReplChatCommands(unittest.TestCase):
              mock.patch("cli.shell._run_chat_task") as m_chat, \
              mock.patch("cli.shell._run_task") as m_task, \
              mock.patch("cli.shell._init_readline"), \
+             mock.patch("cli.shell.default_transcript_path", return_value=None), \
              mock.patch("cli.shell._save_history"), \
              redirect_stdout(out):
             _repl(registry, store, initial_mode=initial_mode)
@@ -217,6 +218,7 @@ class TestReplModelOnboarding(unittest.TestCase):
                  new=mock.AsyncMock(return_value=onboard_return),
              ) as m_onboard, \
              mock.patch("cli.shell._init_readline"), \
+             mock.patch("cli.shell.default_transcript_path", return_value=None), \
              mock.patch("cli.shell._save_history"), \
              redirect_stdout(out):
             _repl(registry, store, initial_mode="chat")

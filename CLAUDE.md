@@ -353,9 +353,34 @@ python -m unittest tests.unit.test_orchestrator_nano -v
 *(Update this section at the end of every Cowork or Code session)*
 
 **Last worked on:** REPL/TUI UX sprint from Roland's live-testing
-session -- three parts, one commit each, following directly after the
-three same-day bug-fix sessions below. Full write-ups in
-`docs/TASKER_CHECKLIST.md` → "REPL/TUI UX sprint, part 1/2/3 (2026-07-20)".
+session -- three parts plus a same-day addendum, one commit each,
+following directly after the three same-day bug-fix sessions below.
+Full write-ups in `docs/TASKER_CHECKLIST.md` → "REPL/TUI UX sprint, part
+1/2/3 (2026-07-20)" and "...addendum -- chat rewind buffer / session
+transcript (2026-07-20)".
+
+**Addendum — chat rewind buffer / session transcript:** REPL output
+scrolls off the terminal on a long session with no way to recover it.
+New `tasker/runtime/transcript.py`: `Transcript` records every prompt,
+response, and slash command ("key event") in memory, auto-writing each
+one to `~/.tasker/transcripts/<timestamp>.md` immediately (not just at
+exit) so nothing is lost even on a crash; degrades to in-memory-only if
+the path can't be written. New `/transcript [n]` REPL command reprints
+the last `n` exchanges (full session if omitted) through a small
+terminal pager. The "assistant" entry captures the dispatch call's
+*entire* stdout for that turn via a new `_Tee` class (mirrors output to
+both the terminal and an in-memory buffer) — matches the rewind
+buffer's purpose of recovering exactly what scrolled past, not a
+synthesized answer string. Startup banner now mentions the transcript
+path. SDD 7.6a. **Bug caught and fixed before shipping** (same class as
+part 3's own history-file bug): the first pass of REPL-driving tests
+silently created a real `~/.tasker/transcripts/*.md` file on the test
+machine — fixed by mocking `default_transcript_path` everywhere
+`_repl()` is driven in tests. Tests: `test_transcript.py` (new, 17),
+`test_cli_shell_transcript.py` (new, 18). Suite 793 → 828. Live-verified
+(scratch `$HOME`, zero cloud spend): a real chat turn, `/transcript`
+reprint, and the on-disk markdown file all confirmed correct and
+in-order after the session.
 
 **Part 1 — `/model` dynamic onboarding:** an unregistered `/model <tag>`
 that looks like a genuine Ollama model reference (`name:tag`) now offers
@@ -411,36 +436,45 @@ to `/budget` and executes it, and Up-arrow correctly recalls the
 previous history entry — with the scratch history file confirmed to
 contain the real submitted commands afterward.
 
-**Tests:** 730 → 793 across all three parts (+63): `test_onboarding.py`
-(new, 14), `test_cli_shell.py` (+4), `test_provider_ollama.py` (+13),
-`test_cli_shell_context.py` (new, 20), `test_cli_shell_readline.py`
-(new, 12). Full suite green after each part.
+**Tests:** 730 → 793 across parts 1-3 (+63), → 828 with the transcript
+addendum (+35 more): `test_onboarding.py` (new, 14), `test_cli_shell.py`
+(+4), `test_provider_ollama.py` (+13), `test_cli_shell_context.py` (new,
+20), `test_cli_shell_readline.py` (new, 12), `test_transcript.py` (new,
+17), `test_cli_shell_transcript.py` (new, 18). Full suite green after
+each part and after the addendum.
 
 **Files modified:** `tasker/setup/onboarding.py` (new),
 `tasker/workers/providers/ollama.py` (`resolve_num_ctx`, `gpu` param,
 `options.num_ctx`), `tasker/runtime/dispatch.py` (gpu wiring in
 `_build_pipeline`, `context_override` param on `_run_chat_task`),
-`tasker/api/server.py` (gpu wiring), `cli/shell.py` (major — `/model`
-onboarding, `/models`, `/context`, `/budget` real init, per-mode
-pipeline caching, readline integration), `docs/SDD.md` (5.6.1a),
+`tasker/api/server.py` (gpu wiring), `tasker/runtime/transcript.py`
+(new), `cli/shell.py` (major — `/model` onboarding, `/models`,
+`/context`, `/transcript`, `/budget` real init, per-mode pipeline
+caching, readline integration, `_Tee`), `docs/SDD.md` (5.6.1a, 7.6a),
 `docs/SDD_ADDENDUM_PHASE8.md` (B.4.7, B.5.5), `docs/TESTING_GUIDE.md`
-(H13, H14, H15), `docs/TASKER_CHECKLIST.md`, `tests/unit/test_onboarding.py`
-(new), `tests/unit/test_cli_shell.py`, `tests/unit/test_provider_ollama.py`,
-`tests/unit/test_cli_shell_context.py` (new),
-`tests/unit/test_cli_shell_readline.py` (new), CLAUDE.md, COWORK_PROMPT.md.
+(H13, H14, H15, H16), `docs/TASKER_CHECKLIST.md`,
+`tests/unit/test_onboarding.py` (new), `tests/unit/test_cli_shell.py`,
+`tests/unit/test_provider_ollama.py`, `tests/unit/test_cli_shell_context.py`
+(new), `tests/unit/test_cli_shell_readline.py` (new),
+`tests/unit/test_transcript.py` (new), `tests/unit/test_cli_shell_transcript.py`
+(new), CLAUDE.md, COWORK_PROMPT.md.
 
-**Next task:** SDD_ADDENDUM_PHASE8.md Phase 8.4 — SetupWizardScreen +
-ModelSelectorScreen (unchanged, still queued; now also carries B.5.5's
-keyboard-binding/text-selection requirements). This sprint's three parts
-were all interrupt-driven by live testing, not addendum work.
+**Next task:** research-mode grounding sprint (queued by Roland
+immediately after this session, before session-end docs were written --
+see below) — WEB_SEARCH tool executor via Brave Search, RESEARCH-mode
+plan/prompt/synthesis grounding enforcement, honesty-guard extension for
+factual claims with zero retrieval calls. SDD_ADDENDUM_PHASE8.md Phase
+8.4 (SetupWizardScreen + ModelSelectorScreen, now carrying B.5.5's
+keyboard-binding/text-selection requirements) remains queued behind it.
 
 **Blockers:** None.
 
 **Open decisions:** Ctrl-R wasn't separately pty-scripted (same
 underlying GNU readline library already proven live by Tab/Up-arrow);
-`/context`/`/model`/`/effort`/`/models` remain CHAT-mode-scoped only,
-matching the prior sprint's SDD 5.3a pattern; a `/policy` change after a
-mode's pipeline is already cached doesn't retroactively rebuild it
+`/context`/`/model`/`/effort`/`/models`/`/transcript` remain
+CHAT-mode-scoped or REPL-global (not per-mode business logic); a
+`/policy` change after a mode's pipeline is already cached doesn't
+retroactively rebuild it
 within the same REPL session.
 
 ---

@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import io
 import os
 import sys
+from contextlib import redirect_stdout
 from pathlib import Path
 
 # GNU readline: enables arrow-key line editing, Ctrl-R reverse search, and
@@ -58,6 +60,7 @@ from tasker.runtime.dispatch import (
     _EFFORT_LEVELS,
     _DEFAULT_EFFORT,
 )
+from tasker.runtime.transcript import Transcript, default_transcript_path
 from tasker.session.checkpoint import CheckpointStore
 from tasker.setup.onboarding import looks_like_model_tag, onboard_model
 from tasker.workers.registry import WorkerRegistry
@@ -65,11 +68,31 @@ from tasker.workers.registry import WorkerRegistry
 _KNOWN_COMMANDS = (
     "/mode", "/workers", "/policy", "/secure", "/budget",
     "/checkpoint", "/resume", "/model", "/models", "/effort",
-    "/context", "/status", "/help", "/quit", "/exit",
+    "/context", "/transcript", "/status", "/help", "/quit", "/exit",
 )
 _DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 _DEFAULT_HISTORY_PATH = Path.home() / ".tasker_history"
 _HISTORY_MAX_LINES = 1000
+
+
+class _Tee:
+    """Writes to multiple streams at once -- used to mirror a dispatch
+    call's stdout into the session Transcript (SDD 7.6a) while still
+    printing normally to the real terminal, capturing exactly what
+    scrolled past the user (warnings, budget lines, the answer itself)
+    rather than just a synthesized "final answer" string."""
+
+    def __init__(self, *streams) -> None:
+        self._streams = streams
+
+    def write(self, data: str) -> int:
+        for s in self._streams:
+            s.write(data)
+        return len(data)
+
+    def flush(self) -> None:
+        for s in self._streams:
+            s.flush()
 
 
 def _make_completer(registry: WorkerRegistry, _get_buffer=None):
@@ -195,6 +218,43 @@ def _print_models(registry: WorkerRegistry) -> None:
                 f"  {w.id:30s}  {w.tool_protocol.value:12s}  "
                 f"max_context={w.context_window:<8d}  {status}{hint}"
             )
+
+
+def _page_lines(lines: list[str], page_size: int | None = None, _input=input) -> None:
+    """
+    Simple terminal pager (SDD 7.6a) -- prints *lines* in terminal-height
+    chunks, pausing between chunks with a "-- more --" prompt (Enter to
+    continue, q to stop) rather than dumping a potentially long
+    /transcript reprint all at once past the scrollback the user was
+    trying to recover in the first place. *_input* is injectable for
+    testing without a real terminal.
+    """
+    import shutil
+
+    if not lines:
+        return
+    page_size = page_size or max(5, shutil.get_terminal_size(fallback=(80, 24)).lines - 2)
+    for i in range(0, len(lines), page_size):
+        chunk = lines[i:i + page_size]
+        print("\n".join(chunk))
+        if i + page_size < len(lines):
+            try:
+                resp = _input("-- more (Enter to continue, q to quit) --")
+            except (KeyboardInterrupt, EOFError):
+                print()
+                return
+            if resp.strip().lower() == "q":
+                return
+
+
+def _print_transcript(transcript: Transcript, n: int | None) -> None:
+    """/transcript [n] (SDD 7.6a): reprint the last n exchanges (full
+    session if n is None), paged."""
+    lines = transcript.render_exchanges(n)
+    if not lines:
+        print("(transcript empty -- nothing exchanged yet this session)")
+        return
+    _page_lines(lines)
 
 
 def _pull_progress_printer():
@@ -341,7 +401,16 @@ def _repl(
     _ensure_pipeline(mode)
     _init_readline(registry)
 
+    # Chat rewind buffer (SDD 7.6a): every prompt, response, and
+    # slash-command is recorded in memory and auto-written to a markdown
+    # file as the session runs, so scrollback that rolled off screen is
+    # always recoverable via /transcript and the session stays reviewable
+    # after /quit even if the terminal itself is gone.
+    transcript = Transcript(default_transcript_path())
+
     print(f"Tasker REPL  |  mode={mode}  policy={policy}  secure={secure}")
+    if transcript.path is not None:
+        print(f"Transcript:  {transcript.path}")
     print("Type /help for commands, Ctrl-C or /quit to exit.\n")
 
     while True:
@@ -355,6 +424,7 @@ def _repl(
             continue
 
         if line.startswith("/"):
+            transcript.record("event", mode, line)
             parts = line.split(maxsplit=1)
             cmd   = parts[0].lower()
             arg   = parts[1] if len(parts) > 1 else ""
@@ -469,6 +539,19 @@ def _repl(
                         "workers, see /models)"
                     )
 
+            elif cmd == "/transcript":
+                if arg:
+                    try:
+                        n = int(arg)
+                        if n <= 0:
+                            raise ValueError
+                    except ValueError:
+                        print("Usage: /transcript [n]  (n = number of recent exchanges; omit for full session)")
+                    else:
+                        _print_transcript(transcript, n)
+                else:
+                    _print_transcript(transcript, None)
+
             elif cmd == "/status":
                 chat_model_desc = chat_model or f"{DEFAULT_CHAT_WORKER_ID} (default)"
                 context_desc = f"{chat_context_override} tokens" if chat_context_override else "auto"
@@ -493,6 +576,8 @@ def _repl(
                     "                      Ollama tag offers to pull + onboard it)\n"
                     "  /effort <low|med|high>  redirect CHAT mode's default worker\n"
                     "  /context <tokens>   override CHAT mode's num_ctx for this session\n"
+                    "  /transcript [n]     reprint last n exchanges, paged (full session\n"
+                    "                      if omitted); auto-saved to ~/.tasker/transcripts/\n"
                     "  /status             show current session state\n"
                     "  /help               this message\n"
                     "  /quit               exit"
@@ -511,13 +596,17 @@ def _repl(
             # this REPL session's running conversation history. Reuses
             # this mode's cached pipeline (see _ensure_pipeline) so budget
             # usage genuinely accumulates across turns.
-            asyncio.run(_run_chat_task(
-                line, registry, store, chat_history,
-                _resolve_policy_override(policy) if policy_explicit else None,
-                pipeline=_ensure_pipeline(mode),
-                model_override=chat_model, effort=chat_effort,
-                context_override=chat_context_override,
-            ))
+            transcript.record("user", mode, line)
+            buf = io.StringIO()
+            with redirect_stdout(_Tee(sys.stdout, buf)):
+                asyncio.run(_run_chat_task(
+                    line, registry, store, chat_history,
+                    _resolve_policy_override(policy) if policy_explicit else None,
+                    pipeline=_ensure_pipeline(mode),
+                    model_override=chat_model, effort=chat_effort,
+                    context_override=chat_context_override,
+                ))
+            transcript.record("assistant", mode, buf.getvalue().strip())
             # No _evict_if_paused() here -- CHAT's direct-dispatch path
             # never calls SessionManager.tick()/pause (SDD 5.3a), so its
             # cached pipeline's session_mgr can never reach PAUSED.
@@ -525,11 +614,15 @@ def _repl(
         else:
             # Non-slash input in every other mode: treat as a task, full
             # orchestrator plan -> execute-steps -> synthesize pipeline.
-            asyncio.run(_run_task(
-                line, mode, registry, store,
-                _resolve_policy_override(policy) if policy_explicit else None,
-                pipeline=_ensure_pipeline(mode),
-            ))
+            transcript.record("user", mode, line)
+            buf = io.StringIO()
+            with redirect_stdout(_Tee(sys.stdout, buf)):
+                asyncio.run(_run_task(
+                    line, mode, registry, store,
+                    _resolve_policy_override(policy) if policy_explicit else None,
+                    pipeline=_ensure_pipeline(mode),
+                ))
+            transcript.record("assistant", mode, buf.getvalue().strip())
             _evict_if_paused(mode)
 
     _save_history()

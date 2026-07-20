@@ -1138,10 +1138,51 @@ tasker shell                           # enter interactive REPL
 /context <tokens>     override CHAT mode's num_ctx for this REPL
                        session (5.6.1a); precedes the VRAM ceiling and
                        the manifest's own context_window
+/transcript [n]       reprint last n exchanges, paged (full session if
+                       omitted); auto-saved to ~/.tasker/transcripts/ (7.6a)
 /status               show full session status (CHAT's current model,
                        effort, and context override)
 /help                 list all slash commands
 ```
+
+### 7.6a Chat Rewind Buffer (Session Transcript)
+
+**Status:** Added after live REPL testing (Roland) — REPL output scrolls
+off the terminal on a long session and, until this, was simply gone
+once it left scrollback.
+
+**Rule:** the REPL maintains one `Transcript` (`tasker/runtime/
+transcript.py`) for the whole session — every user prompt, every
+assistant response, and every slash command ("key event") is recorded
+in memory as a `TranscriptEntry(timestamp, kind, mode, text)`, `kind`
+one of `"user" | "assistant" | "event"`.
+
+- **Auto-write to disk as the session runs**, not only at exit: the
+  transcript file is created (with a header) the moment the REPL
+  starts, at `~/.tasker/transcripts/<YYYYMMDD-HHMMSS>.md`, and every
+  `record()` call appends immediately — a crash or a closed terminal
+  loses nothing already recorded. If the path can't be created/written
+  (unwritable home directory, full disk), the `Transcript` degrades to
+  in-memory-only rather than crashing the REPL; `/transcript` still
+  works for the rest of that session, it just won't survive the process
+  exiting.
+- **Startup banner** prints the transcript's file path (when disk
+  writing is active) so the user knows where to find it without asking.
+- **`/transcript [n]`** reprints the last `n` *exchanges* (a user prompt
+  plus everything logged until the next user prompt — the reply and any
+  event entries in between) — the full session if `n` is omitted —
+  through a simple terminal pager (chunks sized to the terminal height,
+  `-- more --` between chunks, `q` to stop).
+- **What gets captured for the "assistant" entry** is the dispatch
+  call's entire stdout for that turn (via a small `_Tee` in
+  `cli/shell.py`, mirroring stdout into both the real terminal and an
+  in-memory buffer), not a synthesized "final answer" string — this
+  matches the rewind buffer's purpose: recovering exactly what scrolled
+  past, including any warnings/budget lines printed alongside the answer.
+
+Reusable by a future TUI `HarnessPanel` (8.5) the same way
+`tasker/runtime/dispatch.py` is shared today — `tasker/runtime/
+transcript.py` has no `cli/shell.py` or Textual import coupling.
 
 ---
 
