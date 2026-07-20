@@ -122,6 +122,8 @@ class TestReplChatCommands(unittest.TestCase):
         with mock.patch("builtins.input", side_effect=inputs + ["/quit"]), \
              mock.patch("cli.shell._run_chat_task") as m_chat, \
              mock.patch("cli.shell._run_task") as m_task, \
+             mock.patch("cli.shell._init_readline"), \
+             mock.patch("cli.shell._save_history"), \
              redirect_stdout(out):
             _repl(registry, store, initial_mode=initial_mode)
         return out.getvalue(), m_chat, m_task
@@ -214,6 +216,8 @@ class TestReplModelOnboarding(unittest.TestCase):
                  "cli.shell.onboard_model",
                  new=mock.AsyncMock(return_value=onboard_return),
              ) as m_onboard, \
+             mock.patch("cli.shell._init_readline"), \
+             mock.patch("cli.shell._save_history"), \
              redirect_stdout(out):
             _repl(registry, store, initial_mode="chat")
         return out.getvalue(), m_onboard

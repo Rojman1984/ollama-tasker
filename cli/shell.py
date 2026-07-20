@@ -25,6 +25,18 @@ import argparse
 import asyncio
 import os
 import sys
+from pathlib import Path
+
+# GNU readline: enables arrow-key line editing, Ctrl-R reverse search, and
+# persistent cross-session history on plain input() the moment it's
+# imported -- no other wiring needed for those three. Not available on
+# every platform (notably Windows without pyreadline3, per CLAUDE.md's
+# PowerShell-secondary note) -- REPL still works via plain input() without
+# it, just without editing/history/completion.
+try:
+    import readline
+except ImportError:
+    readline = None
 
 from tasker.runtime.dispatch import (
     _DEFAULT_STORE_DIR,
@@ -56,6 +68,71 @@ _KNOWN_COMMANDS = (
     "/context", "/status", "/help", "/quit", "/exit",
 )
 _DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
+_DEFAULT_HISTORY_PATH = Path.home() / ".tasker_history"
+_HISTORY_MAX_LINES = 1000
+
+
+def _make_completer(registry: WorkerRegistry, _get_buffer=None):
+    """
+    Tab-completion (SDD 7.6): /commands from the start of the line, mode
+    names after "/mode ", worker ids after "/model " or "/resume ".
+    *_get_buffer* is injectable (defaults to readline.get_line_buffer)
+    so this is unit-testable without a real terminal/readline session.
+    """
+    get_buffer = _get_buffer or (lambda: readline.get_line_buffer())
+
+    def _complete(text: str, state: int) -> str | None:
+        buffer = get_buffer()
+        if buffer.startswith("/mode "):
+            candidates = sorted(m for m in _MODE_NAMES if m.startswith(text))
+        elif buffer.startswith("/model ") or buffer.startswith("/resume "):
+            candidates = sorted(w.id for w in registry.list_all() if w.id.startswith(text))
+        elif " " not in buffer:
+            candidates = sorted(c for c in _KNOWN_COMMANDS if c.startswith(text))
+        else:
+            candidates = []
+        if state < len(candidates):
+            return candidates[state]
+        return None
+
+    return _complete
+
+
+def _load_history(history_path: Path = _DEFAULT_HISTORY_PATH) -> None:
+    if readline is None:
+        return
+    try:
+        if history_path.exists():
+            readline.read_history_file(str(history_path))
+    except OSError:
+        pass
+    readline.set_history_length(_HISTORY_MAX_LINES)
+
+
+def _save_history(history_path: Path = _DEFAULT_HISTORY_PATH) -> None:
+    if readline is None:
+        return
+    try:
+        history_path.parent.mkdir(parents=True, exist_ok=True)
+        readline.write_history_file(str(history_path))
+    except OSError:
+        pass
+
+
+def _init_readline(registry: WorkerRegistry, history_path: Path = _DEFAULT_HISTORY_PATH) -> bool:
+    """
+    Wire up arrow-key editing (free from importing readline), persistent
+    cross-session history at ~/.tasker_history, Ctrl-R reverse search
+    (also free from the import), and tab-completion. Returns False (no-op)
+    on a platform without readline -- the REPL degrades to plain input().
+    """
+    if readline is None:
+        return False
+    readline.set_completer_delims(" \t\n")
+    readline.set_completer(_make_completer(registry))
+    readline.parse_and_bind("tab: complete")
+    _load_history(history_path)
+    return True
 
 
 def _format_hms(td) -> str:
@@ -262,6 +339,7 @@ def _repl(
             del pipelines[m]
 
     _ensure_pipeline(mode)
+    _init_readline(registry)
 
     print(f"Tasker REPL  |  mode={mode}  policy={policy}  secure={secure}")
     print("Type /help for commands, Ctrl-C or /quit to exit.\n")
@@ -453,6 +531,8 @@ def _repl(
                 pipeline=_ensure_pipeline(mode),
             ))
             _evict_if_paused(mode)
+
+    _save_history()
 
 
 # --------------------------------------------------------------------------- #

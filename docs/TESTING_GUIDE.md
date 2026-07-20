@@ -498,3 +498,70 @@ chat turns answered normally (budget stayed 0.0 -- correct, local calls
 never consume Ollama Cloud budget), including the second turn after
 `/context 4096` was set, confirming the override was accepted and sent
 without breaking the call. Local only, zero cloud spend.
+
+## H15. readline REPL -- arrow-key editing, history, Ctrl-R, tab-completion (2026-07-20)
+
+New sprint (REPL/TUI UX package), part 3 of 3. Roland's live session
+showed raw escape codes on arrow keys -- the REPL's `input()` had no
+line-editing support at all.
+
+### H15.1 Unit tests
+```bash
+python -m unittest tests.unit.test_cli_shell_readline -v
+```
+Covers: `_make_completer()`'s candidate logic (slash commands at the
+start of a line, mode names after `/mode `, worker ids after `/model `
+or `/resume `, no candidates for a plain chat message, exhausted-state
+returns `None`) via an injectable line-buffer callable -- no real
+terminal needed; `_load_history()`/`_save_history()` roundtrip through a
+real (but tmp-directory) history file, missing-file is a silent no-op,
+parent directories are created on save; `_init_readline()` configures
+the completer/delims/tab-binding and returns `True` when `readline` is
+available, `False` (safe no-op) when it isn't (`cli.shell.readline`
+patched to `None`, covering the Windows-without-pyreadline3 case per
+CLAUDE.md's PowerShell-secondary note). A dedicated regression test
+(`test_never_touches_real_home_directory_history_file`) guards against
+the exact mistake caught while writing these tests: every REPL-driving
+test in `test_cli_shell.py`/`test_cli_shell_context.py` now mocks
+`_init_readline`/`_save_history`, since without that they were silently
+creating/writing a real `~/.tasker_history` file on the machine running
+the suite.
+
+### H15.2 Live: real pty, tab-completion + arrow-key history recall + persisted history
+```python
+# scripted via Python's pty module -- input() only gets real line editing
+# through an actual pseudo-terminal, not a piped stdin
+import os, pty
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvpe("tasker-cli", ["tasker-cli", "shell"], env)  # env: OLLAMA_BASE_URL, TASKER_PROFILE, HOME=<scratch>
+# ...then os.write(fd, b"/bud"); os.write(fd, b"\t"); os.write(fd, b"\n")
+```
+Live-verified 2026-07-20 (Designlab1, WSL Ollama, real pty via
+`os.pty.fork()`, scratch `$HOME` so nothing touched the real
+`~/.tasker_history`): typing `/mod` + Tab extended to the longest common
+prefix `/mode` among the three ambiguous `/mode`/`/model`/`/models`
+matches (correct GNU readline ambiguous-completion behavior); typing
+`/bud` + Tab unambiguously completed to `/budget` and executed it,
+printing real budget stats (`mode=chat  budget=0.0/3000 units (0.0%)
+plan=pro  window_remaining=4:59:56`); after clearing the line and
+pressing Up-arrow, readline correctly recalled the previous history
+entry `/budget`. The scratch `~/.tasker_history` file was confirmed to
+contain the real submitted commands (`/budget`, `/quit`) after the
+session exited. Ctrl-R reverse search was not separately scripted (it's
+the same GNU readline C library already exercised live by Tab and
+Up-arrow, not additional code this project wrote) but is enabled by the
+same `import readline`. Local only, zero cloud spend (no chat/tool
+dispatch beyond `/budget`, which makes no worker call).
+
+## SDD_ADDENDUM_PHASE8.md B.5.5 -- Keyboard Bindings & Text Selection (spec only)
+
+New requirement section added to the TUI addendum (no TUI code changed
+this sprint): every 8.4/8.5 screen with a text input needs a Textual
+equivalent of the REPL's arrow-key history recall, Ctrl-R-equivalent
+reverse search, and tab-completion; every output/report panel needs
+verified native terminal text selection (or an explicit in-app
+copy-to-clipboard fallback if Textual's own mouse capture defeats native
+selection for that widget). See B.5.5 for the full requirement list.
+Checked off nothing (spec only) -- B.11's Phase 8.4/8.5 checklists
+gained a line each pointing back at B.5.5.

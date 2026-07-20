@@ -565,6 +565,63 @@ Updated automatically when:
 - A model is confirmed in the model selector
 - A harness task starts/completes
 
+### B.5.5 Keyboard Bindings & Text Selection (requirement for 8.4/8.5)
+
+**Status:** Spec only, added after the 2026-07-20 REPL/TUI UX sprint --
+`cli/shell.py`'s REPL gained real line editing (arrow keys, persistent
+history, Ctrl-R reverse search, tab-completion) via Python's stdlib
+`readline`. The Textual TUI (still 8.4/8.5, not built this sprint) needs
+its own equivalent of every one of those gains, expressed in Textual's
+own idioms rather than readline's -- this subsection is the requirement
+list for whoever implements 8.4/8.5, not an implementation.
+
+**Keyboard bindings required on every screen with a text input**
+(`SetupWizardScreen`'s re-run prompts if any, `ModelSelectorScreen`'s
+model-tag entry, `HarnessPanel`'s task input field):
+- Arrow-key cursor movement and Up/Down history recall through prior
+  inputs *in that widget* -- Textual's `Input` widget provides basic
+  cursor movement natively; history recall does not and must be added
+  (mirrors the REPL's persistent `~/.tasker_history`; a TUI-side history
+  file, most likely the *same* `~/.tasker_history`, is preferred over a
+  second separate history store so a user's REPL and TUI sessions share
+  recall).
+- A reverse-search binding equivalent to the REPL's Ctrl-R (exact key
+  TBD by whoever implements this -- Ctrl-R itself is claimed by some
+  terminal emulators/Textual internals and needs live verification, not
+  assumed free) filtering that widget's history as the user types.
+- Tab-completion equivalent to the REPL's: `/`-prefixed commands (if
+  `HarnessPanel` exposes REPL-style commands rather than pure GUI
+  controls), worker ids in `ModelSelectorScreen`'s model-tag entry
+  field, mode names in `HarnessPanel`'s mode selector.
+- A documented, discoverable "show all keybindings" affordance --
+  Textual's built-in `?`/footer key-bindings display satisfies this if
+  enabled; must not ship with keybindings that exist but are undiscoverable.
+
+**Text selection requirement, every output/report panel**
+(`ModelSelectorScreen`'s readiness report, `HarnessPanel`'s streaming
+output display, `SetupWizardScreen`'s per-step status text): the
+rendered text must be selectable and copyable via the terminal
+emulator's own native mouse selection (the same thing a user expects to
+work in any TTY app -- `less`, `vim`, a shell prompt). This is a real,
+non-trivial Textual constraint: Textual's mouse handling can intercept
+click-drag for its own widget interactions (e.g. scrolling, button
+presses) in a way that defeats the terminal's native text-selection
+mode. Whoever implements 8.4/8.5 must verify, per output-bearing widget,
+that a user can still click-drag-select and copy text through their
+terminal emulator (not just through a Textual-internal "copy" action) --
+this is a live/manual verification item (same category as B.8's
+screenshot-or-transcript requirement), not something a headless
+`App.run_test()` suite can confirm on its own. If Textual's own mouse
+capture cannot be reconciled with native terminal selection for a given
+widget, the fallback is an explicit in-app "copy to clipboard" action
+for that panel's content -- but native selection is the preferred,
+default expectation, not the exception.
+
+**Explicitly not required this sprint:** none of the above is
+implemented yet -- B.5.5 is a checklist for 8.4/8.5's own SDD-first
+pass, added now while the readline REPL work that motivated it is fresh,
+so 8.4/8.5 doesn't have to rediscover these requirements independently.
+
 ---
 
 ## B.6 Model-Agnostic Design Principle
@@ -763,6 +820,9 @@ in Phases 7.5.3 and 7.5.4.
 - [ ] tasker/tui/widgets/readiness_panel.py (ReadinessReportPanel)
 - [ ] Textual message bus wired (WizardStepCompleted,
       ReadinessCheckCompleted, WorkerRegistryUpdated)
+- [ ] Keyboard bindings + text selection per B.5.5 (history recall,
+      reverse-search, tab-completion on ModelSelectorScreen's model-tag
+      entry; native text selection verified on the readiness report panel)
 - [ ] Manual verification: full setup wizard runs through TUI
 - [ ] Manual verification: model test + registry write through TUI
 
@@ -772,6 +832,9 @@ in Phases 7.5.3 and 7.5.4.
 - [ ] Task input + async execution
 - [ ] Output streaming display
 - [ ] Session status (budget, checkpoint indicator for COWORK)
+- [ ] Keyboard bindings + text selection per B.5.5 (history recall,
+      reverse-search, tab-completion on the task input field; native
+      text selection verified on the streaming output display)
 - [ ] Manual verification: CHAT task through TUI
 - [ ] Manual verification: COWORK task with checkpoint through TUI
 ```

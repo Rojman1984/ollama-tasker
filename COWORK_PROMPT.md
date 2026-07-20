@@ -113,7 +113,39 @@ interim REPL from the session before this one has been superseded.
 | A8.3 | Addendum: Textual TUI skeleton (TuiApp, WelcomeScreen, status bar) | ✅ COMPLETE |
 | A8.4–8.5 | Addendum: SetupWizardScreen + ModelSelectorScreen, HarnessPanel | ⬜ NOT STARTED |
 
-**Last completed task:** CHAT mode direct dispatch + `/model` + `/effort`
+**Last completed task:** REPL/TUI UX sprint, ✅ COMPLETE (2026-07-20;
+three parts, one commit each, from Roland's live-testing session,
+following directly after the three same-day bug-fix sessions below).
+Part 1 — `/model` dynamic onboarding: an unregistered `/model <tag>`
+shaped like a real Ollama tag now offers to pull it (HTTP `/api/pull`,
+never the `ollama` CLI), probe it for tool-calling readiness, and
+register it (new `tasker/setup/onboarding.py`, SDD_ADDENDUM_PHASE8.md
+B.4.7) — live-verified with a real pull + honest probe-failure path
+against a tiny model. Part 2 — context controls: `WorkerManifest.
+context_window` wired into `OllamaProvider` as `options.num_ctx` (never
+sent before); `resolve_num_ctx()` exempts cloud workers and caps local
+ones by a VRAM-based estimate with a "fits in VRAM" hint; new `/context
+<tokens>` override and `/models` (alias `/model list`) command; the
+REPL now builds one pipeline per mode up front so `/budget` shows real
+accumulating usage from 0.0 instead of "not active" (SDD 5.6.1a) —
+live-verified: real VRAM cap (128000→~32768 on the real GTX 1050 Ti),
+real `/budget` init, real `/context` override on a live turn. Part 3 —
+readline REPL: `cli/shell.py` gained arrow-key editing, Ctrl-R reverse
+search, persistent `~/.tasker_history`, and tab-completion for
+commands/modes/worker-ids via stdlib `readline`; caught and fixed a
+real bug before shipping (tests were silently writing to the real
+`~/.tasker_history`); new SDD_ADDENDUM_PHASE8.md B.5.5 spec section
+(keyboard bindings + text selection requirements for TUI 8.4/8.5, no
+TUI code touched) — live-verified via a real pty: ambiguous/unambiguous
+tab-completion and Up-arrow history recall all worked correctly. Suite
+730 → 793 (+63) across all three parts. Evidence:
+docs/TASKER_CHECKLIST.md → "REPL/TUI UX sprint, part 1/2/3 (2026-07-20)".
+
+---
+
+## Previous completed task (kept for reference)
+
+CHAT mode direct dispatch + `/model` + `/effort`
 + honesty-guard gating, ✅ COMPLETE (2026-07-20; third live bug from
 Roland the same day, this time from his own chat-mode test — one
 dispatch, three issues). Bug: a plain "Hello" was routed through the
@@ -257,9 +289,25 @@ ModelSelectorScreen (wraps `tasker/setup/readiness.py`'s
 `WorkerRegistryUpdated`) per B.11. Then Phase 8.5 (HarnessPanel, built
 on `tasker/runtime/dispatch.py`). TASKER-P1 manual verification for 8.3
 still open (no access this session, same as every prior phase that
-needed it). All three of today's bug-fix sessions were interrupt-driven
-by live testing, not a step in the addendum sequence — this queue is
+needed it). It now also carries B.5.5's keyboard-binding/text-selection
+requirements (spec added this session, not yet implemented). All three
+bug-fix sessions plus this REPL/TUI UX sprint were interrupt-driven by
+live testing, not a step in the addendum sequence — this queue is
 otherwise unchanged.
+
+**Files modified this session (2026-07-20, REPL/TUI UX sprint, 3
+commits):** `tasker/setup/onboarding.py` (new), `tasker/workers/
+providers/ollama.py` (`resolve_num_ctx`, `gpu` param, `options.num_ctx`),
+`tasker/runtime/dispatch.py` (gpu wiring, `context_override` param),
+`tasker/api/server.py` (gpu wiring), `cli/shell.py` (major — `/model`
+onboarding, `/models`, `/context`, `/budget` real init, per-mode
+pipeline caching, readline integration), `docs/SDD.md` (5.6.1a),
+`docs/SDD_ADDENDUM_PHASE8.md` (B.4.7, B.5.5), `docs/TESTING_GUIDE.md`
+(H13, H14, H15), `tests/unit/test_onboarding.py` (new, 14),
+`tests/unit/test_cli_shell.py` (+4), `tests/unit/test_provider_ollama.py`
+(+13), `tests/unit/test_cli_shell_context.py` (new, 20),
+`tests/unit/test_cli_shell_readline.py` (new, 12),
+`docs/TASKER_CHECKLIST.md`, `CLAUDE.md`, `COWORK_PROMPT.md`.
 
 **Files modified this session (2026-07-20, third bug-fix pass —
 CHAT mode direct dispatch):** `docs/SDD.md` (new 5.3a, 7.6 REPL
@@ -298,6 +346,16 @@ the `_execute_steps()` honesty-guard call site updated to pass
 (new H10)*.)*
 
 **Open decisions / blockers:**
+- Ctrl-R reverse search wasn't separately pty-scripted this sprint (the
+  same underlying GNU readline library was already proven live by
+  Tab-completion and Up-arrow history recall).
+- `/context`/`/models`/`/model` onboarding remain CHAT-mode-scoped only,
+  same pattern as `/model`/`/effort` from the prior sprint; extending to
+  COWORK/CODE/RESEARCH's step-based dispatch would need a different,
+  per-step design.
+- B.5.5 (TUI keyboard bindings + text selection) is spec-only -- no
+  Textual code implements any of it yet; it's a requirement list for
+  whoever picks up 8.4/8.5.
 - CHAT's direct-dispatch path has no `SessionManager.tick()`/pause/
   checkpoint involvement by design (a chat turn is a single instant
   call); cloud budget from a chat call routed to a cloud worker (via

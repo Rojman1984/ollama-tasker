@@ -352,6 +352,101 @@ python -m unittest tests.unit.test_orchestrator_nano -v
 
 *(Update this section at the end of every Cowork or Code session)*
 
+**Last worked on:** REPL/TUI UX sprint from Roland's live-testing
+session -- three parts, one commit each, following directly after the
+three same-day bug-fix sessions below. Full write-ups in
+`docs/TASKER_CHECKLIST.md` → "REPL/TUI UX sprint, part 1/2/3 (2026-07-20)".
+
+**Part 1 — `/model` dynamic onboarding:** an unregistered `/model <tag>`
+that looks like a genuine Ollama model reference (`name:tag`) now offers
+to onboard it instead of a flat "Unknown worker id" rejection: confirm
+with the user, pull via HTTP `POST /api/pull` on `OLLAMA_BASE_URL`
+(never the `ollama` CLI — binding server rules), run the existing
+readiness probe to detect tool protocol, register a `WorkerManifest` on
+success, pin CHAT to it. New `tasker/setup/onboarding.py`
+(`looks_like_model_tag`, `pull_model`, `onboard_model`), reusing
+`ReadinessChecker` so onboarding exercises the exact same path as
+`tasker-setup --check-model`. SDD_ADDENDUM_PHASE8.md B.4.7. Live: a real
+`/api/pull` against the WSL Ollama server landed `smollm2:135m` on disk
+(confirmed via `/api/tags`), the probe correctly rejected it as not
+tool-capable, nothing was registered — proved the failure path
+honestly; cleaned up via `/api/delete`.
+
+**Part 2 — context controls:** `WorkerManifest.context_window` is now
+wired into `OllamaProvider` as `options.num_ctx` (never sent before —
+Ollama silently applied its own 4096 server default). New
+`resolve_num_ctx()`: cloud workers exempt (always full manifest value);
+local workers capped by a VRAM-based estimate using the same cached GPU
+detection `apply_gpu_availability()` already uses, with a "fits in
+VRAM" hint. New `/context <tokens>` REPL override (wins over everything
+via `WorkerTask.context["num_ctx_override"]`). New `/models` command
+(alias `/model list`) listing DEFAULT/LOCAL/CLOUD groups with tool
+protocol, max context, and the VRAM-fit hint. The REPL now builds one
+pipeline per mode up front and reuses it across turns, so `/budget`
+shows real accumulating usage from 0.0 the moment a mode is entered
+instead of a static "not active" placeholder; a pipeline whose session
+goes `PAUSED` is evicted so the next task in that mode starts fresh.
+SDD 5.6.1a. Live: `/models` correctly capped `lfm2.5-local`'s declared
+128000-token context to ~32768 for the real GTX 1050 Ti 4096MB;
+`/budget` showed real `0.0/3000` before any task ran; `/context 4096`
+worked end-to-end on a live chat turn.
+
+**Part 3 — readline REPL + TUI spec addendum:** `cli/shell.py` gained
+real GNU readline integration — arrow-key editing and Ctrl-R reverse
+search come free from `import readline` (guarded, `None` on platforms
+without it); persistent history at `~/.tasker_history`; tab-completion
+for `/`commands, mode names after `/mode `, worker ids after
+`/model `/`/resume `. Bug caught and fixed *before* it shipped: the
+first pass of REPL-driving tests silently wrote a real
+`~/.tasker_history` on the test-running machine — fixed by mocking
+`_init_readline`/`_save_history` in every such test, plus a dedicated
+regression test guarding against it recurring. New
+SDD_ADDENDUM_PHASE8.md B.5.5 "Keyboard Bindings & Text Selection" — a
+requirement list (spec only, no TUI code touched) for 8.4/8.5: history
+recall/reverse-search/tab-completion equivalents on every text input,
+verified native terminal text selection on every output panel. Live: a
+real pty (`pty.fork()`, scratch `$HOME`) confirmed `/mod`+Tab extends to
+the ambiguous common prefix `/mode`, `/bud`+Tab unambiguously completes
+to `/budget` and executes it, and Up-arrow correctly recalls the
+previous history entry — with the scratch history file confirmed to
+contain the real submitted commands afterward.
+
+**Tests:** 730 → 793 across all three parts (+63): `test_onboarding.py`
+(new, 14), `test_cli_shell.py` (+4), `test_provider_ollama.py` (+13),
+`test_cli_shell_context.py` (new, 20), `test_cli_shell_readline.py`
+(new, 12). Full suite green after each part.
+
+**Files modified:** `tasker/setup/onboarding.py` (new),
+`tasker/workers/providers/ollama.py` (`resolve_num_ctx`, `gpu` param,
+`options.num_ctx`), `tasker/runtime/dispatch.py` (gpu wiring in
+`_build_pipeline`, `context_override` param on `_run_chat_task`),
+`tasker/api/server.py` (gpu wiring), `cli/shell.py` (major — `/model`
+onboarding, `/models`, `/context`, `/budget` real init, per-mode
+pipeline caching, readline integration), `docs/SDD.md` (5.6.1a),
+`docs/SDD_ADDENDUM_PHASE8.md` (B.4.7, B.5.5), `docs/TESTING_GUIDE.md`
+(H13, H14, H15), `docs/TASKER_CHECKLIST.md`, `tests/unit/test_onboarding.py`
+(new), `tests/unit/test_cli_shell.py`, `tests/unit/test_provider_ollama.py`,
+`tests/unit/test_cli_shell_context.py` (new),
+`tests/unit/test_cli_shell_readline.py` (new), CLAUDE.md, COWORK_PROMPT.md.
+
+**Next task:** SDD_ADDENDUM_PHASE8.md Phase 8.4 — SetupWizardScreen +
+ModelSelectorScreen (unchanged, still queued; now also carries B.5.5's
+keyboard-binding/text-selection requirements). This sprint's three parts
+were all interrupt-driven by live testing, not addendum work.
+
+**Blockers:** None.
+
+**Open decisions:** Ctrl-R wasn't separately pty-scripted (same
+underlying GNU readline library already proven live by Tab/Up-arrow);
+`/context`/`/model`/`/effort`/`/models` remain CHAT-mode-scoped only,
+matching the prior sprint's SDD 5.3a pattern; a `/policy` change after a
+mode's pipeline is already cached doesn't retroactively rebuild it
+within the same REPL session.
+
+---
+
+## Previous Session Notes (CHAT mode direct dispatch + /model + /effort + honesty-guard gating, kept for reference)
+
 **Last worked on:** CHAT mode direct dispatch + `/model` + `/effort` +
 honesty-guard gating -- the third live bug from Roland the same day, this
 time from his own chat-mode test (one dispatch, three issues). Full

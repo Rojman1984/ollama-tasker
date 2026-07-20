@@ -1801,3 +1801,56 @@ change after a mode's pipeline is already cached does not retroactively
 rebuild that pipeline within the same REPL session (documented
 limitation, same simplification the prior TUI REPL used for its own
 per-mode budget caching).
+
+## REPL/TUI UX sprint, part 3 -- readline REPL + TUI spec addendum (2026-07-20)
+
+Part 3 of 3 -- see part 1's entry above for the sprint's origin.
+
+- [x] `cli/shell.py` gained real GNU readline integration: arrow-key
+      line editing and Ctrl-R reverse search come free from `import
+      readline` (guarded -- `None` on a platform without it, e.g.
+      Windows without pyreadline3); persistent history at
+      `~/.tasker_history` (`_load_history()`/`_save_history()`, loaded
+      at REPL startup, saved when the loop exits via any path);
+      tab-completion (`_make_completer()`) for `/`-prefixed commands at
+      the start of a line, mode names after `/mode `, and worker ids
+      after `/model `/`/resume `.
+- [x] **Bug caught and fixed while writing tests, not shipped:** the
+      first pass of `_repl()`-driving tests in `test_cli_shell.py`/
+      `test_cli_shell_context.py` silently created and wrote a real
+      `~/.tasker_history` file on the machine running the suite --
+      `_init_readline()`/`_save_history()` were never mocked. Fixed by
+      mocking both in every existing REPL-driving test, plus a dedicated
+      regression test (`test_never_touches_real_home_directory_history_file`)
+      to guard against it recurring.
+- [x] **SDD-first:** new SDD_ADDENDUM_PHASE8.md B.5.5 "Keyboard Bindings
+      & Text Selection" -- a requirement list (not an implementation) for
+      whoever builds 8.4/8.5: history recall, reverse-search, and
+      tab-completion equivalents on every text-input widget; verified
+      native terminal text selection (or an explicit copy-to-clipboard
+      fallback) on every output/report panel, called out as a
+      live/manual verification item like B.8's screenshot-or-transcript
+      requirement. B.11's Phase 8.4 and 8.5 checklists each gained a
+      line pointing back at B.5.5.
+- [x] Tests: `tests/unit/test_cli_shell_readline.py` (new, 12 tests).
+- [x] Full suite green: **793 tests, OK** (was 781).
+- [x] **Live smoke** (Designlab1, WSL Ollama, real pty via Python's
+      `pty.fork()`, scratch `$HOME` so the real `~/.tasker_history` was
+      never touched): `/mod` + Tab correctly extended to the longest
+      common prefix `/mode` among the three ambiguous
+      `/mode`/`/model`/`/models` matches; `/bud` + Tab unambiguously
+      completed to `/budget` and executed it, printing real budget
+      stats; Up-arrow after clearing the line correctly recalled the
+      previous history entry (`/budget`); the scratch history file
+      contained the real submitted commands after the session exited.
+
+**Open decisions / known issues:** Ctrl-R reverse search wasn't
+separately pty-scripted this session (Tab and Up-arrow already prove
+the same underlying GNU readline C library is correctly wired via
+`import readline`; Ctrl-R is inherent to that same library, not
+additional project code) -- a future session wanting that specific live
+evidence could script `\x12` + a search term through the same pty
+harness. Tab-completion's candidate set is currently limited to
+commands/modes/worker-ids per B.5.5's REPL-only scope this sprint; it
+does not complete file paths or arbitrary task text, which was never in
+scope.
