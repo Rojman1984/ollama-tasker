@@ -35,6 +35,7 @@ import time
 import urllib.parse
 from pathlib import Path
 
+from tasker.runtime.delegation import DelegationContext
 from tasker.workers.base import ComputeLocation, ToolID, WorkerManifest, WorkerToolResult
 
 _MAX_OUTPUT_CHARS = 8_000
@@ -92,6 +93,7 @@ async def execute_tool(
     worker: WorkerManifest,
     cwd: Path,
     timeout_s: float = _DEFAULT_TIMEOUT_S,
+    delegation: DelegationContext | None = None,
 ) -> WorkerToolResult:
     """
     Runs tool_result.tool_name for real and returns a NEW WorkerToolResult
@@ -99,6 +101,11 @@ async def execute_tool(
     failure mode (bad input, timeout, denied, unimplemented) becomes
     .error on the returned result so the multi-turn loop can feed it
     back to the model instead of crashing the step.
+
+    *delegation* (SDD 5.7c) is only consulted for DELEGATE_AGENT -- every
+    other tool ignores it. None (the default) means "delegation isn't
+    wired into this call site", which DELEGATE_AGENT reports as its own
+    clean error rather than crashing.
     """
     start = time.monotonic()
     try:
@@ -112,6 +119,15 @@ async def execute_tool(
                     f"Tool '{tool_result.tool_name}' is restricted to LOCAL_HARDWARE "
                     f"workers (this worker is {worker.compute_location.value})"
                 ),
+                duration_ms=int((time.monotonic() - start) * 1000),
+            )
+
+        if tool_result.tool_name == ToolID.DELEGATE_AGENT.value:
+            output, error = await _exec_delegate_agent(tool_result.tool_input, delegation)
+            return dataclasses.replace(
+                tool_result,
+                tool_output=output,
+                error=error,
                 duration_ms=int((time.monotonic() - start) * 1000),
             )
 
@@ -236,6 +252,54 @@ async def _exec_file_write(tool_input: dict, cwd: Path, timeout_s: float) -> tup
     except OSError as exc:
         return None, str(exc)
     return f"wrote {len(content)} bytes to {raw_path}", None
+
+
+# --------------------------------------------------------------------------- #
+# DELEGATE_AGENT -- sub-task dispatch (SDD 5.7c)
+# --------------------------------------------------------------------------- #
+
+async def _exec_delegate_agent(
+    tool_input: dict, delegation: DelegationContext | None,
+) -> tuple[dict | None, str | None]:
+    """
+    Spawn a sub-task through the SAME dispatch pipeline the parent task is
+    using (tasker/runtime/dispatch.py's _run_task()) -- inherited mode,
+    routing policy, and privacy tier (all baked into the shared
+    ExecutionConfig the reused pipeline carries), the SAME shared budget
+    and concurrency manager (a sub-agent consumes the parent's own Ollama
+    Cloud slots/budget, never a separate allowance), bounded depth, and a
+    per-top-level-task sub-agent cap (SDD 5.7c) -- never trusts the
+    requesting model's own claims about how deep or how many.
+    """
+    task_text = tool_input.get("task")
+    if not task_text:
+        return None, "missing required 'task'"
+    if delegation is None:
+        return None, "delegate_agent is not available outside a dispatched task"
+    if delegation.depth >= delegation.max_depth:
+        return None, (
+            f"delegation depth limit ({delegation.max_depth}) reached -- "
+            f"cannot spawn a further sub-agent from here"
+        )
+    if delegation.spawned[0] >= delegation.max_sub_agents:
+        return None, f"sub-agent cap ({delegation.max_sub_agents}) reached for this task"
+    delegation.spawned[0] += 1
+
+    # Deferred import: tasker.runtime.dispatch -> tasker.tools.loop ->
+    # tasker.tools.executor already exists in the other direction: a
+    # module-level import here would be a real cycle. Safe deferred --
+    # both modules are fully loaded by the time any tool actually executes.
+    from tasker.runtime.dispatch import _run_task
+
+    child = delegation.child()
+    print(f"  [sub-agent depth={child.depth}] delegating: {task_text[:70]}...")
+    output = await _run_task(
+        task_text, delegation.mode_name, delegation.registry, delegation.store,
+        pipeline=delegation.pipeline, delegation=child,
+    )
+    if output is None:
+        return None, "sub-agent task did not complete (see output above for details)"
+    return {"task": task_text, "result": output}, None
 
 
 # --------------------------------------------------------------------------- #

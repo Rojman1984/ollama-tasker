@@ -235,6 +235,7 @@ async def _execute_steps(
     session_mgr,
     concurrency_mgr,
     provider_map,
+    delegation=None,
 ) -> tuple[list, bool]:
     """
     Drive plan steps from start_index, calling SessionManager.tick() before
@@ -242,6 +243,10 @@ async def _execute_steps(
     in-progress plan, run the full pause flow, and return (results, True).
     completed_records is mutated in place so the checkpoint carries every
     finished step, including ones completed before a resume.
+
+    *delegation* (SDD 5.7c) is threaded into every step's run_tool_loop()
+    call unchanged -- depth only increases when a step's worker actually
+    calls DELEGATE_AGENT (see DelegationContext.child()), not per step.
     """
     from datetime import datetime
 
@@ -315,7 +320,7 @@ async def _execute_steps(
             print(f"  No provider for {worker.provider.value}")
             continue
         try:
-            result = await run_tool_loop(wt, worker, provider, cwd=Path.cwd())
+            result = await run_tool_loop(wt, worker, provider, cwd=Path.cwd(), delegation=delegation)
             before = result.output
             result = check_side_effect_honesty(result, task, step.description)
             if result.output != before:
@@ -403,9 +408,16 @@ async def _run_task(
     policy_override=None,
     *,
     pipeline=None,
-) -> None:
+    delegation=None,
+) -> str | None:
     """
-    Dispatch a task through the orchestrator → provider pipeline.
+    Dispatch a task through the orchestrator → provider pipeline. Returns
+    the synthesized output string on success, None otherwise (planning
+    failure, pause, no results, or a synthesis error) -- callers that
+    only care about the printed transcript (cli/shell.py's REPL/CLI) can
+    ignore the return value; DELEGATE_AGENT's executor (SDD 5.7c) is the
+    one caller that needs it, to hand a sub-task's real result back to
+    the parent worker as tool output.
 
     pipeline: optional pre-built _build_pipeline() tuple. cli/shell.py's
     one-shot CLI/REPL always leaves this None (fresh budget/session per
@@ -413,14 +425,26 @@ async def _run_task(
     per-mode cached pipeline so budget usage accumulates across turns
     within the same mode, closer to how a real interactive session should
     read -- see that module's docstring for the caching/eviction contract.
+
+    delegation: optional DelegationContext (SDD 5.7c). None (the top-level
+    call from a REPL/CLI dispatch) means a fresh depth-0 context is built
+    here so this task's own steps can delegate; a sub-agent's own
+    recursive _run_task() call passes its child() context instead, so
+    depth/spawn-count/pipeline all carry through correctly.
     """
     from tasker.workers.base import Capability, ClassifierResult, TaskType
 
     if pipeline is None:
         pipeline = _build_pipeline(mode_name, store, policy_override)
         if pipeline is None:
-            return
+            return None
     profile_name, config, budget, session_mgr, concurrency_mgr, provider_map, orchestrator = pipeline
+
+    if delegation is None:
+        from tasker.runtime.delegation import DelegationContext
+        delegation = DelegationContext(
+            registry=registry, store=store, mode_name=mode_name, pipeline=pipeline,
+        )
 
     # Exclude workers whose provider has no wired implementation in this
     # pipeline's provider_map -- e.g. a Fugu/Anthropic/OpenAI worker when
@@ -445,7 +469,7 @@ async def _run_task(
         plan = await orchestrator.plan(task, classifier_output, all_workers)
     except Exception as exc:
         print(f"Planning failed: {type(exc).__name__}: {exc}")
-        return
+        return None
     plan = _enforce_research_grounding(plan, mode_name, _search_backend_configured())
 
     fallback_note = "  (fallback: NanoOrchestrator template — model plan unparseable)" \
@@ -459,21 +483,24 @@ async def _run_task(
         mode_name=mode_name, profile_name=profile_name, config=config,
         budget=budget, session_mgr=session_mgr,
         concurrency_mgr=concurrency_mgr, provider_map=provider_map,
+        delegation=delegation,
     )
     if paused:
-        return
+        return None
 
     if not results:
         print("No results to synthesize.")
-        return
+        return None
 
     print("\nSynthesizing...")
     try:
         output = await orchestrator.synthesize(task, results)
         output = _apply_research_synthesis_honesty(output, mode_name, results)
         print(f"\n{output}")
+        return output
     except Exception as exc:
         print(f"Synthesis error: {exc}")
+        return None
 
 
 async def _resume_task(
@@ -510,6 +537,9 @@ async def _resume_task(
     profile_name, config, budget, session_mgr, concurrency_mgr, provider_map, orchestrator = pipeline
     registry.apply_provider_availability(provider_map)
 
+    from tasker.runtime.delegation import DelegationContext
+    delegation = DelegationContext(registry=registry, store=store, mode_name=cp.mode, pipeline=pipeline)
+
     # Run the real SessionManager resume flow (notifier event, budget window
     # validation, PAUSED -> RESUMING -> RUNNING) against the loaded checkpoint.
     resumed = await session_mgr.resume(cp.id)
@@ -526,6 +556,7 @@ async def _resume_task(
         mode_name=cp.mode, profile_name=cp.hardware_profile, config=config,
         budget=budget, session_mgr=session_mgr,
         concurrency_mgr=concurrency_mgr, provider_map=provider_map,
+        delegation=delegation,
     )
     if paused:
         return

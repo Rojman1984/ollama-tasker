@@ -208,6 +208,16 @@ _TOOL_KEYWORDS: dict[ToolID, list[frozenset[str]]] = {
         frozenset({"conflicting"}),
         frozenset({"verify", "claim"}),
     ],
+    # DELEGATE_AGENT (SDD 5.7c) -- same lesson as WEB_SEARCH/RETRIEVE
+    # (SDD 5.1a): no keyword group means narrow_bundle_to_step() can never
+    # offer this tool no matter how real its executor is.
+    ToolID.DELEGATE_AGENT: [
+        frozenset({"delegate"}),
+        frozenset({"sub-agent"}),
+        frozenset({"subagent"}),
+        frozenset({"spawn"}),
+        frozenset({"assign", "to another"}),
+    ],
 }
 
 

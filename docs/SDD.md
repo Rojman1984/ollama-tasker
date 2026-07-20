@@ -754,6 +754,101 @@ nothing for this loop to execute. That remains open; see `CLAUDE.md`.
 
 ---
 
+### 5.7c DELEGATE_AGENT — Sub-Task Dispatch
+
+**Status:** Added as part of a tool-executor audit that found 15
+`ToolID`s a worker could request with literally nothing happening (no
+`_DISPATCH` entry, no error beyond a generic "not implemented" string —
+see 5.7d). `DELEGATE_AGENT` is the highest-priority of the 15: it
+unblocks the planned concurrency stress test (multiple sub-agents
+spawned in one turn, executed in parallel per 5.7a's `asyncio.gather`
+change).
+
+**Rule:** a worker's `delegate_agent(task: str)` call spawns a sub-task
+through the exact same dispatch pipeline the parent task is already
+running (`tasker/runtime/dispatch.py`'s `_run_task()`), never a
+parallel/independent one:
+
+- **Inherited, not re-resolved:** mode, routing policy, and privacy
+  tier all come from reusing the parent's own `ExecutionConfig` — the
+  sub-task is dispatched via the identical pipeline tuple (`profile_name,
+  config, budget, session_mgr, concurrency_mgr, provider_map,
+  orchestrator`), not a freshly built one.
+- **Shared budget and concurrency, never a separate allowance:** because
+  the pipeline tuple is reused verbatim, the sub-agent's own Ollama Cloud
+  calls acquire slots from and record usage against the exact same
+  `OllamaCloudConcurrencyManager`/`OllamaSessionBudget` instances the
+  parent is using. A sub-agent cannot bypass the parent's budget by
+  spawning its own.
+- **Bounded depth (max 2) and a per-top-level-task sub-agent cap (max
+  3):** `tasker/runtime/delegation.py`'s `DelegationContext` carries
+  `depth` (incremented by `.child()` each time a task delegates further)
+  and `spawned` — a single shared mutable counter (a one-element list,
+  not copied by `.child()`) so the cap applies across the *whole*
+  delegation tree for one top-level task, not reset per level. Neither
+  limit is model-configurable — a worker's `task` argument cannot raise
+  its own ceiling. Checked in order (depth, then cap) before the counter
+  increments; the increment itself has no `await` before it, so
+  concurrent sibling `delegate_agent` calls in the same turn (now
+  possible via 5.7a's parallel tool execution) cannot race past the cap
+  — asyncio is cooperative, and there's no yield point between the check
+  and the increment.
+- **Result returned as real tool output:** `_run_task()` now returns the
+  synthesized output string (`str | None`) instead of only printing it —
+  a backward-compatible change (existing callers that ignore the return
+  value are unaffected). `_exec_delegate_agent()` returns
+  `{"task": <the sub-task text>, "result": <synthesized output>}` as
+  `tool_output`, or a clean `.error` string (never a crash) if the
+  sub-task didn't complete, the depth limit was hit, or the cap was
+  reached.
+
+**Not a new concurrency primitive:** `DelegationContext` carries no
+locking of its own — it relies entirely on the existing budget/
+concurrency machinery (5.9) and asyncio's cooperative scheduling for
+safety, per the race-condition note above.
+
+---
+
+### 5.7d Tool Executor Coverage — Honest Degradation
+
+**Status:** Added in the same tool-executor audit as 5.7c. 15 of the
+project's `ToolID`s (`search`, `calculator`, `memory_read`, `linter`,
+`test_runner`, `checkpoint_write`, `task_state`, `progress_report`,
+`mcp_call_tool`, `pdf_extract`, `citation_tracker`,
+`contradiction_detector`, `local_search`, `local_memory`, plus
+`delegate_agent` before 5.7c) had a schema in `tasker/tools/bundles.py`'s
+`_TOOL_META` and were offered to workers via mode tool bundles, but zero
+execution implementation in `tasker/tools/executor.py`'s `_DISPATCH` —
+a worker requesting one got a generic "no execution implementation
+configured" string, and (until 5.1a's/5.7c's keyword fixes) some
+weren't even reliably offered due to missing `_TOOL_KEYWORDS` entries.
+
+**Rule, applied incrementally as tools gain real implementations
+(`CALCULATOR`, `TEST_RUNNER`, `LINTER` first — see the mode-2 tool
+sprint that added this section):**
+
+1. **Implemented tools** get a real `_DISPATCH` entry and a
+   `_TOOL_KEYWORDS` group (per 5.1a's/5.7c's lesson: no keyword group
+   means `narrow_bundle_to_step()` can never offer the tool no matter
+   how real its executor is).
+2. **Still-unimplemented tools** are excluded from the bundle a worker
+   is actually offered — `narrow_bundle_to_step()`/`get_definitions()`
+   never hands a worker a `ToolDefinition` for a tool with no executor,
+   so a well-behaved model never sees it as an option in the first
+   place. This is the primary fix — a worker that never sees the tool
+   can't hallucinate calling it.
+3. **A model that requests one anyway** (schema still technically
+   reachable via `WorkerTask.tools` if a caller bypasses narrowing, or a
+   model free-associates a plausible-sounding tool name not in its
+   offered list) gets a structured, honest error — not silence, not a
+   crash — fed back into the next turn exactly like any other tool
+   error: `{"tool": "<name>", "available": false, "reason": "not
+   implemented in this build"}`, distinguishable from a genuine runtime
+   failure (a real tool that errored) so a model doesn't retry it
+   expecting different results.
+
+---
+
 ### 5.8 Session Manager
 
 **Responsibility:** Owns the full session lifecycle state machine. Arbitrates between RUNNING, THROTTLING, PAUSING, CHECKPOINTING, PAUSED, RESUMING states. Called before every worker dispatch.

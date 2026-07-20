@@ -27,6 +27,7 @@ import json
 import logging
 from pathlib import Path
 
+from tasker.runtime.delegation import DelegationContext
 from tasker.tools.executor import execute_tool
 from tasker.workers.base import ModelUsage, ToolProtocol, WorkerManifest, WorkerStatus, WorkerTask, WorkerResult
 from tasker.workers.providers.base import WorkerProviderBase
@@ -66,6 +67,7 @@ async def run_tool_loop(
     *,
     max_turns: int = _MAX_TOOL_TURNS,
     cwd: Path | None = None,
+    delegation: DelegationContext | None = None,
 ) -> WorkerResult:
     """
     Drives provider.execute() through as many turns as needed to resolve
@@ -147,7 +149,8 @@ async def run_tool_loop(
         # raises (every failure becomes .error on the result), so gather()
         # can't fail here even if one call does.
         executed = list(await asyncio.gather(*(
-            execute_tool(tr, worker=worker, cwd=cwd) for tr in result.tool_results
+            execute_tool(tr, worker=worker, cwd=cwd, delegation=delegation)
+            for tr in result.tool_results
         )))
         accumulated_tool_results.extend(executed)
         total_duration_ms += sum(tr.duration_ms for tr in executed)

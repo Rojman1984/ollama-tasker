@@ -2015,3 +2015,76 @@ execution implementation) -- out of scope this pass, since
 `WEB_SEARCH`+`RETRIEVE` alone already carry the source URLs synthesis
 needs; calling one of the other three still returns "no execution
 implementation configured", now correctly scoped to just those three.
+
+## Tool-executor fill-in sprint, part 1 -- DELEGATE_AGENT sub-task dispatch (2026-07-20)
+
+Audit found 15 `ToolID`s with schemas but zero execution implementation
+-- a model could request one and nothing would happen. Three-part
+sprint, one commit each. Part 1 (highest priority, unblocks the planned
+concurrency stress test): `DELEGATE_AGENT`.
+
+- [x] **SDD-first:** new SDD 5.7c "DELEGATE_AGENT — Sub-Task Dispatch"
+      documents the inherited-pipeline contract (mode/policy/privacy
+      tier via config reuse, shared budget/concurrency via pipeline-tuple
+      reuse -- a sub-agent cannot bypass the parent's own budget),
+      bounded depth (max 2, `DelegationContext.child()`), the per-task
+      sub-agent cap (max 3, a single shared counter across the whole
+      delegation tree, race-safe under asyncio's cooperative scheduling
+      with no `await` between the cap check and the increment), and the
+      structured result/error contract. New SDD 5.7d "Tool Executor
+      Coverage — Honest Degradation" written as the contract Parts 2/3
+      will implement against.
+- [x] New `tasker/runtime/delegation.py`: `DelegationContext` (a leaf
+      module -- `tasker/tools/executor.py` imports it directly;
+      `tasker/runtime/dispatch.py` is imported back from inside
+      `_exec_delegate_agent()` only, deferred, to avoid a real import
+      cycle with the existing dispatch -> loop -> executor chain).
+- [x] `tasker/tools/executor.py`: new `_exec_delegate_agent()`, wired
+      into `execute_tool()` ahead of the `_DISPATCH` lookup (delegation
+      is a dispatch call, not local execution -- never
+      `_LOCAL_ONLY_TOOLS`-gated). `tasker/tools/loop.py`'s
+      `run_tool_loop()` gained a `delegation` param threaded through to
+      every `execute_tool()` call.
+- [x] `tasker/runtime/dispatch.py`: `_execute_steps()` gained a
+      `delegation` param forwarded unchanged to `run_tool_loop()` for
+      every step (depth only increases when a step's worker actually
+      calls `delegate_agent`, via `.child()`, not per step).
+      `_run_task()` now **returns the synthesized output string**
+      (`str | None`) instead of only printing it -- a backward-compatible
+      change (existing callers ignoring the return value are
+      unaffected) needed so `_exec_delegate_agent()` can hand a real
+      sub-task result back as tool output. Both `_run_task()` and
+      `_resume_task()` build a fresh depth-0 `DelegationContext` when
+      none is passed in.
+- [x] `tasker/tools/bundles.py`'s `_TOOL_KEYWORDS` gained a
+      `DELEGATE_AGENT` group -- same lesson as the research-mode sprint:
+      no keyword group means the tool can never be offered regardless of
+      how real its executor is.
+- [x] Tests: `tests/unit/test_delegation.py` (new, 16 tests) --
+      `DelegationContext.child()` behavior, `_exec_delegate_agent()`'s
+      guard clauses, and the real (non-mocked) recursive `_run_task()`
+      path proving shared budget/concurrency, structured result
+      passing, spawned-counter increments, and the depth-limit chain.
+- [x] Full suite green: **919 tests, OK** (was 903).
+- [~] **Live smoke attempted, not achieved this session:** several
+      `tasker-cli --mode cowork --policy local` attempts (Designlab1,
+      WSL Ollama, zero cloud spend enforced via `--policy local` after
+      confirming an unforced attempt did route to a cloud worker) never
+      got the local `lfm2.5-thinking` model to actually issue a
+      `delegate_agent` tool call -- it either answered trivial sub-tasks
+      directly (a previously-documented small-model pattern: skipping
+      an offered tool when it believes it can just answer) or, once,
+      badly misparsed a prompt containing "pong" as being about the
+      video game. Not a defect in this session's code -- the mechanism
+      itself is proven at the unit level
+      (`TestExecDelegateAgentRecursive` drives the real recursive
+      dispatch, not a mock). Flagged as an open follow-up for a future
+      session with more time or a stronger local model.
+
+**Open decisions / known issues:** live delegate_agent invocation not
+yet demonstrated end-to-end with a real small local model -- see H18.2
+in TESTING_GUIDE.md for the full attempt log. Session paused here per
+explicit instruction (usage window near limit) -- Parts 2 (TEST_RUNNER/
+LINTER/CALCULATOR) and 3 (honest degradation for the remaining
+unimplemented tools) are queued for the next window, not started this
+session.

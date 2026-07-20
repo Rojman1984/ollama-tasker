@@ -169,7 +169,7 @@ class TestRunToolLoop(unittest.IsolatedAsyncioTestCase):
             _result(output="done"),
         ])
 
-        async def slow_execute_tool(tr, *, worker, cwd):
+        async def slow_execute_tool(tr, *, worker, cwd, delegation=None):
             await asyncio.sleep(0.15)
             return WorkerToolResult(tr.tool_name, tr.tool_input, "ok", None, 150)
 

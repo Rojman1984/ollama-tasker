@@ -113,7 +113,35 @@ interim REPL from the session before this one has been superseded.
 | A8.3 | Addendum: Textual TUI skeleton (TuiApp, WelcomeScreen, status bar) | ✅ COMPLETE |
 | A8.4–8.5 | Addendum: SetupWizardScreen + ModelSelectorScreen, HarnessPanel | ⬜ NOT STARTED |
 
-**Last completed task:** RESEARCH mode grounding sprint, ✅ COMPLETE
+**Last completed task:** Tool-executor fill-in sprint, Part 1 ONLY, ✅
+COMPLETE (2026-07-20; audit found 15 `ToolID`s with a schema but zero
+execution implementation). Part 1 — `DELEGATE_AGENT`: new
+`tasker/runtime/delegation.py`'s `DelegationContext` (inherited shared
+pipeline — budget, concurrency, provider map, orchestrator — bounded
+depth max 2, per-task sub-agent cap max 3, one shared race-safe
+counter). New `_exec_delegate_agent()` recursively calls
+`tasker.runtime.dispatch._run_task()`, which now returns the
+synthesized output string (backward compatible) so the sub-task's real
+result comes back as structured tool output
+(`{"task", "result"}`). `_TOOL_KEYWORDS` gained a `DELEGATE_AGENT`
+group. SDD 5.7c/5.7d document the contract. Suite 903 → 919 (+16, all
+via a real non-mocked recursive `_run_task()` path in
+`test_delegation.py`). **Live smoke attempted, not achieved:** several
+`--policy local` cowork tasks on Designlab1 (zero cloud spend) never
+got `lfm2.5-thinking` to actually call `delegate_agent` — it answered
+trivial sub-tasks directly instead, a previously-documented small-model
+pattern. **Session paused here per explicit mid-session instruction**
+(usage window near limit) — Parts 2 (`TEST_RUNNER`/`LINTER`/
+`CALCULATOR`) and 3 (honest degradation for the rest) are queued for
+the next window, not started. Evidence: docs/TASKER_CHECKLIST.md →
+"Tool-executor fill-in sprint, part 1 -- DELEGATE_AGENT sub-task
+dispatch (2026-07-20)".
+
+---
+
+## Previous completed task (kept for reference)
+
+RESEARCH mode grounding sprint, ✅ COMPLETE
 (2026-07-20; from Roland's live research-mode test, queued right after
 the REPL/TUI UX sprint below). Bug: RESEARCH mode fabricated an entire
 model comparison and a fake benchmark statistic with zero tool calls.
@@ -329,19 +357,36 @@ this section's lists.)
 
 ---
 
-**Next task (current):** SDD_ADDENDUM_PHASE8.md Phase 8.4 —
-SetupWizardScreen + ModelSelectorScreen (unchanged, still queued behind
-two interrupt-driven sprints now, carrying B.5.5's keyboard-binding/
-text-selection requirements). TASKER-P1 manual verification for 8.3
-still open. A future session with a real `BRAVE_API_KEY` should run one
-live end-to-end research query and confirm real citations, per the
-research-mode sprint's original acceptance criterion (not met this
-session — no key available in this environment). All three bug-fix
-sessions plus the REPL/TUI UX sprint plus the RESEARCH mode grounding
-sprint were interrupt-driven by live testing, not a step in the
-addendum sequence.
+**Next task (current):** Tool-executor fill-in sprint, Parts 2 and 3
+(queued for the next window — Part 1 paused/completed this session per
+an explicit mid-session instruction, usage window near limit). Part 2:
+`TEST_RUNNER` (pytest/unittest detection, structured pass/fail),
+`LINTER` (ruff if available), `CALCULATOR` (safe eval via `ast`), plus
+`_TOOL_KEYWORDS` entries for all three. Part 3: honest "not available in
+this build" degradation for every remaining unimplemented `ToolID`
+(structured error, not silence), and excluding unavailable tools from
+bundles offered to workers rather than only erroring when called —
+contract already documented in SDD 5.7d. Then SDD_ADDENDUM_PHASE8.md
+Phase 8.4 (SetupWizardScreen + ModelSelectorScreen, still queued behind
+now three interrupt-driven sprints, carrying B.5.5's requirements).
+TASKER-P1 manual verification for 8.3 still open. A future session with
+a real `BRAVE_API_KEY` should also run one live end-to-end research
+query and confirm real citations, per the research-mode sprint's
+original acceptance criterion (not met — no key available here).
 
-**Files modified this session (2026-07-20, RESEARCH mode grounding
+**Files modified this session (2026-07-20, tool-executor fill-in
+sprint, Part 1 only -- DELEGATE_AGENT):** `tasker/runtime/delegation.py`
+(new), `tasker/tools/executor.py` (`_exec_delegate_agent`, wired into
+`execute_tool`), `tasker/tools/loop.py` (`delegation` param threaded
+through `run_tool_loop`), `tasker/runtime/dispatch.py` (`_execute_steps`/
+`_run_task`/`_resume_task` thread `delegation`; `_run_task` now returns
+the synthesized output string), `tasker/tools/bundles.py`
+(`_TOOL_KEYWORDS` `DELEGATE_AGENT` group), `docs/SDD.md` (5.7c, 5.7d),
+`docs/TESTING_GUIDE.md` (H18), `tests/unit/test_delegation.py` (new, 16
+tests), `tests/unit/test_tool_loop.py` (+0, one fixture signature fix),
+`docs/TASKER_CHECKLIST.md`, `CLAUDE.md`, `COWORK_PROMPT.md`.
+
+**Files modified previous session (2026-07-20, RESEARCH mode grounding
 sprint, 2 commits -- WEB_SEARCH executor, enforcement + honesty guard):**
 `tasker/tools/executor.py` (`_exec_web_search`, `_exec_retrieve`),
 `tasker/tools/bundles.py` (`_TOOL_KEYWORDS` additions -- the root-cause
@@ -413,6 +458,12 @@ the `_execute_steps()` honesty-guard call site updated to pass
 (new H10)*.)*
 
 **Open decisions / blockers:**
+- **Live `delegate_agent` invocation not demonstrated** — several
+  `--policy local` attempts never got `lfm2.5-thinking` to actually call
+  the tool (it answered trivial sub-tasks directly instead). The
+  recursive mechanism is proven at the unit level instead
+  (`test_delegation.py`). Worth another live attempt with more time, a
+  stronger local model, or a more tool-forcing prompt structure.
 - **No live research query with a real `BRAVE_API_KEY` and real
   citations was run** (none available in this environment) -- the
   sprint's original acceptance criterion. A future session with a real

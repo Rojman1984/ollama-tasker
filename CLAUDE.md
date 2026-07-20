@@ -352,6 +352,61 @@ python -m unittest tests.unit.test_orchestrator_nano -v
 
 *(Update this section at the end of every Cowork or Code session)*
 
+**Last worked on:** Tool-executor fill-in sprint, Part 1 only —
+`DELEGATE_AGENT` sub-task dispatch. Audit found 15 `ToolID`s with a
+schema but zero execution implementation. Session paused here per an
+explicit mid-session instruction (usage window near limit) — Parts 2
+(`TEST_RUNNER`/`LINTER`/`CALCULATOR`) and 3 (honest degradation for the
+rest) are queued for the next window, not started. Full write-up in
+`docs/TASKER_CHECKLIST.md` → "Tool-executor fill-in sprint, part 1 --
+DELEGATE_AGENT sub-task dispatch (2026-07-20)".
+
+**Part 1 — DELEGATE_AGENT:** new `tasker/runtime/delegation.py`'s
+`DelegationContext` carries the shared pipeline (budget, concurrency
+manager, provider map, orchestrator) a sub-task must inherit rather than
+bypass, plus bounded depth (max 2) and a per-top-level-task sub-agent
+cap (max 3, one shared counter across the whole tree, race-safe under
+asyncio's cooperative scheduling). New `_exec_delegate_agent()`
+(`tasker/tools/executor.py`) recursively calls
+`tasker.runtime.dispatch._run_task()` — which now **returns the
+synthesized output string** instead of only printing it (backward
+compatible) — and returns `{"task", "result"}` as structured tool
+output. `run_tool_loop()`/`_execute_steps()` thread `delegation` through.
+`_TOOL_KEYWORDS` gained a `DELEGATE_AGENT` group (same lesson as
+RESEARCH mode: no keywords, tool never offered). SDD 5.7c documents the
+contract; SDD 5.7d documents the honest-degradation contract Parts 2/3
+will implement against.
+
+**Tests:** 903 → 919 (+16, `test_delegation.py`). Full suite green.
+
+**Live smoke — attempted, not achieved:** several `--policy local`
+cowork attempts on Designlab1 (zero cloud spend enforced after an
+unforced attempt routed to a cloud worker) never got the local
+`lfm2.5-thinking` model to actually call `delegate_agent` — it answered
+trivial sub-tasks directly instead (a previously-documented small-model
+pattern) or once badly misparsed a prompt containing "pong" as the video
+game. Not a defect in the new code — the recursive mechanism itself is
+proven at the unit level (`TestExecDelegateAgentRecursive` drives the
+real, non-mocked `_run_task()` recursion, not a mock). Flagged as an
+open follow-up.
+
+**Next task:** Parts 2 and 3 of this same sprint, next window: (2)
+`TEST_RUNNER`/`LINTER`/`CALCULATOR` executors + `_TOOL_KEYWORDS`
+entries; (3) honest "not available in this build" degradation for every
+remaining unimplemented `ToolID`, and excluding unavailable tools from
+offered bundles. Then SDD_ADDENDUM_PHASE8.md Phase 8.4.
+
+**Blockers:** None (paused by explicit instruction, not a blocker).
+
+**Open decisions:** Live delegate_agent invocation with a real small
+local model remains undemonstrated — worth another attempt with more
+time, a stronger local model, or a deliberately tool-forcing prompt
+structure.
+
+---
+
+## Previous Session Notes (RESEARCH mode grounding sprint, kept for reference)
+
 **Last worked on:** RESEARCH mode grounding sprint from Roland's live
 research-mode test, queued immediately after the REPL/TUI UX sprint
 below. Full write-up in `docs/TASKER_CHECKLIST.md` → "RESEARCH mode

@@ -702,3 +702,58 @@ honesty guard) works correctly when a step *does* get real tool results
 the guard clears when a real `web_search`/`retrieve` call occurred. A
 future session with a real `BRAVE_API_KEY` should run one live research
 query end-to-end and confirm the synthesized answer cites real URLs.
+
+## H18. DELEGATE_AGENT -- sub-task dispatch (2026-07-20)
+
+New sprint from a tool-executor audit: 15 `ToolID`s had no execution
+implementation at all -- a model could request one and nothing would
+happen. Part 1 of 3 (highest priority): `DELEGATE_AGENT`, which unblocks
+the planned concurrency stress test.
+
+### H18.1 Unit tests
+```bash
+python -m unittest tests.unit.test_delegation -v
+```
+Covers: `DelegationContext.child()` (`tasker/runtime/delegation.py`) --
+increments depth, shares the `spawned` counter object (not a copy,
+across the whole delegation tree), preserves the pipeline and limits;
+`_exec_delegate_agent()`'s guard clauses (missing `task`, no delegation
+context, depth limit, sub-agent cap -- cap check does not increment past
+itself); the real recursive path -- a fake orchestrator + fake provider
+prove a delegated sub-task actually dispatches through
+`tasker.runtime.dispatch._run_task()`, returns `{"task", "result"}` as
+structured tool output, consumes the SAME shared pipeline (provider
+called, not a separate one), increments the spawned counter, and that a
+three-deep delegation chain (depth 0 -> 1 -> 2 -> refused at what would
+be depth 3) hits the depth limit correctly; `execute_tool()` itself
+correctly routes `delegate_agent` to the new handler and is not
+`LOCAL_ONLY_TOOLS`-gated (a dispatch call, not local execution).
+
+### H18.2 Live: cowork task attempting delegation (local only)
+```bash
+OLLAMA_BASE_URL=http://127.0.0.1:11435 TASKER_PROFILE=tier2_designlab \
+  tasker-cli --mode cowork --policy local "Call the delegate_agent tool with task='say hi'. Report exactly what the tool returns."
+```
+Attempted live 2026-07-20 (Designlab1, WSL Ollama, `--policy local` to
+guarantee zero cloud spend) several times with varied phrasing. Two
+concrete findings, neither a defect in this session's own code: (1) an
+early attempt without `--policy local` routed the step to a *cloud*
+worker (`nemotron-3-ultra-cloud`, +1.6% budget) and answered directly
+without delegating -- confirms `--policy local` is required for a
+zero-cloud-spend attempt, not optional; (2) with `--policy local`
+enforced, `lfm2.5-thinking` (the local planner/worker on this machine)
+never actually issued a `delegate_agent` tool call across several
+phrasings -- it either answered trivial sub-tasks directly (consistent
+with this project's established finding that small local models
+routinely skip an offered tool in favor of answering directly when they
+believe they can), or, in one case, badly misparsed a prompt containing
+the word "pong" as being about the video game and planned around that
+instead. No run produced a real live `delegate_agent` invocation within
+the time available. The mechanism itself -- shared budget/concurrency,
+bounded depth, the per-task cap, and the actual recursive dispatch and
+result-passing -- is proven at the unit level instead
+(`test_delegation.py`'s `TestExecDelegateAgentRecursive` class drives
+the real, non-mocked `_run_task()` recursion). A future session with
+more time (or a stronger local model, or a cloud model with an explicit
+zero-spend guard) should retry the live invocation specifically. Zero
+cloud spend was maintained throughout every attempt after the first.
