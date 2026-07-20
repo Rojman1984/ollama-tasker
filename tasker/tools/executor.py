@@ -28,9 +28,11 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import os
 import re
 import shlex
 import time
+import urllib.parse
 from pathlib import Path
 
 from tasker.workers.base import ComputeLocation, ToolID, WorkerManifest, WorkerToolResult
@@ -38,6 +40,18 @@ from tasker.workers.base import ComputeLocation, ToolID, WorkerManifest, WorkerT
 _MAX_OUTPUT_CHARS = 8_000
 _DEFAULT_TIMEOUT_S = 30.0
 _TRUNCATION_MARKER = "\n... [output truncated]"
+
+# RESEARCH mode grounding (SDD 5.1a): WEB_SEARCH via the Brave Search API,
+# RETRIEVE via a direct HTTP fetch + HTML-to-text strip. Both are real
+# network tool executors -- see docs/SDD.md 5.1a for the full grounding
+# contract these feed into (narrow_bundle_to_step must also offer these
+# tools for a research step to ever call them; see tasker/tools/bundles.py's
+# _TOOL_KEYWORDS).
+_BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
+_MAX_SEARCH_RESULTS = 5
+_NO_SEARCH_BACKEND_ERROR = (
+    "no search backend configured -- set BRAVE_API_KEY to enable web_search"
+)
 
 _LOCAL_ONLY_TOOLS = {ToolID.BASH.value, ToolID.FILE_WRITE.value, ToolID.GIT.value}
 
@@ -224,10 +238,106 @@ async def _exec_file_write(tool_input: dict, cwd: Path, timeout_s: float) -> tup
     return f"wrote {len(content)} bytes to {raw_path}", None
 
 
+# --------------------------------------------------------------------------- #
+# WEB_SEARCH / RETRIEVE -- RESEARCH mode grounding (SDD 5.1a)
+# --------------------------------------------------------------------------- #
+
+async def _default_search_get(url: str, headers: dict, timeout_s: float) -> tuple[int, dict | str]:
+    import aiohttp
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            url, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout_s),
+        ) as resp:
+            try:
+                data = await resp.json(content_type=None)
+            except Exception:
+                data = await resp.text()
+            return resp.status, data
+
+
+async def _default_page_get(url: str, timeout_s: float) -> tuple[int, str]:
+    import aiohttp
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout_s)) as resp:
+            text = await resp.text(errors="replace")
+            return resp.status, text
+
+
+# Swappable module-level defaults (mock.patch these two names directly in
+# tests) -- executor.py has no class to hang constructor injection off of,
+# unlike ReadinessChecker/OllamaProvider's _get_fn/_post_fn pattern.
+_search_get_fn = _default_search_get
+_page_get_fn = _default_page_get
+
+_TAG_RE = re.compile(r"<[^>]+>")
+_WHITESPACE_RE = re.compile(r"[ \t]+")
+_HTML_ENTITIES = {
+    "&nbsp;": " ", "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;": "'",
+}
+
+
+def _strip_html(html: str) -> str:
+    """Best-effort HTML-to-text: drop script/style blocks, strip tags,
+    unescape the handful of entities that show up in ordinary prose. Not a
+    full HTML parser -- good enough to hand a research worker readable
+    page text, not to preserve layout or handle malformed markup."""
+    html = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", html)
+    text = _TAG_RE.sub(" ", html)
+    for entity, replacement in _HTML_ENTITIES.items():
+        text = text.replace(entity, replacement)
+    text = re.sub(r"\s*\n\s*", "\n", text)
+    text = _WHITESPACE_RE.sub(" ", text)
+    return text.strip()
+
+
+async def _exec_web_search(tool_input: dict, cwd: Path, timeout_s: float) -> tuple[dict | None, str | None]:
+    query = tool_input.get("query")
+    if not query:
+        return None, "missing required 'query'"
+    api_key = os.environ.get("BRAVE_API_KEY")
+    if not api_key:
+        return None, _NO_SEARCH_BACKEND_ERROR
+    headers = {"Accept": "application/json", "X-Subscription-Token": api_key}
+    url = f"{_BRAVE_SEARCH_URL}?q={urllib.parse.quote(query)}"
+    try:
+        status, data = await _search_get_fn(url, headers, timeout_s)
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+    if status != 200:
+        return None, f"Brave Search API returned HTTP {status}"
+    if not isinstance(data, dict):
+        return None, "unexpected response from Brave Search API"
+    raw_results = (data.get("web") or {}).get("results") or []
+    results = [
+        {"title": r.get("title", ""), "url": r.get("url", ""), "snippet": r.get("description", "")}
+        for r in raw_results[:_MAX_SEARCH_RESULTS]
+        if r.get("url")
+    ]
+    return {"query": query, "results": results}, None
+
+
+async def _exec_retrieve(tool_input: dict, cwd: Path, timeout_s: float) -> tuple[dict | None, str | None]:
+    url = tool_input.get("url")
+    if not url:
+        return None, "missing required 'url'"
+    if not url.startswith(("http://", "https://")):
+        return None, f"'url' must be an absolute http(s) URL, got {url!r}"
+    try:
+        status, body = await _page_get_fn(url, timeout_s)
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+    if status != 200:
+        return None, f"HTTP {status} fetching {url}"
+    content = _truncate(_strip_html(body))
+    return {"url": url, "content": content}, None
+
+
 _DISPATCH = {
     ToolID.BASH.value: _exec_bash,
     ToolID.GIT.value: _exec_git,
     ToolID.FILE_READ.value: _exec_file_read,
     ToolID.FILE_WRITE.value: _exec_file_write,
     ToolID.CODE_SEARCH.value: _exec_code_search,
+    ToolID.WEB_SEARCH.value: _exec_web_search,
+    ToolID.RETRIEVE.value: _exec_retrieve,
 }

@@ -65,6 +65,7 @@ class CloudOrchestrator(OrchestratorBase):
         provider: WorkerProviderBase,
         worker: WorkerManifest,
         privacy_tier: PrivacyTier = PrivacyTier.ANY_CLOUD,
+        mode_name: str | None = None,
     ) -> None:
         if privacy_tier == PrivacyTier.LOCAL_ONLY:
             raise TaskerPolicyError(
@@ -74,6 +75,7 @@ class CloudOrchestrator(OrchestratorBase):
         self._provider     = provider
         self._worker       = worker
         self._privacy_tier = privacy_tier
+        self._mode_name    = mode_name
         self._fallback     = NanoOrchestrator()
 
     # ------------------------------------------------------------------ #
@@ -111,7 +113,7 @@ class CloudOrchestrator(OrchestratorBase):
         classifier_output: ClassifierResult,
         available_workers: list[WorkerManifest],
     ) -> ExecutionPlan:
-        user_prompt = build_plan_prompt(task, classifier_output, available_workers)
+        user_prompt = build_plan_prompt(task, classifier_output, available_workers, self._mode_name)
         raw = await self._call(PLAN_SYSTEM, user_prompt)
         result = await plan_with_repair(task, raw, self._call, PLAN_SYSTEM, user_prompt) if raw else None
         if result is None:
@@ -124,7 +126,8 @@ class CloudOrchestrator(OrchestratorBase):
         original_task: str,
         results: list[WorkerResult],
     ) -> str:
-        raw = await self._call(SYNTHESIZE_SYSTEM, build_synthesize_prompt(original_task, results))
+        prompt = build_synthesize_prompt(original_task, results, self._mode_name)
+        raw = await self._call(SYNTHESIZE_SYSTEM, prompt)
         return raw or "(synthesis unavailable)"
 
     async def should_retry(

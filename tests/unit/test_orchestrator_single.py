@@ -228,6 +228,43 @@ class TestSingleLLMOrchestrator(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(decision.should_retry)
         self.assertIsInstance(decision.reason, str)
 
+    # ------------------------------------------------------------------ #
+    # mode_name threading (SDD 5.1a research-mode grounding)
+    # ------------------------------------------------------------------ #
+
+    async def test_mode_name_reaches_plan_prompt(self):
+        captured = []
+
+        async def recording_call(system, user):
+            captured.append(user)
+            return json.dumps([{"description": "search for x", "role": "worker", "capabilities": ["tool_use"]}])
+
+        orc = SingleLLMOrchestrator(model_id="m", call_model=recording_call, mode_name="research")
+        await orc.plan("task", _classifier(), [])
+        self.assertIn("GROUNDING REQUIREMENT", captured[0])
+
+    async def test_mode_name_reaches_synthesize_prompt(self):
+        captured = []
+
+        async def recording_call(system, user):
+            captured.append(user)
+            return "answer"
+
+        orc = SingleLLMOrchestrator(model_id="m", call_model=recording_call, mode_name="research")
+        await orc.synthesize("task", [_result("output")])
+        self.assertIn("GROUNDING REQUIREMENT", captured[0])
+
+    async def test_default_mode_name_none_no_grounding_text(self):
+        captured = []
+
+        async def recording_call(system, user):
+            captured.append(user)
+            return "answer"
+
+        orc = SingleLLMOrchestrator(model_id="m", call_model=recording_call)
+        await orc.synthesize("task", [_result("output")])
+        self.assertNotIn("GROUNDING", captured[0])
+
 
 if __name__ == "__main__":
     unittest.main()

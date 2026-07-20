@@ -149,6 +149,38 @@ class TestRunToolLoop(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(turn2_messages[1]["role"], "assistant")
         self.assertEqual(turn2_messages[2], {"role": "tool", "content": "file1.py\nfile2.py"})
 
+    async def test_multiple_tool_calls_in_one_turn_execute_in_parallel(self):
+        # SDD 5.1a "parallel fetch": a turn requesting N tool calls (e.g.
+        # multiple retrieve calls) must run them concurrently, not one at
+        # a time -- proven by wall-clock time staying close to a single
+        # call's delay rather than growing with N.
+        import asyncio
+        import time
+
+        requested = [
+            WorkerToolResult("retrieve", {"url": f"https://example.com/{i}"}, None, None, 0)
+            for i in range(3)
+        ]
+        provider = FakeProvider([
+            _result(
+                output="", tool_results=list(requested),
+                raw_assistant_message={"role": "assistant", "content": "..."},
+            ),
+            _result(output="done"),
+        ])
+
+        async def slow_execute_tool(tr, *, worker, cwd):
+            await asyncio.sleep(0.15)
+            return WorkerToolResult(tr.tool_name, tr.tool_input, "ok", None, 150)
+
+        with mock.patch("tasker.tools.loop.execute_tool", side_effect=slow_execute_tool):
+            start = time.monotonic()
+            await run_tool_loop(_task(), _worker(), provider, cwd=Path("."))
+            elapsed = time.monotonic() - start
+
+        # Sequential would take >= 0.45s (3 x 0.15s); parallel stays near 0.15s.
+        self.assertLess(elapsed, 0.35)
+
     async def test_usage_and_duration_accumulate_across_turns(self):
         requested = WorkerToolResult("bash", {"command": "ls"}, None, None, 0)
         executed = WorkerToolResult("bash", {"command": "ls"}, "ok", None, 5)

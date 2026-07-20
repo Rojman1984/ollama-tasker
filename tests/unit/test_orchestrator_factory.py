@@ -61,9 +61,9 @@ def _profile(
     )
 
 
-def _mode(tier_max: int = 1) -> TaskerMode:
+def _mode(tier_max: int = 1, name: str = "chat") -> TaskerMode:
     return TaskerMode(
-        name="chat",
+        name=name,
         orchestrator_tier_max=tier_max,
         tool_bundle=frozenset(),
         routing_policy=RoutingPolicy.PRIVATE,
@@ -79,9 +79,10 @@ def _config(
     profile_tier: int = 1,
     mode_tier: int = 1,
     compute_location: str = "local",
+    mode_name: str = "chat",
 ) -> ExecutionConfig:
     profile = _profile(profile_tier, compute_location=compute_location)
-    mode = _mode(mode_tier)
+    mode = _mode(mode_tier, name=mode_name)
     return ExecutionConfig(
         mode=mode,
         profile=profile,
@@ -182,6 +183,40 @@ class TestBuildOrchestratorTierSelection(unittest.TestCase):
         result = build_orchestrator(config, {ProviderType.OLLAMA: _FakeProvider()})
         self.assertIsInstance(result, SingleLLMOrchestrator)
         self.assertEqual(result._model_id, "llama3.2:3b")
+
+
+class TestModeNameThreading(unittest.TestCase):
+    """SDD 5.1a: build_orchestrator() threads config.mode.name into every
+    LLM-calling tier so RESEARCH mode's grounding requirement reaches
+    plan()/synthesize()'s prompts."""
+
+    def test_tier1_receives_mode_name(self):
+        config = _config(profile_tier=1, mode_tier=1, mode_name="research")
+        result = build_orchestrator(config, {ProviderType.OLLAMA: _FakeProvider()})
+        self.assertEqual(result._mode_name, "research")
+
+    def test_tier2_receives_mode_name(self):
+        config = _config(profile_tier=2, mode_tier=2, mode_name="research")
+        result = build_orchestrator(config, {ProviderType.OLLAMA: _FakeProvider()})
+        self.assertEqual(result._mode_name, "research")
+
+    def test_tier3_receives_mode_name(self):
+        config = _config(profile_tier=3, mode_tier=3, mode_name="research")
+        result = build_orchestrator(config, {ProviderType.OLLAMA: _FakeProvider()})
+        self.assertEqual(result._mode_name, "research")
+
+    def test_tier4_receives_mode_name(self):
+        config = _config(
+            profile_tier=4, mode_tier=4, compute_location="ollama_cloud", mode_name="research",
+        )
+        result = build_orchestrator(config, {ProviderType.OLLAMA: _FakeProvider()})
+        self.assertIsInstance(result, CloudOrchestrator)
+        self.assertEqual(result._mode_name, "research")
+
+    def test_non_research_mode_still_threaded(self):
+        config = _config(profile_tier=1, mode_tier=1, mode_name="chat")
+        result = build_orchestrator(config, {ProviderType.OLLAMA: _FakeProvider()})
+        self.assertEqual(result._mode_name, "chat")
 
 
 # --------------------------------------------------------------------------- #

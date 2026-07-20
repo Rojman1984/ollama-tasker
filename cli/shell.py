@@ -59,6 +59,7 @@ from tasker.runtime.dispatch import (
     DEFAULT_CHAT_WORKER_ID,
     _EFFORT_LEVELS,
     _DEFAULT_EFFORT,
+    _search_backend_configured,
 )
 from tasker.runtime.transcript import Transcript, default_transcript_path
 from tasker.session.checkpoint import CheckpointStore
@@ -257,6 +258,21 @@ def _print_transcript(transcript: Transcript, n: int | None) -> None:
     _page_lines(lines)
 
 
+def _warn_if_research_ungrounded(mode: str) -> None:
+    """RESEARCH mode grounding (SDD 5.1a): announce a missing search
+    backend up front rather than silently producing fabricated,
+    honesty-guard-flagged output. Advisory, not a hard block -- research
+    tasks still run, any factual claims will just carry the
+    [unverified -- no sources retrieved] marker."""
+    if mode == "research" and not _search_backend_configured():
+        print(
+            "RESEARCH mode: no search backend configured (set BRAVE_API_KEY) -- "
+            "research tasks will proceed without real web grounding, and any "
+            "factual claims in the output will be marked "
+            "[unverified -- no sources retrieved]."
+        )
+
+
 def _pull_progress_printer():
     """De-duplicated progress printer for /api/pull's NDJSON stream --
     prints each distinct status line once rather than flooding the
@@ -399,6 +415,7 @@ def _repl(
             del pipelines[m]
 
     _ensure_pipeline(mode)
+    _warn_if_research_ungrounded(mode)
     _init_readline(registry)
 
     # Chat rewind buffer (SDD 7.6a): every prompt, response, and
@@ -436,6 +453,7 @@ def _repl(
                 if arg:
                     mode = arg.lower()
                     _ensure_pipeline(mode)
+                    _warn_if_research_ungrounded(mode)
                     print(f"Mode set to: {mode}")
                 else:
                     print(f"Current mode: {mode}")
@@ -788,6 +806,7 @@ def main() -> None:
     args, remaining = _tp.parse_known_args()
     task = " ".join(remaining).strip()
     if task:
+        _warn_if_research_ungrounded(args.mode)
         if args.mode == "chat":
             # One-shot CLI invocation: fresh (empty) history each call --
             # multi-turn context only accumulates within a REPL session.

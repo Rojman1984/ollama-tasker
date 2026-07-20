@@ -352,6 +352,103 @@ python -m unittest tests.unit.test_orchestrator_nano -v
 
 *(Update this section at the end of every Cowork or Code session)*
 
+**Last worked on:** RESEARCH mode grounding sprint from Roland's live
+research-mode test, queued immediately after the REPL/TUI UX sprint
+below. Full write-up in `docs/TASKER_CHECKLIST.md` → "RESEARCH mode
+grounding -- WEB_SEARCH executor + enforcement + honesty guard
+(2026-07-20)".
+
+**The bug:** RESEARCH mode fabricated an entire model comparison and a
+fake benchmark statistic with **zero tool calls**. Root cause, confirmed
+by code audit: `WEB_SEARCH`/`RETRIEVE`/etc had no execution
+implementation at all in `tasker/tools/executor.py`, **and** no
+`_TOOL_KEYWORDS` entry in `tasker/tools/bundles.py` — so
+`narrow_bundle_to_step()` narrowed *every* research step to an empty
+tool set regardless of content. The model could never have called these
+tools even if it had tried to; the second gap (missing keywords) was the
+real root cause, not just the missing executors.
+
+**SDD-first:** new SDD 5.1a "RESEARCH Mode Grounding Contract" — four
+enforcement points: real tool executors, a code-level plan-injection
+backstop, prompt-level grounding requirements, and a zero-retrieval
+honesty guard.
+
+**Part 1 — real tool executors:** `tasker/tools/executor.py` gained
+`_exec_web_search()` (Brave Search API, `BRAVE_API_KEY` env var only,
+structured output carrying real source URLs) and `_exec_retrieve()`
+(HTTP fetch + HTML-to-text strip). `tasker/tools/bundles.py`'s
+`_TOOL_KEYWORDS` gained entries for all five research tools — **the
+actual root-cause fix**. `tasker/tools/loop.py`'s multi-tool-call
+execution changed from sequential to `asyncio.gather()` ("parallel
+fetch" per the request, proven via wall-clock timing).
+
+**Part 2 — plan/prompt/synthesis enforcement + honesty guard:**
+`build_plan_prompt()`/`build_synthesize_prompt()` (`tasker/orchestrator/
+_parse.py`) gained an optional `mode_name` appending a RESEARCH-specific
+grounding block (plan: forbids factual step descriptions, requires a
+real search step; synthesize: requires citing real URLs). All four
+orchestrator tiers gained an optional `mode_name` constructor param,
+threaded by `factory.py` from `config.mode.name`. New
+`tasker/runtime/dispatch.py`: `_search_backend_configured()`,
+`_enforce_research_grounding()` (code-level backstop — prepends a real
+retrieval step, correctly reindexed, when a plan has none and a backend
+is configured), `_apply_research_synthesis_honesty()`. New
+`tasker/tools/honesty.py`'s `check_research_grounding()` — no
+output-side keyword gate (unlike the side-effect guard), since any
+research claim with zero retrieval is unverifiable by construction.
+`cli/shell.py`'s `_warn_if_research_ungrounded()` announces a missing
+`BRAVE_API_KEY` at `/mode research`, REPL startup, and the one-shot CLI
+path.
+
+**Tests:** 852 → 903 (+51) across both parts. Full suite green.
+
+**Live smoke (honest degradation, no Brave key, zero cloud spend):**
+`/mode research` warned about the missing backend; the planner's own
+step description now says "Perform web_search for comparison" (was
+asserting invented facts); with no backend to search, the worker
+declined to fabricate ("The comparison cannot be made due to lack of
+relevant data") and the final answer was still correctly prefixed
+`[unverified -- no sources retrieved]` regardless — concrete proof the
+reported bug no longer reproduces. **No live query with a real
+`BRAVE_API_KEY` and real citations was run** — no key available in this
+environment; the executor and the "guard clears on real retrieval" path
+are both unit-tested instead. Flagged as an open follow-up.
+
+**Files modified:** `tasker/tools/executor.py` (`_exec_web_search`,
+`_exec_retrieve`), `tasker/tools/bundles.py` (`_TOOL_KEYWORDS`
+additions), `tasker/tools/loop.py` (parallel tool execution),
+`tasker/orchestrator/_parse.py` (`mode_name` param + grounding
+constants), `tasker/orchestrator/tier1_single.py`, `tier2_dual.py`,
+`tier3_reasoning.py`, `tier4_cloud.py` (`mode_name` threading),
+`tasker/orchestrator/factory.py` (`mode_name` wiring),
+`tasker/runtime/dispatch.py` (`_search_backend_configured`,
+`_enforce_research_grounding`, `_apply_research_synthesis_honesty`,
+wired into `_execute_steps`/`_run_task`/`_resume_task`),
+`tasker/tools/honesty.py` (`check_research_grounding`), `cli/shell.py`
+(`_warn_if_research_ungrounded`), `docs/SDD.md` (5.1a),
+`docs/TESTING_GUIDE.md` (H17), `docs/TASKER_CHECKLIST.md`, 10 test
+files (2 new: `test_research_grounding.py`, `test_cli_shell_research.py`),
+CLAUDE.md, COWORK_PROMPT.md.
+
+**Next task:** SDD_ADDENDUM_PHASE8.md Phase 8.4 — SetupWizardScreen +
+ModelSelectorScreen (unchanged, still queued behind two interrupt-driven
+sprints now). A future session with a real `BRAVE_API_KEY` should run
+one live end-to-end research query and confirm real citations, per the
+sprint's original acceptance criterion.
+
+**Blockers:** None.
+
+**Open decisions:** `PDF_EXTRACT`/`CITATION_TRACKER`/
+`CONTRADICTION_DETECTOR` remain schema-only (no execution
+implementation) — `WEB_SEARCH`+`RETRIEVE` alone already carry the source
+URLs synthesis needs; revisit if a future session needs PDF ingestion or
+explicit citation bookkeeping. The live acceptance criterion (real
+citations from a real query) is unmet pending a real `BRAVE_API_KEY`.
+
+---
+
+## Previous Session Notes (REPL/TUI UX sprint + transcript addendum, kept for reference)
+
 **Last worked on:** REPL/TUI UX sprint from Roland's live-testing
 session -- three parts plus a same-day addendum, one commit each,
 following directly after the three same-day bug-fix sessions below.

@@ -226,6 +226,23 @@ class TestDualLLMOrchestrator(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(decision.should_retry)
         self.assertIsInstance(decision.reason, str)
 
+    async def test_mode_name_reaches_planner_and_synthesizer_prompts(self):
+        captured_plan, captured_synth = [], []
+
+        async def call_planner(system, user):
+            captured_plan.append(user)
+            return json.dumps([{"description": "s", "role": "worker", "capabilities": ["tool_use"]}])
+
+        async def call_synthesizer(system, user):
+            captured_synth.append(user)
+            return "answer"
+
+        orc = DualLLMOrchestrator("p", "s", call_planner, call_synthesizer, mode_name="research")
+        await orc.plan("task", _classifier(), [])
+        await orc.synthesize("task", [_result("output")])
+        self.assertIn("GROUNDING REQUIREMENT", captured_plan[0])
+        self.assertIn("GROUNDING REQUIREMENT", captured_synth[0])
+
 
 if __name__ == "__main__":
     unittest.main()

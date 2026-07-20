@@ -59,11 +59,13 @@ class DualLLMOrchestrator(OrchestratorBase):
         synthesizer_model_id: str,
         call_planner: _ModelCall,
         call_synthesizer: _ModelCall,
+        mode_name: str | None = None,
     ) -> None:
         self._planner_id      = planner_model_id
         self._synthesizer_id  = synthesizer_model_id
         self._call_planner    = call_planner
         self._call_synthesizer = call_synthesizer
+        self._mode_name        = mode_name
         self._fallback         = NanoOrchestrator()
 
     async def plan(
@@ -72,7 +74,7 @@ class DualLLMOrchestrator(OrchestratorBase):
         classifier_output: ClassifierResult,
         available_workers: list[WorkerManifest],
     ) -> ExecutionPlan:
-        user_prompt = build_plan_prompt(task, classifier_output, available_workers)
+        user_prompt = build_plan_prompt(task, classifier_output, available_workers, self._mode_name)
         raw = await self._call_planner(PLAN_SYSTEM, user_prompt)
         result = await plan_with_repair(task, raw, self._call_planner, PLAN_SYSTEM, user_prompt)
         if result is None:
@@ -85,7 +87,8 @@ class DualLLMOrchestrator(OrchestratorBase):
         original_task: str,
         results: list[WorkerResult],
     ) -> str:
-        return await self._call_synthesizer(SYNTHESIZE_SYSTEM, build_synthesize_prompt(original_task, results))
+        prompt = build_synthesize_prompt(original_task, results, self._mode_name)
+        return await self._call_synthesizer(SYNTHESIZE_SYSTEM, prompt)
 
     async def should_retry(
         self,

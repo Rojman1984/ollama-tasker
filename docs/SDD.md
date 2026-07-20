@@ -291,6 +291,91 @@ New modules unique to the harness are listed in Section 5.
 
 ---
 
+### 5.1a RESEARCH Mode Grounding Contract
+
+**Status:** Added after a live bug report (Roland): a RESEARCH-mode task
+fabricated an entire model comparison, including an invented benchmark
+statistic, with **zero tool calls**. Root cause, confirmed by code
+audit: `WEB_SEARCH`/`RETRIEVE`/`PDF_EXTRACT`/`CITATION_TRACKER`/
+`CONTRADICTION_DETECTOR` had schema definitions but (a) no execution
+implementation at all in `tasker/tools/executor.py` (calling any of them
+always errored "no execution implementation configured"), and (b) no
+`_TOOL_KEYWORDS` entry in `tasker/tools/bundles.py`, so
+`narrow_bundle_to_step()` narrowed *every* research step to an **empty**
+tool set regardless of content — the model could never have called these
+tools even if it had tried. Both are now fixed (5.1a.1), but grounding
+also needed enforcement beyond "the tool now works if invoked" — a model
+that never calls it produces the same fabrication either way.
+
+**Rule:** RESEARCH mode is the one mode with an explicit **grounding
+requirement**, enforced across four points, not merely hoped-for via
+prompt wording:
+
+1. **Tool executors are real.** `WEB_SEARCH` calls the Brave Search API
+   (`BRAVE_API_KEY` env var, never hardcoded); `RETRIEVE` fetches a URL
+   and strips it to text. Both return structured output carrying real
+   source URLs (`{"query", "results": [{"title","url","snippet"}]}` /
+   `{"url", "content"}`) — see `tasker/tools/executor.py`. `PDF_EXTRACT`/
+   `CITATION_TRACKER`/`CONTRADICTION_DETECTOR` remain schema-only
+   (out of scope this pass — `WEB_SEARCH`+`RETRIEVE` alone already carry
+   the URLs synthesis needs to cite); calling one still returns the
+   existing "no execution implementation configured" error, now
+   correctly scoped to only those three rather than all five.
+   `narrow_bundle_to_step()` gained keyword groups for all five, so a
+   research step can actually be offered these tools in the first place
+   (5.1a.1's root-cause fix).
+
+2. **Plans must include a retrieval step.** After `orchestrator.plan()`
+   returns (any tier), `tasker/runtime/dispatch.py`'s
+   `_enforce_research_grounding()` checks whether any step's
+   `required_capabilities` includes `Capability.SEARCH`. If not — and a
+   search backend is actually configured (see point 4) — a retrieval
+   step is prepended: `"Search for and retrieve real, current sources
+   relevant to: <task>"`, `required_capabilities={TOOL_USE, SEARCH}`,
+   and every other step's index/`depends_on` shifts by one. This is a
+   code-level backstop, not just prompt engineering — a plan is
+   corrected even if the model ignored the planning prompt's own
+   grounding instructions (below).
+
+3. **Worker prompts and plans are told not to fabricate.**
+   `build_plan_prompt()`/`build_synthesize_prompt()`
+   (`tasker/orchestrator/_parse.py`) accept an optional `mode_name`; when
+   `"research"`, both append an explicit grounding block: the plan
+   prompt requires step descriptions to describe *actions* ("search for
+   X"), never assert factual conclusions or invented statistics
+   themselves (the second root cause Roland found — the step
+   description itself contained fabricated claims); the synthesize
+   prompt requires every factual claim to cite a real URL from the
+   worker outputs, and requires stating explicitly what wasn't found
+   rather than filling the gap. All four orchestrator tiers
+   (`tier1_single.py`…`tier4_cloud.py`) accept an optional `mode_name`
+   constructor parameter, threaded in by `factory.py`'s
+   `build_orchestrator()` from `config.mode.name`, and pass it through to
+   both prompt builders.
+
+4. **Zero-retrieval factual output is marked, never presented as fact.**
+   `tasker/tools/honesty.py`'s `check_research_grounding()` — a sibling
+   of the side-effect honesty guard, same "never silently pass through
+   an unverifiable claim" philosophy — prefixes a step's output (and
+   separately, the final synthesized answer) with `[unverified -- no
+   sources retrieved]` when `mode_name == "research"` and no
+   `web_search`/`retrieve` tool call occurred anywhere in that
+   output's provenance. Wired into `_execute_steps()` (per step) and
+   `_run_task()` (final synthesis, checked against the union of every
+   step's tool calls).
+
+**No search backend configured:** rather than silently producing
+ungrounded (and now honesty-guard-flagged) output, entering RESEARCH
+mode announces the gap up front. `cli/shell.py`'s `/mode research` (and
+the one-shot `--mode research` CLI path) prints a warning when
+`BRAVE_API_KEY` is unset: research tasks will proceed but any factual
+claims will carry the `[unverified]` marker. This is advisory, not a
+hard block — SECURE mode's `LOCAL_ONLY` privacy tier already covers the
+"must not reach the network" case; RESEARCH without a key is a degraded
+but still honest mode, not a disabled one.
+
+---
+
 ### 5.2 Classifier
 
 **Responsibility:** Lightweight intake routing. Produces a ClassifierResult that seeds orchestrator planning.

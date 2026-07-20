@@ -141,10 +141,14 @@ async def run_tool_loop(
             )
             break
 
-        executed = [
-            await execute_tool(tr, worker=worker, cwd=cwd)
-            for tr in result.tool_results
-        ]
+        # Parallel execution (SDD 5.1a) -- a single turn requesting multiple
+        # tool calls (e.g. two web_search/retrieve calls) runs them
+        # concurrently rather than one at a time. execute_tool() never
+        # raises (every failure becomes .error on the result), so gather()
+        # can't fail here even if one call does.
+        executed = list(await asyncio.gather(*(
+            execute_tool(tr, worker=worker, cwd=cwd) for tr in result.tool_results
+        )))
         accumulated_tool_results.extend(executed)
         total_duration_ms += sum(tr.duration_ms for tr in executed)
 

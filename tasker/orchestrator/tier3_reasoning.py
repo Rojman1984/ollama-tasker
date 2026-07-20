@@ -56,9 +56,11 @@ class ReasoningOrchestrator(OrchestratorBase):
         self,
         model_id: str,
         call_model: _ModelCall,
+        mode_name: str | None = None,
     ) -> None:
         self._model_id  = model_id
         self._call_model = call_model
+        self._mode_name  = mode_name
         self._fallback   = NanoOrchestrator()
 
     async def plan(
@@ -67,7 +69,7 @@ class ReasoningOrchestrator(OrchestratorBase):
         classifier_output: ClassifierResult,
         available_workers: list[WorkerManifest],
     ) -> ExecutionPlan:
-        user_prompt = build_plan_prompt(task, classifier_output, available_workers)
+        user_prompt = build_plan_prompt(task, classifier_output, available_workers, self._mode_name)
         raw = await self._call_model(PLAN_SYSTEM, user_prompt)
         result = await plan_with_repair(task, raw, self._call_model, PLAN_SYSTEM, user_prompt)
         if result is None:
@@ -80,7 +82,8 @@ class ReasoningOrchestrator(OrchestratorBase):
         original_task: str,
         results: list[WorkerResult],
     ) -> str:
-        return await self._call_model(SYNTHESIZE_SYSTEM, build_synthesize_prompt(original_task, results))
+        prompt = build_synthesize_prompt(original_task, results, self._mode_name)
+        return await self._call_model(SYNTHESIZE_SYSTEM, prompt)
 
     async def should_retry(
         self,

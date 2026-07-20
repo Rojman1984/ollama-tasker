@@ -113,7 +113,41 @@ interim REPL from the session before this one has been superseded.
 | A8.3 | Addendum: Textual TUI skeleton (TuiApp, WelcomeScreen, status bar) | ✅ COMPLETE |
 | A8.4–8.5 | Addendum: SetupWizardScreen + ModelSelectorScreen, HarnessPanel | ⬜ NOT STARTED |
 
-**Last completed task:** REPL/TUI UX sprint + addendum, ✅ COMPLETE
+**Last completed task:** RESEARCH mode grounding sprint, ✅ COMPLETE
+(2026-07-20; from Roland's live research-mode test, queued right after
+the REPL/TUI UX sprint below). Bug: RESEARCH mode fabricated an entire
+model comparison and a fake benchmark statistic with zero tool calls.
+Root cause: `WEB_SEARCH`/`RETRIEVE` had no execution implementation at
+all, AND no `_TOOL_KEYWORDS` entry, so `narrow_bundle_to_step()` always
+narrowed research steps to an empty tool set — the second gap was the
+real root cause. SDD 5.1a documents the four-point fix. Part 1: real
+`_exec_web_search()`/`_exec_retrieve()` (Brave Search API,
+`BRAVE_API_KEY` only, structured output with real URLs) in
+`tasker/tools/executor.py`; `_TOOL_KEYWORDS` gained entries for all five
+research tools (the actual root-cause fix); `run_tool_loop()`'s
+multi-tool-call turns now execute in parallel. Part 2:
+`build_plan_prompt()`/`build_synthesize_prompt()` gained a `mode_name`
+that appends a RESEARCH grounding block; all four orchestrator tiers
+thread `mode_name` from `factory.py`; new `_enforce_research_grounding()`
+(dispatch-layer code backstop — injects a real retrieval step when a
+plan has none) and `check_research_grounding()` (honesty guard — flags
+zero-retrieval factual output as `[unverified -- no sources retrieved]`,
+wired into per-step and final-synthesis checks); `cli/shell.py` warns at
+`/mode research` when no `BRAVE_API_KEY` is set. Suite 852 → 903 (+51).
+Live-verified (no Brave key, zero cloud spend): `/mode research` warned
+correctly; a real research task's worker declined to fabricate instead
+of inventing a comparison, and the honesty guard still correctly
+flagged the final answer regardless — concrete proof the bug no longer
+reproduces. **No live query with a real key and real citations was run**
+(none available in this environment) — flagged as an open follow-up.
+Evidence: docs/TASKER_CHECKLIST.md → "RESEARCH mode grounding --
+WEB_SEARCH executor + enforcement + honesty guard (2026-07-20)".
+
+---
+
+## Previous completed task (kept for reference)
+
+REPL/TUI UX sprint + addendum, ✅ COMPLETE
 (2026-07-20; three parts plus a same-day addendum, one commit each,
 from Roland's live-testing session, following directly after the three
 same-day bug-fix sessions below). Addendum — chat rewind buffer: new
@@ -295,26 +329,36 @@ this section's lists.)
 
 ---
 
-**Next task (current):** research-mode grounding sprint, queued by
-Roland immediately after this REPL/TUI UX work (before session-end docs
-were written for it) — (1) real WEB_SEARCH tool executor via Brave
-Search API (`BRAVE_API_KEY` env var only), RETRIEVE/citation plumbing
-carrying source URLs; (2) RESEARCH-mode grounding enforcement: plans
-must include retrieval steps, worker prompts receive tool results,
-synthesis must cite actual results, honesty guard extended for
-zero-retrieval factual claims, `/mode research` announces when no
-search backend is configured instead of silently fabricating, planner
-step descriptions must not themselves assert factual content. SDD-first
-for the research-mode contract. This is now the front of the queue,
-ahead of SDD_ADDENDUM_PHASE8.md Phase 8.4 (SetupWizardScreen +
-ModelSelectorScreen, still queued behind it, now also carrying B.5.5's
-keyboard-binding/text-selection requirements). TASKER-P1 manual
-verification for 8.3 still open (no access this session, same as every
-prior phase that needed it). All three bug-fix sessions plus the
-REPL/TUI UX sprint (three parts + addendum) were interrupt-driven by
-live testing, not a step in the addendum sequence.
+**Next task (current):** SDD_ADDENDUM_PHASE8.md Phase 8.4 —
+SetupWizardScreen + ModelSelectorScreen (unchanged, still queued behind
+two interrupt-driven sprints now, carrying B.5.5's keyboard-binding/
+text-selection requirements). TASKER-P1 manual verification for 8.3
+still open. A future session with a real `BRAVE_API_KEY` should run one
+live end-to-end research query and confirm real citations, per the
+research-mode sprint's original acceptance criterion (not met this
+session — no key available in this environment). All three bug-fix
+sessions plus the REPL/TUI UX sprint plus the RESEARCH mode grounding
+sprint were interrupt-driven by live testing, not a step in the
+addendum sequence.
 
-**Files modified this session (2026-07-20, REPL/TUI UX sprint, 4
+**Files modified this session (2026-07-20, RESEARCH mode grounding
+sprint, 2 commits -- WEB_SEARCH executor, enforcement + honesty guard):**
+`tasker/tools/executor.py` (`_exec_web_search`, `_exec_retrieve`),
+`tasker/tools/bundles.py` (`_TOOL_KEYWORDS` additions -- the root-cause
+fix), `tasker/tools/loop.py` (parallel tool execution),
+`tasker/orchestrator/_parse.py` (`mode_name` param + grounding
+constants), `tasker/orchestrator/tier1_single.py`, `tier2_dual.py`,
+`tier3_reasoning.py`, `tier4_cloud.py` (`mode_name` threading),
+`tasker/orchestrator/factory.py` (`mode_name` wiring),
+`tasker/runtime/dispatch.py` (`_search_backend_configured`,
+`_enforce_research_grounding`, `_apply_research_synthesis_honesty`),
+`tasker/tools/honesty.py` (`check_research_grounding`), `cli/shell.py`
+(`_warn_if_research_ungrounded`), `docs/SDD.md` (5.1a),
+`docs/TESTING_GUIDE.md` (H17), 10 test files (2 new --
+`test_research_grounding.py`, `test_cli_shell_research.py`),
+`docs/TASKER_CHECKLIST.md`, `CLAUDE.md`, `COWORK_PROMPT.md`.
+
+**Files modified previous session (2026-07-20, REPL/TUI UX sprint, 4
 commits -- 3 parts + transcript addendum):** `tasker/setup/onboarding.py`
 (new), `tasker/workers/providers/ollama.py` (`resolve_num_ctx`, `gpu`
 param, `options.num_ctx`), `tasker/runtime/dispatch.py` (gpu wiring,
@@ -369,6 +413,13 @@ the `_execute_steps()` honesty-guard call site updated to pass
 (new H10)*.)*
 
 **Open decisions / blockers:**
+- **No live research query with a real `BRAVE_API_KEY` and real
+  citations was run** (none available in this environment) -- the
+  sprint's original acceptance criterion. A future session with a real
+  key should run one and confirm the synthesized answer cites real URLs.
+- `PDF_EXTRACT`/`CITATION_TRACKER`/`CONTRADICTION_DETECTOR` remain
+  schema-only (no execution implementation) -- `WEB_SEARCH`+`RETRIEVE`
+  alone already carry the source URLs synthesis needs.
 - Ctrl-R reverse search wasn't separately pty-scripted this sprint (the
   same underlying GNU readline library was already proven live by
   Tab-completion and Up-arrow history recall).

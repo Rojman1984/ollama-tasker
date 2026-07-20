@@ -1917,3 +1917,101 @@ it also benefits from (and is subject to) the readline integration from
 the base part-3 work -- e.g. Ctrl-C during a pager prompt is handled
 explicitly (stops paging cleanly), consistent with the REPL's own
 Ctrl-C handling elsewhere.
+
+## RESEARCH mode grounding -- WEB_SEARCH executor + enforcement + honesty guard (2026-07-20)
+
+New sprint from Roland's live research-mode test: RESEARCH mode
+fabricated an entire model comparison and a fake benchmark statistic
+with ZERO tool calls.
+
+- [x] **SDD-first:** new SDD 5.1a "RESEARCH Mode Grounding Contract"
+      documents the root cause (no `WEB_SEARCH`/`RETRIEVE` execution
+      implementation at all, AND no `_TOOL_KEYWORDS` entry so
+      `narrow_bundle_to_step()` always narrowed research steps to an
+      empty tool set) and the four-point enforcement: real tool
+      executors, code-level plan-injection backstop, prompt-level
+      grounding requirements (plan + synthesize), and a zero-retrieval
+      honesty guard. SDD 5.1's Mode Definitions table cross-referenced.
+- [x] **Part 1 -- real tool executors:** `tasker/tools/executor.py` gained
+      `_exec_web_search()` (Brave Search API, `BRAVE_API_KEY` env var
+      only, structured `{"query","results":[{"title","url","snippet"}]}`
+      output carrying real source URLs) and `_exec_retrieve()` (HTTP
+      fetch + HTML-to-text strip, `{"url","content"}`). Both registered
+      in `_DISPATCH`, network reads so never `_LOCAL_ONLY_TOOLS`-gated.
+      `tasker/tools/bundles.py`'s `_TOOL_KEYWORDS` gained entries for
+      `WEB_SEARCH`/`RETRIEVE`/`PDF_EXTRACT`/`CITATION_TRACKER`/
+      `CONTRADICTION_DETECTOR` -- **the actual root-cause fix**; before
+      this, no keyword group existed for any of them, so
+      `narrow_bundle_to_step()` returned an empty set for every research
+      step regardless of content, meaning the model could never have
+      called `web_search`/`retrieve` even if it had tried to.
+      `tasker/tools/loop.py`'s multi-tool-call turn execution changed
+      from sequential `await` to `asyncio.gather()` -- "parallel fetch"
+      per the sprint's request, proven via wall-clock timing.
+- [x] **Part 2 -- plan/prompt/synthesis enforcement + honesty guard:**
+      `build_plan_prompt()`/`build_synthesize_prompt()`
+      (`tasker/orchestrator/_parse.py`) gained an optional `mode_name`
+      that appends a RESEARCH-specific grounding block to the user
+      prompt (plan: forbids factual step descriptions, requires a real
+      search/retrieve step; synthesize: requires citing real URLs from
+      worker outputs). All four orchestrator tiers
+      (`tier1_single.py`…`tier4_cloud.py`) gained an optional `mode_name`
+      constructor param, threaded by `factory.py`'s `build_orchestrator()`
+      from `config.mode.name`. New `tasker/runtime/dispatch.py`
+      functions: `_search_backend_configured()`,
+      `_enforce_research_grounding()` (code-level backstop -- prepends a
+      real retrieval step, correctly reindexing dependencies, when a
+      plan has none and a backend is configured), and
+      `_apply_research_synthesis_honesty()` (checks the union of every
+      step's tool calls against the final synthesized answer). New
+      `tasker/tools/honesty.py`'s `check_research_grounding()` -- no
+      output-side keyword gate (unlike the side-effect guard), since any
+      research claim with zero retrieval calls is unverifiable by
+      construction. Wired into `_execute_steps()` (per step) and both
+      `_run_task()`/`_resume_task()` (final synthesis). `cli/shell.py`'s
+      `_warn_if_research_ungrounded()` announces a missing
+      `BRAVE_API_KEY` at `/mode research`, REPL startup, and the
+      one-shot `--mode research` CLI path.
+- [x] Tests: `tests/unit/test_tool_executor.py` (+16 -- `TestWebSearch`,
+      `TestRetrieve`), `tests/unit/test_tool_bundles.py` (+8 --
+      `TestNarrowBundleToStepResearchKeywordMatches`),
+      `tests/unit/test_tool_loop.py` (+1 -- parallel-execution timing),
+      `tests/unit/test_orchestrator_parse.py` (+8 --
+      `TestResearchModeGroundingPrompts`),
+      `tests/unit/test_orchestrator_single.py` (+3),
+      `tests/unit/test_orchestrator_tier2.py` (+1),
+      `tests/unit/test_orchestrator_tier3.py` (+1),
+      `tests/unit/test_orchestrator_tier4.py` (+1),
+      `tests/unit/test_orchestrator_factory.py` (+5 --
+      `TestModeNameThreading`), `tests/unit/test_honesty.py` (+8 --
+      `TestCheckResearchGrounding`), `tests/unit/test_research_grounding.py`
+      (new, 17 tests -- unit + end-to-end `_run_task()` wiring),
+      `tests/unit/test_cli_shell_research.py` (new, 7 tests).
+- [x] Full suite green: **903 tests, OK** (was 852).
+- [x] **Live smoke -- honest degradation without a search backend**
+      (Designlab1, WSL Ollama, `BRAVE_API_KEY` deliberately unset, zero
+      cloud spend): `/mode research` printed the no-backend warning; a
+      real research task's planner step description itself now says
+      "Perform web_search for comparison" (previously step descriptions
+      asserted invented facts); with no backend to actually search, the
+      worker declined to fabricate ("The comparison cannot be made due
+      to lack of relevant data") and the final synthesized answer was
+      still correctly prefixed `[unverified -- no sources retrieved]`
+      regardless -- concrete proof the reported silent-fabrication bug
+      no longer reproduces.
+
+**Open decisions / known issues:** **no live research query with a real
+`BRAVE_API_KEY` and real citations was run this session** -- no key is
+available in this sandboxed environment. The full tool-execution path
+(mocked Brave response shape) and the "guard clears when a real
+retrieval call occurred" path are both unit-tested
+(`test_tool_executor.py`, `test_research_grounding.py`'s
+`test_no_flag_when_a_real_retrieval_call_backs_the_claim`), but a future
+session with a real key should run one live end-to-end research query
+and confirm the synthesized answer actually cites real URLs, per the
+sprint's original acceptance criterion. `PDF_EXTRACT`/
+`CITATION_TRACKER`/`CONTRADICTION_DETECTOR` remain schema-only (no
+execution implementation) -- out of scope this pass, since
+`WEB_SEARCH`+`RETRIEVE` alone already carry the source URLs synthesis
+needs; calling one of the other three still returns "no execution
+implementation configured", now correctly scoped to just those three.

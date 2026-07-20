@@ -8,6 +8,7 @@ BASH denylist, path containment, timeouts, and output truncation.
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tasker.tools.executor import _MAX_OUTPUT_CHARS, execute_tool
 from tasker.workers.base import (
@@ -193,6 +194,169 @@ class TestCodeSearch(ToolExecutorTestCase):
     async def test_missing_pattern_is_error(self):
         r = await execute_tool(_tr("code_search", {}), worker=_worker(), cwd=self.cwd)
         self.assertIn("missing required", r.error)
+
+
+class TestWebSearch(ToolExecutorTestCase):
+    """WEB_SEARCH via the Brave Search API (SDD 5.1a). All HTTP is mocked
+    via tasker.tools.executor._search_get_fn -- never a real network call."""
+
+    def _mock_search(self, status, data):
+        async def fn(url, headers, timeout_s):
+            return status, data
+        return mock.patch("tasker.tools.executor._search_get_fn", fn)
+
+    async def test_missing_query(self):
+        with mock.patch.dict("os.environ", {"BRAVE_API_KEY": "key"}):
+            r = await execute_tool(_tr("web_search", {}), worker=_worker(), cwd=self.cwd)
+        self.assertIn("missing required", r.error)
+
+    async def test_no_api_key_configured(self):
+        with mock.patch.dict("os.environ", {}, clear=True):
+            r = await execute_tool(
+                _tr("web_search", {"query": "test"}), worker=_worker(), cwd=self.cwd,
+            )
+        self.assertIsNone(r.tool_output)
+        self.assertIn("BRAVE_API_KEY", r.error)
+
+    async def test_successful_search_returns_structured_results(self):
+        brave_response = {
+            "web": {
+                "results": [
+                    {"title": "Result One", "url": "https://example.com/one", "description": "First result"},
+                    {"title": "Result Two", "url": "https://example.com/two", "description": "Second result"},
+                ]
+            }
+        }
+        with mock.patch.dict("os.environ", {"BRAVE_API_KEY": "key"}), \
+             self._mock_search(200, brave_response):
+            r = await execute_tool(
+                _tr("web_search", {"query": "test query"}), worker=_worker(), cwd=self.cwd,
+            )
+        self.assertIsNone(r.error)
+        self.assertEqual(r.tool_output["query"], "test query")
+        self.assertEqual(len(r.tool_output["results"]), 2)
+        self.assertEqual(r.tool_output["results"][0]["url"], "https://example.com/one")
+        self.assertEqual(r.tool_output["results"][0]["title"], "Result One")
+
+    async def test_results_without_a_url_are_dropped(self):
+        brave_response = {"web": {"results": [{"title": "No URL", "description": "x"}]}}
+        with mock.patch.dict("os.environ", {"BRAVE_API_KEY": "key"}), \
+             self._mock_search(200, brave_response):
+            r = await execute_tool(
+                _tr("web_search", {"query": "q"}), worker=_worker(), cwd=self.cwd,
+            )
+        self.assertEqual(r.tool_output["results"], [])
+
+    async def test_capped_at_max_results(self):
+        brave_response = {
+            "web": {"results": [
+                {"title": f"R{i}", "url": f"https://example.com/{i}", "description": ""}
+                for i in range(10)
+            ]}
+        }
+        with mock.patch.dict("os.environ", {"BRAVE_API_KEY": "key"}), \
+             self._mock_search(200, brave_response):
+            r = await execute_tool(
+                _tr("web_search", {"query": "q"}), worker=_worker(), cwd=self.cwd,
+            )
+        self.assertEqual(len(r.tool_output["results"]), 5)
+
+    async def test_non_200_status(self):
+        with mock.patch.dict("os.environ", {"BRAVE_API_KEY": "key"}), \
+             self._mock_search(401, {"error": "unauthorized"}):
+            r = await execute_tool(
+                _tr("web_search", {"query": "q"}), worker=_worker(), cwd=self.cwd,
+            )
+        self.assertIsNone(r.tool_output)
+        self.assertIn("401", r.error)
+
+    async def test_transport_exception_reported_not_raised(self):
+        async def raising_fn(url, headers, timeout_s):
+            raise ConnectionError("refused")
+
+        with mock.patch.dict("os.environ", {"BRAVE_API_KEY": "key"}), \
+             mock.patch("tasker.tools.executor._search_get_fn", raising_fn):
+            r = await execute_tool(
+                _tr("web_search", {"query": "q"}), worker=_worker(), cwd=self.cwd,
+            )
+        self.assertIn("refused", r.error)
+
+    async def test_works_from_cloud_worker_not_local_gated(self):
+        # WEB_SEARCH/RETRIEVE are network reads, not local execution --
+        # never in _LOCAL_ONLY_TOOLS, must work from an OLLAMA_CLOUD worker.
+        with mock.patch.dict("os.environ", {"BRAVE_API_KEY": "key"}), \
+             self._mock_search(200, {"web": {"results": []}}):
+            r = await execute_tool(
+                _tr("web_search", {"query": "q"}),
+                worker=_worker(ComputeLocation.OLLAMA_CLOUD), cwd=self.cwd,
+            )
+        self.assertIsNone(r.error)
+
+
+class TestRetrieve(ToolExecutorTestCase):
+    """RETRIEVE -- fetch a URL and strip it to readable text (SDD 5.1a).
+    All HTTP is mocked via tasker.tools.executor._page_get_fn."""
+
+    def _mock_page(self, status, body):
+        async def fn(url, timeout_s):
+            return status, body
+        return mock.patch("tasker.tools.executor._page_get_fn", fn)
+
+    async def test_missing_url(self):
+        r = await execute_tool(_tr("retrieve", {}), worker=_worker(), cwd=self.cwd)
+        self.assertIn("missing required", r.error)
+
+    async def test_rejects_non_http_url(self):
+        r = await execute_tool(
+            _tr("retrieve", {"url": "not-a-url"}), worker=_worker(), cwd=self.cwd,
+        )
+        self.assertIn("absolute http", r.error)
+
+    async def test_strips_html_to_readable_text(self):
+        html = "<html><head><style>.x{}</style></head><body><h1>Title</h1><p>Hello &amp; welcome.</p></body></html>"
+        with self._mock_page(200, html):
+            r = await execute_tool(
+                _tr("retrieve", {"url": "https://example.com/page"}), worker=_worker(), cwd=self.cwd,
+            )
+        self.assertIsNone(r.error)
+        self.assertIn("Title", r.tool_output["content"])
+        self.assertIn("Hello & welcome.", r.tool_output["content"])
+        self.assertNotIn("<h1>", r.tool_output["content"])
+        self.assertEqual(r.tool_output["url"], "https://example.com/page")
+
+    async def test_script_and_style_blocks_dropped(self):
+        html = "<p>Real content</p><script>evil_stuff();</script><style>body{color:red}</style>"
+        with self._mock_page(200, html):
+            r = await execute_tool(
+                _tr("retrieve", {"url": "https://example.com"}), worker=_worker(), cwd=self.cwd,
+            )
+        self.assertIn("Real content", r.tool_output["content"])
+        self.assertNotIn("evil_stuff", r.tool_output["content"])
+        self.assertNotIn("color:red", r.tool_output["content"])
+
+    async def test_non_200_status(self):
+        with self._mock_page(404, "not found"):
+            r = await execute_tool(
+                _tr("retrieve", {"url": "https://example.com/missing"}), worker=_worker(), cwd=self.cwd,
+            )
+        self.assertIsNone(r.tool_output)
+        self.assertIn("404", r.error)
+
+    async def test_long_content_truncated(self):
+        html = "<p>" + ("word " * 5000) + "</p>"
+        with self._mock_page(200, html):
+            r = await execute_tool(
+                _tr("retrieve", {"url": "https://example.com"}), worker=_worker(), cwd=self.cwd,
+            )
+        self.assertLessEqual(len(r.tool_output["content"]), _MAX_OUTPUT_CHARS + 50)
+
+    async def test_works_from_cloud_worker_not_local_gated(self):
+        with self._mock_page(200, "<p>ok</p>"):
+            r = await execute_tool(
+                _tr("retrieve", {"url": "https://example.com"}),
+                worker=_worker(ComputeLocation.OLLAMA_CLOUD), cwd=self.cwd,
+            )
+        self.assertIsNone(r.error)
 
 
 class TestUnimplementedTools(ToolExecutorTestCase):

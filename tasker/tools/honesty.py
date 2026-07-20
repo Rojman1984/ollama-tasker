@@ -1,21 +1,28 @@
 """
 tasker.tools.honesty
 ---------------------
-Side-effect honesty guard for worker results (SDD 5.7b).
+Honesty guards for worker/synthesis output: side-effect claims (SDD
+5.7b) and RESEARCH mode grounding (SDD 5.1a).
 
-Live bug: a cowork task asked for a file to be created; the worker's
+Live bug 1: a cowork task asked for a file to be created; the worker's
 final answer claimed "verified at example.txt" but the step executed
 zero tool calls, so no file was ever written -- and the run synthesized
 that claim as a normal success with nothing to indicate it was
 unverified. This module flags exactly that shape (a side-effect claim in
 the output text with no tool_results backing it) so the dispatch loop
 can surface it honestly instead of passing it through to synthesis.
+
+Live bug 2: a RESEARCH-mode task fabricated an entire model comparison
+and a benchmark statistic with zero tool calls. check_research_grounding()
+is the same "never silently pass through an unverifiable claim"
+philosophy, applied to RESEARCH mode's factual output instead of side
+effects.
 """
 from __future__ import annotations
 
 import re
 
-from tasker.workers.base import WorkerResult
+from tasker.workers.base import WorkerResult, WorkerToolResult
 
 # Dual-signal heuristic: a verb implying a side effect happened, combined
 # with an object it happened to (or a filename-shaped token). Requiring
@@ -79,3 +86,38 @@ def check_side_effect_honesty(result: WorkerResult, *context_texts: str) -> Work
     original = result.output
     result.output = f"{UNVERIFIED_PREFIX} Original claim: {original}"
     return result
+
+
+# --------------------------------------------------------------------------- #
+# RESEARCH mode grounding (SDD 5.1a)
+# --------------------------------------------------------------------------- #
+
+_RETRIEVAL_TOOL_NAMES = frozenset({"web_search", "retrieve"})
+
+RESEARCH_UNVERIFIED_PREFIX = "[unverified -- no sources retrieved]"
+
+
+def check_research_grounding(
+    output: str | None, tool_results: list[WorkerToolResult],
+) -> str | None:
+    """
+    RESEARCH mode's grounding honesty guard (SDD 5.1a): if *output* is
+    non-empty and *tool_results* contains no web_search/retrieve call,
+    prefix it with RESEARCH_UNVERIFIED_PREFIX so a factual-sounding
+    answer with no real retrieval behind it is never presented as
+    grounded fact. Unlike check_side_effect_honesty(), this has no
+    output-side keyword gate -- ANY research output with zero retrieval
+    calls is unverifiable by construction, regardless of its wording.
+
+    Caller decides *when* this applies (only mode_name == "research");
+    this function itself is mode-agnostic so it can be reused both per
+    step (tasker/runtime/dispatch.py's _execute_steps) and against the
+    final synthesized answer (aggregated tool_results across every step).
+    """
+    if not output:
+        return output
+    if any(tr.tool_name in _RETRIEVAL_TOOL_NAMES for tr in tool_results):
+        return output
+    if output.startswith(RESEARCH_UNVERIFIED_PREFIX):
+        return output
+    return f"{RESEARCH_UNVERIFIED_PREFIX} {output}"

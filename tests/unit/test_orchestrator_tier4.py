@@ -271,6 +271,18 @@ class TestCloudOrchestrator(unittest.IsolatedAsyncioTestCase):
         await orc.plan("task", _classifier(), [])
         self.assertEqual(provider.calls[0].role, AgentRole.THINKER)
 
+    async def test_mode_name_reaches_plan_and_synthesize_prompts(self):
+        plan_json = json.dumps([{"description": "s", "role": "worker", "capabilities": ["tool_use"]}])
+        provider = _FakeProvider(output=plan_json)
+        orc = CloudOrchestrator(provider=provider, worker=_cloud_worker(), mode_name="research")
+        await orc.plan("task", _classifier(), [])
+        self.assertIn("GROUNDING REQUIREMENT", provider.calls[0].instruction)
+
+        synth_provider = _FakeProvider(output="answer")
+        synth_orc = CloudOrchestrator(provider=synth_provider, worker=_cloud_worker(), mode_name="research")
+        await synth_orc.synthesize("task", [_result("out")])
+        self.assertIn("GROUNDING REQUIREMENT", synth_provider.calls[0].instruction)
+
 
 if __name__ == "__main__":
     unittest.main()

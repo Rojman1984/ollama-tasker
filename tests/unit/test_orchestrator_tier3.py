@@ -199,6 +199,20 @@ class TestReasoningOrchestrator(unittest.IsolatedAsyncioTestCase):
         await orc.should_retry(plan, _failed_result())
         self.assertEqual(len(calls), 3)   # one call per operation, all through same model
 
+    async def test_mode_name_reaches_plan_and_synthesize_prompts(self):
+        captured = []
+
+        async def recording(system, user):
+            captured.append(user)
+            if "Available workers:" in user:
+                return json.dumps([{"description": "s", "role": "worker", "capabilities": ["tool_use"]}])
+            return "answer"
+
+        orc = ReasoningOrchestrator(model_id="m", call_model=recording, mode_name="research")
+        await orc.plan("task", _classifier(), [])
+        await orc.synthesize("task", [_result("out")])
+        self.assertTrue(all("GROUNDING REQUIREMENT" in u for u in captured))
+
 
 if __name__ == "__main__":
     unittest.main()

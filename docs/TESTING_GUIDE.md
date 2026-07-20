@@ -625,3 +625,80 @@ order -- confirming the transcript really is written incrementally as
 the session runs, not just held in memory. The real `~/.tasker/
 transcripts` was confirmed untouched throughout (scratch `$HOME` used
 for the whole live test).
+
+## H17. RESEARCH mode grounding -- WEB_SEARCH executor + plan/prompt/synthesis enforcement + honesty guard (2026-07-20)
+
+New sprint from Roland's live research-mode test: RESEARCH mode
+fabricated an entire model comparison and a fake benchmark statistic
+with ZERO tool calls. Root cause: `WEB_SEARCH`/`RETRIEVE`/etc had no
+execution implementation at all, AND no `_TOOL_KEYWORDS` entry, so
+`narrow_bundle_to_step()` narrowed every research step to an empty tool
+set regardless of content -- the model could never have called these
+tools even if it tried.
+
+### H17.1 Unit tests
+```bash
+python -m unittest tests.unit.test_tool_executor tests.unit.test_tool_bundles tests.unit.test_tool_loop tests.unit.test_orchestrator_parse tests.unit.test_orchestrator_single tests.unit.test_orchestrator_tier2 tests.unit.test_orchestrator_tier3 tests.unit.test_orchestrator_tier4 tests.unit.test_orchestrator_factory tests.unit.test_honesty tests.unit.test_research_grounding tests.unit.test_cli_shell_research -v
+```
+Covers: `_exec_web_search()`/`_exec_retrieve()` (`tasker/tools/executor.py`)
+-- Brave Search API call (HTTP mocked via `_search_get_fn`/`_page_get_fn`
+module-level swap points, never real network), missing `BRAVE_API_KEY`
+reported cleanly, results capped and URL-less results dropped, HTML
+stripped to readable text with script/style blocks removed, both work
+from a cloud worker (network reads, never `_LOCAL_ONLY_TOOLS`-gated);
+`narrow_bundle_to_step()` now offers `WEB_SEARCH`/`RETRIEVE`/`PDF_EXTRACT`/
+`CITATION_TRACKER`/`CONTRADICTION_DETECTOR` for realistic research step
+text (previously always empty -- the actual root-cause fix);
+`run_tool_loop()`'s multiple-tool-calls-in-one-turn now execute in
+parallel (proven via wall-clock timing, not just call-count);
+`build_plan_prompt()`/`build_synthesize_prompt()` append a grounding
+requirement only for `mode_name="research"`; all four orchestrator tiers
+accept and thread an optional `mode_name` constructor param into both
+prompt builders; `factory.py`'s `build_orchestrator()` threads
+`config.mode.name` into every tier; `check_research_grounding()`
+(`tasker/tools/honesty.py`) flags zero-retrieval factual output, no
+output-side keyword gate (unlike the side-effect guard) since any
+research claim with zero retrieval is unverifiable by construction;
+`_enforce_research_grounding()` (`tasker/runtime/dispatch.py`) injects a
+real retrieval step (correctly reindexed, dependencies shifted) when a
+plan has none and a search backend is configured, a no-op otherwise;
+`_apply_research_synthesis_honesty()` checks the union of every step's
+tool calls against the final synthesized answer; an end-to-end test
+drives the real `_run_task()` with a fake orchestrator + fake provider
+proving the injected step actually executes and the final answer gets
+flagged/not-flagged correctly; `cli/shell.py`'s
+`_warn_if_research_ungrounded()` announces a missing `BRAVE_API_KEY` at
+`/mode research` (REPL), REPL startup (when starting directly in
+research mode), and the one-shot `--mode research` CLI path.
+
+### H17.2 Live: no-backend honest degradation (real Ollama, no Brave key)
+```bash
+OLLAMA_BASE_URL=http://127.0.0.1:11435 TASKER_PROFILE=tier2_designlab tasker-cli shell
+tasker> /mode research
+tasker> compare the speed of a cheetah and a greyhound
+```
+Live-verified 2026-07-20 (Designlab1, WSL Ollama, `BRAVE_API_KEY`
+deliberately unset): `/mode research` printed the no-backend warning;
+the planner's own step description now says "Perform web_search for
+comparison" (previously step descriptions themselves asserted invented
+facts); with no real search backend to call, the worker did **not**
+fabricate a comparison -- it answered "The comparison cannot be made due
+to lack of relevant data," and the honesty guard still correctly
+prefixed the final synthesized answer with `[unverified -- no sources
+retrieved]` regardless. This is the concrete behavior change from the
+reported bug: previously silent fabrication, now either an honest
+non-answer or an explicitly marked unverified one -- never presented as
+plain fact. Local only, zero cloud spend.
+
+**Not live-verified this session: a real research query with real
+citations from an actual Brave Search API call.** No `BRAVE_API_KEY` is
+available in this sandboxed environment. The `WEB_SEARCH`/`RETRIEVE`
+executors are fully unit-tested against a mocked Brave API response
+shape (`tests/unit/test_tool_executor.py`), and the honest-degradation
+path above proves the rest of the pipeline (planning, tool offering,
+honesty guard) works correctly when a step *does* get real tool results
+-- see `test_research_grounding.py`'s
+`test_no_flag_when_a_real_retrieval_call_backs_the_claim`, which proves
+the guard clears when a real `web_search`/`retrieve` call occurred. A
+future session with a real `BRAVE_API_KEY` should run one live research
+query end-to-end and confirm the synthesized answer cites real URLs.

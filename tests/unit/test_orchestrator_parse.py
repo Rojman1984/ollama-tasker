@@ -9,7 +9,12 @@ fallback template, with no logging and no way for a caller to detect it.
 import json
 import unittest
 
-from tasker.orchestrator._parse import CAPABILITY_ALIASES, build_synthesize_prompt, parse_plan
+from tasker.orchestrator._parse import (
+    CAPABILITY_ALIASES,
+    build_plan_prompt,
+    build_synthesize_prompt,
+    parse_plan,
+)
 from tasker.orchestrator.tier1_single import SingleLLMOrchestrator
 from tasker.workers.base import (
     Capability,
@@ -257,6 +262,51 @@ class TestBuildSynthesizePrompt(unittest.TestCase):
         )
         prompt = build_synthesize_prompt("task", [_result("some prose", [tr])])
         self.assertNotIn("[tool: bash]", prompt)
+
+
+class TestResearchModeGroundingPrompts(unittest.TestCase):
+    """
+    SDD 5.1a: build_plan_prompt()/build_synthesize_prompt() append an
+    explicit grounding requirement when mode_name == "research" -- fixing
+    a live bug where a research task fabricated an entire model
+    comparison and a benchmark statistic with zero tool calls, including
+    invented factual content in the step description itself.
+    """
+
+    def test_plan_prompt_unaffected_by_default(self):
+        prompt = build_plan_prompt("task", _classifier(), [])
+        self.assertNotIn("GROUNDING", prompt)
+
+    def test_plan_prompt_unaffected_for_other_modes(self):
+        prompt = build_plan_prompt("task", _classifier(), [], mode_name="chat")
+        self.assertNotIn("GROUNDING", prompt)
+
+    def test_plan_prompt_gains_grounding_requirement_for_research(self):
+        prompt = build_plan_prompt("task", _classifier(), [], mode_name="research")
+        self.assertIn("GROUNDING REQUIREMENT", prompt)
+        self.assertIn("web_search", prompt)
+
+    def test_plan_prompt_grounding_forbids_factual_step_descriptions(self):
+        prompt = build_plan_prompt("task", _classifier(), [], mode_name="research")
+        self.assertIn("never assert factual claims", prompt)
+
+    def test_plan_prompt_original_content_still_present_with_grounding(self):
+        prompt = build_plan_prompt("my task", _classifier(), [], mode_name="research")
+        self.assertIn("Task: my task", prompt)
+
+    def test_synthesize_prompt_unaffected_by_default(self):
+        prompt = build_synthesize_prompt("task", [_result("answer")])
+        self.assertNotIn("GROUNDING", prompt)
+
+    def test_synthesize_prompt_gains_citation_requirement_for_research(self):
+        prompt = build_synthesize_prompt("task", [_result("answer")], mode_name="research")
+        self.assertIn("GROUNDING REQUIREMENT", prompt)
+        self.assertIn("cite", prompt.lower())
+
+    def test_synthesize_prompt_original_content_still_present_with_grounding(self):
+        prompt = build_synthesize_prompt("my task", [_result("answer")], mode_name="research")
+        self.assertIn("Original task: my task", prompt)
+        self.assertIn("answer", prompt)
 
 
 if __name__ == "__main__":

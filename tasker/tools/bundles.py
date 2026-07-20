@@ -172,6 +172,42 @@ _TOOL_KEYWORDS: dict[ToolID, list[frozenset[str]]] = {
         frozenset({"look for"}),
         frozenset({"locate"}),
     ],
+    # RESEARCH mode grounding (SDD 5.1a): before this, no keyword group
+    # existed for any of these -- narrow_bundle_to_step() always narrowed a
+    # research step to an EMPTY tool set (CODE_SEARCH's "search"/"find"
+    # keywords don't apply here; CODE_SEARCH isn't even in RESEARCH_BUNDLE),
+    # so a research worker could never actually call web_search/retrieve
+    # regardless of what the schema offered -- the root cause of a live
+    # bug where research mode fabricated an entire model comparison and a
+    # benchmark statistic with zero tool calls.
+    ToolID.WEB_SEARCH: [
+        frozenset({"search"}),
+        frozenset({"research"}),
+        frozenset({"find", "information"}),
+        frozenset({"look up"}),
+        frozenset({"web"}),
+    ],
+    ToolID.RETRIEVE: [
+        frozenset({"retrieve"}),
+        frozenset({"fetch"}),
+        frozenset({"read", "url"}),
+        frozenset({"read", "page"}),
+        frozenset({"read", "source"}),
+    ],
+    ToolID.PDF_EXTRACT: [
+        frozenset({"pdf"}),
+        frozenset({"extract"}),
+    ],
+    ToolID.CITATION_TRACKER: [
+        frozenset({"cite"}),
+        frozenset({"citation"}),
+        frozenset({"source"}),
+    ],
+    ToolID.CONTRADICTION_DETECTOR: [
+        frozenset({"contradict"}),
+        frozenset({"conflicting"}),
+        frozenset({"verify", "claim"}),
+    ],
 }
 
 

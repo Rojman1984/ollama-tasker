@@ -18,7 +18,12 @@ request itself implied a side effect.
 """
 import unittest
 
-from tasker.tools.honesty import UNVERIFIED_PREFIX, check_side_effect_honesty
+from tasker.tools.honesty import (
+    RESEARCH_UNVERIFIED_PREFIX,
+    UNVERIFIED_PREFIX,
+    check_research_grounding,
+    check_side_effect_honesty,
+)
 from tasker.workers.base import ModelUsage, WorkerResult, WorkerStatus, WorkerToolResult
 
 
@@ -129,6 +134,61 @@ class TestCheckSideEffectHonesty(unittest.TestCase):
         result = _result("I created the file and verified it at example.txt.")
         flagged = check_side_effect_honesty(result, "", None, _FILE_TASK)
         self.assertTrue(flagged.output.startswith(UNVERIFIED_PREFIX))
+
+
+def _tr(tool_name: str) -> WorkerToolResult:
+    return WorkerToolResult(
+        tool_name=tool_name, tool_input={}, tool_output="ok", error=None, duration_ms=5,
+    )
+
+
+class TestCheckResearchGrounding(unittest.TestCase):
+    """
+    SDD 5.1a: research-mode factual output with zero retrieval tool calls
+    is marked [unverified -- no sources retrieved]. Live bug: a research
+    task fabricated an entire model comparison and a benchmark statistic
+    with zero tool calls.
+    """
+
+    def test_flags_output_with_no_retrieval_calls(self):
+        flagged = check_research_grounding("Model A beats Model B by 12%.", [])
+        self.assertTrue(flagged.startswith(RESEARCH_UNVERIFIED_PREFIX))
+        self.assertIn("Model A beats Model B by 12%.", flagged)
+
+    def test_does_not_flag_when_web_search_occurred(self):
+        output = "Model A beats Model B by 12%."
+        flagged = check_research_grounding(output, [_tr("web_search")])
+        self.assertEqual(flagged, output)
+
+    def test_does_not_flag_when_retrieve_occurred(self):
+        output = "Model A beats Model B by 12%."
+        flagged = check_research_grounding(output, [_tr("retrieve")])
+        self.assertEqual(flagged, output)
+
+    def test_unrelated_tool_calls_do_not_count_as_grounding(self):
+        # A bash/file_read call happened, but that's not a retrieval --
+        # the claim is still unverifiable.
+        flagged = check_research_grounding("A fact.", [_tr("bash")])
+        self.assertTrue(flagged.startswith(RESEARCH_UNVERIFIED_PREFIX))
+
+    def test_none_output_untouched(self):
+        self.assertIsNone(check_research_grounding(None, []))
+
+    def test_empty_output_untouched(self):
+        self.assertEqual(check_research_grounding("", []), "")
+
+    def test_already_flagged_output_not_double_flagged(self):
+        already = f"{RESEARCH_UNVERIFIED_PREFIX} A fact."
+        flagged = check_research_grounding(already, [])
+        self.assertEqual(flagged.count(RESEARCH_UNVERIFIED_PREFIX), 1)
+
+    def test_no_output_side_keyword_gate_unlike_side_effect_guard(self):
+        # Unlike check_side_effect_honesty, ANY research output with zero
+        # retrieval calls is flagged -- no dual-signal keyword heuristic,
+        # since a research claim doesn't need side-effect-shaped wording
+        # to be unverifiable.
+        flagged = check_research_grounding("Just a plain sentence.", [])
+        self.assertTrue(flagged.startswith(RESEARCH_UNVERIFIED_PREFIX))
 
 
 if __name__ == "__main__":

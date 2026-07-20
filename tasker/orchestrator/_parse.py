@@ -59,6 +59,29 @@ A worker step has failed. Decide whether to retry it.
 Respond ONLY with JSON: {"should_retry": bool, "reassign": bool, "reason": string}
 No markdown, no explanation."""
 
+# RESEARCH mode grounding (SDD 5.1a). Appended to the plan/synthesize USER
+# prompts (not baked into the shared system prompts, which every other
+# mode also uses) when the caller is RESEARCH mode. Live bug this fixes:
+# a research task fabricated an entire model comparison and a benchmark
+# statistic with zero tool calls, and the *step description itself*
+# (not just the final answer) asserted invented factual content.
+_RESEARCH_PLAN_GROUNDING = """
+
+RESEARCH MODE GROUNDING REQUIREMENT: your plan must include at least one \
+step with capability "search" that performs real web research (web_search \
+and/or retrieve tools) before any step that states factual conclusions. \
+Step descriptions must describe ACTIONS to take ("search for X", \
+"retrieve and compare Y"), never assert factual claims, comparisons, or \
+statistics themselves -- a description is not the answer."""
+
+_RESEARCH_SYNTHESIZE_GROUNDING = """
+
+RESEARCH MODE GROUNDING REQUIREMENT: every factual claim in your answer \
+must cite one of the source URLs that actually appear in the worker \
+outputs above (format: [Source: <url>]). If a claim cannot be traced to \
+a real retrieved source, do not state it as fact -- say plainly what \
+was not found instead of filling the gap."""
+
 
 # --------------------------------------------------------------------------- #
 # User-prompt builders
@@ -68,22 +91,31 @@ def build_plan_prompt(
     task: str,
     classifier_output: ClassifierResult,
     available_workers: list[WorkerManifest],
+    mode_name: str | None = None,
 ) -> str:
     worker_ids = [w.id for w in available_workers]
-    return (
+    prompt = (
         f"Task: {task}\n"
         f"Type: {classifier_output.task_type.value}\n"
         f"Complexity: {classifier_output.complexity_score:.2f}\n"
         f"Available workers: {worker_ids}"
     )
+    if mode_name == "research":
+        prompt += _RESEARCH_PLAN_GROUNDING
+    return prompt
 
 
-def build_synthesize_prompt(original_task: str, results: list[WorkerResult]) -> str:
+def build_synthesize_prompt(
+    original_task: str, results: list[WorkerResult], mode_name: str | None = None,
+) -> str:
     outputs = "\n\n".join(
         f"Step {i + 1}: {r.output or '(no output)'}" + _format_tool_results(r)
         for i, r in enumerate(results)
     )
-    return f"Original task: {original_task}\n\nWorker outputs:\n{outputs}"
+    prompt = f"Original task: {original_task}\n\nWorker outputs:\n{outputs}"
+    if mode_name == "research":
+        prompt += _RESEARCH_SYNTHESIZE_GROUNDING
+    return prompt
 
 
 def _format_tool_results(result: WorkerResult) -> str:

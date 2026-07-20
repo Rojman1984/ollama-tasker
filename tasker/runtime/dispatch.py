@@ -247,7 +247,7 @@ async def _execute_steps(
 
     from tasker.session.checkpoint import Checkpoint
     from tasker.tools.bundles import get_definitions, narrow_bundle_to_step
-    from tasker.tools.honesty import check_side_effect_honesty
+    from tasker.tools.honesty import check_research_grounding, check_side_effect_honesty
     from tasker.tools.loop import run_tool_loop
     from tasker.workers.base import SessionDirective, WorkerStatus, WorkerTask
     from tasker.workers.registry import WorkerSelector
@@ -320,6 +320,11 @@ async def _execute_steps(
             result = check_side_effect_honesty(result, task, step.description)
             if result.output != before:
                 print(f"  [warn] step {step.index}: unverified side-effect claim (no tool calls)")
+            if mode_name == "research":
+                before = result.output
+                result.output = check_research_grounding(result.output, result.tool_results)
+                if result.output != before:
+                    print(f"  [warn] step {step.index}: unverified -- no sources retrieved")
             status_str = "ok" if result.status == WorkerStatus.SUCCESS else result.status.value
             print(
                 f"  [{status_str}] {worker.id} ({result.duration_ms}ms, "
@@ -331,6 +336,63 @@ async def _execute_steps(
             print(f"  Execution error: {exc}")
 
     return results, False
+
+
+def _search_backend_configured() -> bool:
+    """RESEARCH mode grounding (SDD 5.1a): whether WEB_SEARCH can actually
+    do anything. Checked live, not cached -- BRAVE_API_KEY could be set
+    or unset between REPL commands in the same process."""
+    return bool(os.environ.get("BRAVE_API_KEY"))
+
+
+def _enforce_research_grounding(plan, mode_name: str, search_configured: bool):
+    """
+    RESEARCH mode grounding (SDD 5.1a), point 2: if no step in *plan*
+    requires Capability.SEARCH, prepend a real retrieval step rather than
+    trusting the planning prompt's own grounding instructions to have
+    been followed -- a code-level backstop, not just prompt engineering.
+    A missing search backend makes this a no-op (nothing to force a
+    retrieval step toward); every other mode is untouched.
+    """
+    if mode_name != "research" or not search_configured:
+        return plan
+
+    from tasker.workers.base import Capability
+    if any(Capability.SEARCH in s.required_capabilities for s in plan.steps):
+        return plan
+
+    import dataclasses as _dc
+
+    from tasker.workers.base import AgentRole, PlanStep, StepStatus
+
+    retrieval_step = PlanStep(
+        index=0,
+        description=f"Search for and retrieve real, current sources relevant to: {plan.original_task}",
+        role=AgentRole.WORKER,
+        required_capabilities={Capability.TOOL_USE, Capability.SEARCH},
+        depends_on=[],
+        status=StepStatus.PENDING,
+    )
+    shifted = [
+        _dc.replace(s, index=s.index + 1, depends_on=[d + 1 for d in s.depends_on])
+        for s in plan.steps
+    ]
+    new_steps = [retrieval_step] + shifted
+    new_graph = {s.index: s.depends_on for s in new_steps}
+    return _dc.replace(plan, steps=new_steps, dependency_graph=new_graph)
+
+
+def _apply_research_synthesis_honesty(output: str, mode_name: str, results: list) -> str:
+    """RESEARCH mode grounding (SDD 5.1a), point 4, applied to the FINAL
+    synthesized answer -- checked against the union of every step's tool
+    calls, since a claim in the synthesized text may draw on sources
+    retrieved in an earlier step than the one that stated the claim."""
+    if mode_name != "research":
+        return output
+    from tasker.tools.honesty import check_research_grounding
+
+    all_tool_results = [tr for r in results for tr in r.tool_results]
+    return check_research_grounding(output, all_tool_results)
 
 
 async def _run_task(
@@ -384,6 +446,7 @@ async def _run_task(
     except Exception as exc:
         print(f"Planning failed: {type(exc).__name__}: {exc}")
         return
+    plan = _enforce_research_grounding(plan, mode_name, _search_backend_configured())
 
     fallback_note = "  (fallback: NanoOrchestrator template — model plan unparseable)" \
         if plan.used_fallback else ""
@@ -407,6 +470,7 @@ async def _run_task(
     print("\nSynthesizing...")
     try:
         output = await orchestrator.synthesize(task, results)
+        output = _apply_research_synthesis_honesty(output, mode_name, results)
         print(f"\n{output}")
     except Exception as exc:
         print(f"Synthesis error: {exc}")
@@ -474,6 +538,7 @@ async def _resume_task(
     print("\nSynthesizing...")
     try:
         output = await orchestrator.synthesize(cp.original_task, results)
+        output = _apply_research_synthesis_honesty(output, cp.mode, results)
         print(f"\n{output}")
     except Exception as exc:
         print(f"Synthesis error: {exc}")

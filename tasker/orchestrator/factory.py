@@ -189,11 +189,17 @@ def build_orchestrator(
     manifest = _build_orchestrator_manifest(model_id, compute_location)
     call_model = _make_call_model(ollama_provider, manifest, privacy_tier)
 
+    # Threaded into every LLM-calling tier so plan()/synthesize() can apply
+    # RESEARCH mode's grounding requirement (SDD 5.1a) to their prompts.
+    mode_name = config.mode.name
+
     if tier == 1:
-        return SingleLLMOrchestrator(model_id, call_model)
+        return SingleLLMOrchestrator(model_id, call_model, mode_name=mode_name)
 
     if tier == 2:
-        return DualLLMOrchestrator(model_id, model_id, call_model, call_model)
+        return DualLLMOrchestrator(
+            model_id, model_id, call_model, call_model, mode_name=mode_name,
+        )
 
     if tier >= 4:
         if compute_location == ComputeLocation.OLLAMA_CLOUD:
@@ -203,7 +209,8 @@ def build_orchestrator(
             # and budget units are acquired/recorded per orchestration
             # call via the shared OllamaProvider instance.
             return CloudOrchestrator(
-                ollama_provider, manifest, privacy_tier=PrivacyTier.OLLAMA_CLOUD_OK
+                ollama_provider, manifest, privacy_tier=PrivacyTier.OLLAMA_CLOUD_OK,
+                mode_name=mode_name,
             )
         logger.warning(
             "build_orchestrator: tier %d requested but the profile's "
@@ -213,4 +220,4 @@ def build_orchestrator(
         )
 
     # tier == 3, or tier >= 4 degraded above
-    return ReasoningOrchestrator(model_id, call_model)
+    return ReasoningOrchestrator(model_id, call_model, mode_name=mode_name)

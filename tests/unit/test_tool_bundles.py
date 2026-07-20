@@ -12,7 +12,7 @@ LLM-classified).
 """
 import unittest
 
-from tasker.tools.bundles import CODE_BUNDLE, narrow_bundle_to_step
+from tasker.tools.bundles import CODE_BUNDLE, RESEARCH_BUNDLE, narrow_bundle_to_step
 from tasker.workers.base import ToolID
 
 
@@ -45,6 +45,60 @@ class TestNarrowBundleToStepKeywordMatches(unittest.TestCase):
     def test_code_search_keyword_matches(self):
         result = narrow_bundle_to_step(CODE_BUNDLE, "Search for the function definition")
         self.assertEqual(result, {ToolID.CODE_SEARCH})
+
+
+class TestNarrowBundleToStepResearchKeywordMatches(unittest.TestCase):
+    """
+    Regression coverage for a live bug: RESEARCH mode fabricated an
+    entire model comparison and a fake benchmark statistic with ZERO tool
+    calls, because no _TOOL_KEYWORDS entry existed for WEB_SEARCH/
+    RETRIEVE/etc at all -- every research step narrowed to an EMPTY tool
+    set regardless of the step's actual content, so the model could never
+    call web_search/retrieve even though both were in RESEARCH_BUNDLE and
+    schema-defined. This is the root-cause fix.
+    """
+
+    def test_web_search_keyword_matches(self):
+        result = narrow_bundle_to_step(RESEARCH_BUNDLE, "Search the web for recent benchmark results")
+        self.assertIn(ToolID.WEB_SEARCH, result)
+
+    def test_research_keyword_matches_web_search(self):
+        result = narrow_bundle_to_step(RESEARCH_BUNDLE, "Research the latest model releases")
+        self.assertIn(ToolID.WEB_SEARCH, result)
+
+    def test_retrieve_keyword_matches(self):
+        result = narrow_bundle_to_step(RESEARCH_BUNDLE, "Retrieve the full text of this source")
+        self.assertIn(ToolID.RETRIEVE, result)
+
+    def test_fetch_keyword_matches_retrieve(self):
+        result = narrow_bundle_to_step(RESEARCH_BUNDLE, "Fetch the article content")
+        self.assertIn(ToolID.RETRIEVE, result)
+
+    def test_pdf_keyword_matches(self):
+        result = narrow_bundle_to_step(RESEARCH_BUNDLE, "Extract text from the PDF report")
+        self.assertIn(ToolID.PDF_EXTRACT, result)
+
+    def test_citation_keyword_matches(self):
+        result = narrow_bundle_to_step(RESEARCH_BUNDLE, "Cite the source for this claim")
+        self.assertIn(ToolID.CITATION_TRACKER, result)
+
+    def test_contradiction_keyword_matches(self):
+        result = narrow_bundle_to_step(RESEARCH_BUNDLE, "Check for contradicting claims across sources")
+        self.assertIn(ToolID.CONTRADICTION_DETECTOR, result)
+
+    def test_a_realistic_research_step_never_narrows_to_empty(self):
+        # This exact shape of step description (the grounding-enforcement
+        # step injected/instructed by dispatch.py's research-mode handling,
+        # see _enforce_research_grounding()) previously returned an empty
+        # set 100% of the time, because no WEB_SEARCH keyword existed at
+        # all -- the root cause of the fabrication bug.
+        result = narrow_bundle_to_step(
+            RESEARCH_BUNDLE,
+            "Search for and retrieve real, current sources relevant to: "
+            "compare the benchmark performance of two language models",
+        )
+        self.assertIn(ToolID.WEB_SEARCH, result)
+        self.assertNotEqual(result, frozenset())
 
 
 class TestNarrowBundleToStepRealStepDescriptions(unittest.TestCase):
