@@ -165,6 +165,16 @@ _TOOL_KEYWORDS: dict[ToolID, list[frozenset[str]]] = {
         frozenset({"test"}),
         frozenset({"pytest"}),
     ],
+    ToolID.CALCULATOR: [
+        frozenset({"calculator"}),
+        frozenset({"calculate"}),
+        frozenset({"compute"}),
+        frozenset({"math"}),
+        frozenset({"arithmetic"}),
+        frozenset({"sum"}),
+        frozenset({"product"}),
+        frozenset({"evaluate", "expression"}),
+    ],
     ToolID.CODE_SEARCH: [
         frozenset({"search"}),
         frozenset({"find"}),

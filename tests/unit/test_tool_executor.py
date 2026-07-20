@@ -10,7 +10,15 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tasker.tools.executor import _MAX_OUTPUT_CHARS, execute_tool
+from tasker.tools.executor import (
+    _MAX_OUTPUT_CHARS,
+    _exec_calculator,
+    _exec_linter,
+    _exec_test_runner,
+    _run_pytest,
+    _run_unittest,
+    execute_tool,
+)
 from tasker.workers.base import (
     Capability,
     ComputeLocation,
@@ -359,15 +367,163 @@ class TestRetrieve(ToolExecutorTestCase):
         self.assertIsNone(r.error)
 
 
-class TestUnimplementedTools(ToolExecutorTestCase):
+class TestCalculator(ToolExecutorTestCase):
 
-    async def test_linter_not_implemented(self):
-        r = await execute_tool(_tr("linter", {"path": "."}), worker=_worker(), cwd=self.cwd)
-        self.assertIn("no execution implementation", r.error)
+    async def test_addition(self):
+        r = await execute_tool(_tr("calculator", {"expression": "2 + 3"}), worker=_worker(), cwd=self.cwd)
+        self.assertIsNone(r.error)
+        self.assertEqual(r.tool_output["result"], 5)
 
-    async def test_test_runner_not_implemented(self):
+    async def test_subtraction_and_unary_minus(self):
+        r = await execute_tool(_tr("calculator", {"expression": "10 - 3 - 2"}), worker=_worker(), cwd=self.cwd)
+        self.assertEqual(r.tool_output["result"], 5)
+        r2 = await execute_tool(_tr("calculator", {"expression": "-5 + 2"}), worker=_worker(), cwd=self.cwd)
+        self.assertEqual(r2.tool_output["result"], -3)
+
+    async def test_multiplication_division_floor_power(self):
+        r = await execute_tool(_tr("calculator", {"expression": "(2 + 3) * 4"}), worker=_worker(), cwd=self.cwd)
+        self.assertEqual(r.tool_output["result"], 20)
+        r2 = await execute_tool(_tr("calculator", {"expression": "7 // 2"}), worker=_worker(), cwd=self.cwd)
+        self.assertEqual(r2.tool_output["result"], 3)
+        r3 = await execute_tool(_tr("calculator", {"expression": "2 ** 10"}), worker=_worker(), cwd=self.cwd)
+        self.assertEqual(r3.tool_output["result"], 1024)
+        r4 = await execute_tool(_tr("calculator", {"expression": "7 % 3"}), worker=_worker(), cwd=self.cwd)
+        self.assertEqual(r4.tool_output["result"], 1)
+
+    async def test_missing_expression(self):
+        r = await execute_tool(_tr("calculator", {}), worker=_worker(), cwd=self.cwd)
+        self.assertIn("missing required", r.error)
+
+    async def test_eval_blocked(self):
+        r = await execute_tool(_tr("calculator", {"expression": "__import__('os').system('echo pwned')"}), worker=_worker(), cwd=self.cwd)
+        self.assertIsNotNone(r.error)
+        self.assertNotIn("pwned", str(r.tool_output) + r.error)
+
+    async def test_function_call_blocked(self):
+        r = await execute_tool(_tr("calculator", {"expression": "abs(-5)"}), worker=_worker(), cwd=self.cwd)
+        self.assertIsNotNone(r.error)
+
+    async def test_not_local_gated(self):
+        r = await execute_tool(_tr("calculator", {"expression": "1 + 1"}), worker=_worker(ComputeLocation.OLLAMA_CLOUD), cwd=self.cwd)
+        self.assertIsNone(r.error)
+        self.assertEqual(r.tool_output["result"], 2)
+
+
+class TestTestRunner(ToolExecutorTestCase):
+
+    async def test_pytest_success_parsed(self):
+        pytest_output = (
+            "test_ok.py::test_passes PASSED\n"
+            "1 passed in 0.01s\n"
+        )
+        with mock.patch("tasker.tools.executor.shutil.which", return_value="/fake/pytest"), \
+             mock.patch("tasker.tools.executor._run_argv", return_value=(pytest_output, None)):
+            r = await _run_pytest(self.cwd, self.cwd, 30.0)
+        self.assertIsNone(r[1], msg=r[1])
+        self.assertEqual(r[0]["framework"], "pytest")
+        self.assertEqual(r[0]["passed"], 1)
+        self.assertEqual(r[0]["failed"], 0)
+        self.assertEqual(r[0]["skipped"], 0)
+        self.assertEqual(r[0]["failing_tests"], [])
+
+    async def test_pytest_failure_parsed(self):
+        pytest_output = (
+            "test_fail.py::test_fails FAILED\n"
+            "1 failed in 0.01s\n"
+        )
+        with mock.patch("tasker.tools.executor.shutil.which", return_value="/fake/pytest"), \
+             mock.patch("tasker.tools.executor._run_argv", return_value=(pytest_output, "exited with code 1")):
+            r = await _run_pytest(self.cwd, self.cwd, 30.0)
+        # pytest exit code is surfaced as a note, not a tool error.
+        self.assertIsNone(r[1], msg=r[1])
+        self.assertEqual(r[0]["framework"], "pytest")
+        self.assertEqual(r[0]["passed"], 0)
+        self.assertEqual(r[0]["failed"], 1)
+        self.assertEqual(r[0]["failing_tests"], ["test_fail.py::test_fails"])
+
+    async def test_pytest_skipped_parsed(self):
+        pytest_output = (
+            "test_skip.py::test_skipped SKIPPED\n"
+            "1 skipped in 0.01s\n"
+        )
+        with mock.patch("tasker.tools.executor.shutil.which", return_value="/fake/pytest"), \
+             mock.patch("tasker.tools.executor._run_argv", return_value=(pytest_output, None)):
+            r = await _run_pytest(self.cwd, self.cwd, 30.0)
+        self.assertEqual(r[0]["passed"], 0)
+        self.assertEqual(r[0]["failed"], 0)
+        self.assertEqual(r[0]["skipped"], 1)
+
+    async def test_unittest_success_parsed(self):
+        unittest_output = (
+            "test_pass (__main__.T) ... ok\n"
+            "Ran 1 test in 0.003s\n\nOK\n"
+        )
+        with mock.patch("tasker.tools.executor._run_argv", return_value=(unittest_output, None)):
+            r = await _run_unittest(self.cwd, self.cwd, 30.0)
+        self.assertIsNone(r[1], msg=r[1])
+        self.assertEqual(r[0]["framework"], "unittest")
+        self.assertEqual(r[0]["passed"], 1)
+        self.assertEqual(r[0]["failed"], 0)
+        self.assertEqual(r[0]["failing_tests"], [])
+
+    async def test_unittest_failure_parsed(self):
+        unittest_output = (
+            "test_fail (__main__.T) ... FAIL\n"
+            "Ran 1 test in 0.003s\n\nFAILED (failures=1)\n"
+        )
+        with mock.patch("tasker.tools.executor._run_argv", return_value=(unittest_output, "exited with code 1")):
+            r = await _run_unittest(self.cwd, self.cwd, 30.0)
+        self.assertIsNone(r[1], msg=r[1])
+        self.assertEqual(r[0]["passed"], 0)
+        self.assertEqual(r[0]["failed"], 1)
+        self.assertEqual(r[0]["failing_tests"], ["test_fail"])
+
+    async def test_unittest_fallback_runs_real_tests(self):
+        # Hide pytest from PATH so the executor falls back to unittest discover.
+        (self.cwd / "test_unit.py").write_text(
+            "import unittest\nclass T(unittest.TestCase):\n    def test_pass(self): self.assertTrue(True)\n",
+            encoding="utf-8",
+        )
+        with mock.patch("tasker.tools.executor.shutil.which", return_value=None):
+            r = await execute_tool(_tr("test_runner", {}), worker=_worker(), cwd=self.cwd)
+        self.assertIsNone(r.error, msg=r.error)
+        self.assertEqual(r.tool_output["framework"], "unittest")
+        self.assertGreaterEqual(r.tool_output["passed"], 1)
+
+    async def test_missing_path_defaults_to_cwd(self):
+        (self.cwd / "test_default.py").write_text(
+            "import unittest\nclass T(unittest.TestCase):\n    def test_default(self): pass\n",
+            encoding="utf-8",
+        )
         r = await execute_tool(_tr("test_runner", {}), worker=_worker(), cwd=self.cwd)
-        self.assertIn("no execution implementation", r.error)
+        self.assertIsNone(r.error, msg=r.error)
+        self.assertGreaterEqual(r.tool_output["passed"], 1)
+
+
+class TestLinter(ToolExecutorTestCase):
+
+    async def test_linter_not_installed(self):
+        with mock.patch("tasker.tools.executor.shutil.which", return_value=None):
+            r = await execute_tool(_tr("linter", {"path": "."}), worker=_worker(), cwd=self.cwd)
+        self.assertIsNone(r.tool_output)
+        self.assertIn("linter not installed", r.error)
+
+    async def test_linter_finds_issue(self):
+        (self.cwd / "bad.py").write_text("import os\n", encoding="utf-8")
+        r = await execute_tool(_tr("linter", {"path": "bad.py"}), worker=_worker(), cwd=self.cwd)
+        self.assertIsNone(r.error, msg=f"unexpected error: {r.error}")
+        self.assertEqual(r.tool_output["tool"], "ruff")
+        self.assertGreaterEqual(r.tool_output["error_count"], 1)
+        self.assertTrue(any(f.get("file", "").endswith("bad.py") for f in r.tool_output["findings"]))
+
+    async def test_linter_clean_file(self):
+        (self.cwd / "good.py").write_text("x = 1\n", encoding="utf-8")
+        r = await execute_tool(_tr("linter", {"path": "good.py"}), worker=_worker(), cwd=self.cwd)
+        self.assertIsNone(r.error, msg=r.error)
+        self.assertEqual(r.tool_output["error_count"], 0)
+
+
+class TestUnknownTool(ToolExecutorTestCase):
 
     async def test_unknown_tool_name_not_implemented(self):
         r = await execute_tool(_tr("totally_unknown", {}), worker=_worker(), cwd=self.cwd)

@@ -757,3 +757,40 @@ the real, non-mocked `_run_task()` recursion). A future session with
 more time (or a stronger local model, or a cloud model with an explicit
 zero-spend guard) should retry the live invocation specifically. Zero
 cloud spend was maintained throughout every attempt after the first.
+
+## H19. TEST_RUNNER, LINTER, CALCULATOR executors -- tool-executor fill-in part 2 (2026-07-20)
+
+Part 2 of the tool-executor fill-in sprint. Replaces the previous
+"no execution implementation configured" placeholders for `TEST_RUNNER`,
+`LINTER`, and `CALCULATOR` with real executors and the `_TOOL_KEYWORDS`
+groups needed for `narrow_bundle_to_step()` to offer them.
+
+### H19.1 Unit tests
+```bash
+python -m unittest tests.unit.test_tool_executor.TestCalculator -v
+python -m unittest tests.unit.test_tool_executor.TestTestRunner -v
+python -m unittest tests.unit.test_tool_executor.TestLinter -v
+python -m unittest tests.unit.test_tool_bundles.TestNarrowBundleToStepKeywordMatches.test_calculator_keyword_matches -v
+```
+Covers: CALCULATOR AST-whitelist arithmetic, missing-expression handling,
+eval/function-call blocking, and no `LOCAL_HARDWARE` gating; TEST_RUNNER
+pytest and unittest output parsing, pytest-vs-unittest detection,
+failing-test-name extraction, and real unittest-discover fallback;
+LINTER ruff JSON output parsing and honest "not installed" error when
+ruff is absent; CALCULATOR keyword registration in
+`narrow_bundle_to_step()`.
+
+### H19.2 Full suite
+```bash
+python -m unittest discover -s tests
+```
+Expected: all tests pass (935 total after this commit).
+
+### H19.3 Live: calculator from CHAT mode
+```bash
+OLLAMA_BASE_URL=http://127.0.0.1:11435 TASKER_PROFILE=tier1_tasker \
+  tasker-cli --mode chat "What is 12345 * 6789?"
+```
+Expected: the model is offered the `calculator` tool for this arithmetic
+step and returns a numeric answer (exact interaction depends on the
+local model's tool-use reliability; the executor itself is unit-tested).

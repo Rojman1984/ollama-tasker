@@ -352,56 +352,78 @@ python -m unittest tests.unit.test_orchestrator_nano -v
 
 *(Update this section at the end of every Cowork or Code session)*
 
+**Last worked on:** Tool-executor fill-in sprint, Part 2 —
+`TEST_RUNNER`, `LINTER`, and `CALCULATOR` executors. One commit, full
+suite green before push. Session stopped after the commit per explicit
+instruction — do not start Part 3 or any other work.
+
+**Part 2 — TEST_RUNNER / LINTER / CALCULATOR:**
+`tasker/tools/executor.py` gained real execution for all three:
+`TEST_RUNNER` auto-detects pytest (via `shutil.which`) and falls back to
+`python -m unittest discover`, returning structured
+`{framework, passed, failed, skipped, failing_tests}`;
+`LINTER` runs `ruff check <path> --output-format json` when ruff is
+available and returns an honest "linter not installed" error otherwise;
+`CALCULATOR` evaluates arithmetic via the `ast` module with a strict
+operator whitelist — `eval()` is never used. All three are now registered
+in `_DISPATCH`. `tasker/tools/bundles.py` `_TOOL_KEYWORDS` gained a
+`CALCULATOR` group (`LINTER`/`TEST_RUNNER` already had groups); this is
+the same root-cause pattern that broke RESEARCH mode — no keyword group
+means `narrow_bundle_to_step()` can never offer the tool no matter how
+real its executor is.
+
+**Tests:** 919 → 935 (+16 in `test_tool_executor.py` and +1 in
+`test_tool_bundles.py`). Full suite green. The previous
+`TestUnimplementedTools` assertions for `linter`/`test_runner` were
+replaced with real-executor tests; an unknown tool still correctly
+returns "no execution implementation configured".
+
+**Live smoke:** Not attempted this session — unit coverage only, no real
+Ollama calls. No cloud spend.
+
+**Next task:** Part 3 of this same sprint, next window: honest
+"not available in this build" degradation for every remaining
+unimplemented `ToolID`, and excluding unavailable tools from offered
+bundles (SDD 5.7d). Then SDD_ADDENDUM_PHASE8.md Phase 8.4.
+
+**Blockers:** None.
+
+**Open decisions:** Live calculator/test_runner/linter invocation with a
+real model remains undemonstrated — worth a future attempt when time or a
+stronger local model is available, though the executors themselves are
+unit-tested directly.
+
+---
+
+## Previous Session Notes (Tool-executor fill-in sprint, Part 1 — DELEGATE_AGENT, kept for reference)
+
 **Last worked on:** Tool-executor fill-in sprint, Part 1 only —
 `DELEGATE_AGENT` sub-task dispatch. Audit found 15 `ToolID`s with a
 schema but zero execution implementation. Session paused here per an
 explicit mid-session instruction (usage window near limit) — Parts 2
 (`TEST_RUNNER`/`LINTER`/`CALCULATOR`) and 3 (honest degradation for the
-rest) are queued for the next window, not started. Full write-up in
+rest) were queued for the next window. Full write-up in
 `docs/TASKER_CHECKLIST.md` → "Tool-executor fill-in sprint, part 1 --
 DELEGATE_AGENT sub-task dispatch (2026-07-20)".
 
 **Part 1 — DELEGATE_AGENT:** new `tasker/runtime/delegation.py`'s
-`DelegationContext` carries the shared pipeline (budget, concurrency
-manager, provider map, orchestrator) a sub-task must inherit rather than
-bypass, plus bounded depth (max 2) and a per-top-level-task sub-agent
-cap (max 3, one shared counter across the whole tree, race-safe under
-asyncio's cooperative scheduling). New `_exec_delegate_agent()`
-(`tasker/tools/executor.py`) recursively calls
-`tasker.runtime.dispatch._run_task()` — which now **returns the
-synthesized output string** instead of only printing it (backward
-compatible) — and returns `{"task", "result"}` as structured tool
-output. `run_tool_loop()`/`_execute_steps()` thread `delegation` through.
-`_TOOL_KEYWORDS` gained a `DELEGATE_AGENT` group (same lesson as
-RESEARCH mode: no keywords, tool never offered). SDD 5.7c documents the
-contract; SDD 5.7d documents the honest-degradation contract Parts 2/3
-will implement against.
+`DelegationContext` carries the shared pipeline a sub-task must inherit,
+plus bounded depth (max 2) and a per-top-level-task sub-agent cap
+(max 3). New `_exec_delegate_agent()` calls
+`tasker.runtime.dispatch._run_task()` and returns `{"task", "result"}`
+as structured tool output. `run_tool_loop()`/`_execute_steps()` thread
+`delegation` through. `_TOOL_KEYWORDS` gained a `DELEGATE_AGENT` group.
 
 **Tests:** 903 → 919 (+16, `test_delegation.py`). Full suite green.
 
 **Live smoke — attempted, not achieved:** several `--policy local`
-cowork attempts on Designlab1 (zero cloud spend enforced after an
-unforced attempt routed to a cloud worker) never got the local
-`lfm2.5-thinking` model to actually call `delegate_agent` — it answered
-trivial sub-tasks directly instead (a previously-documented small-model
-pattern) or once badly misparsed a prompt containing "pong" as the video
-game. Not a defect in the new code — the recursive mechanism itself is
-proven at the unit level (`TestExecDelegateAgentRecursive` drives the
-real, non-mocked `_run_task()` recursion, not a mock). Flagged as an
-open follow-up.
+cowork attempts on Designlab1 never got `lfm2.5-thinking` to actually
+call `delegate_agent` — it answered trivial sub-tasks directly or once
+badly misparsed "pong" as the video game. Mechanism proven at unit
+level instead.
 
-**Next task:** Parts 2 and 3 of this same sprint, next window: (2)
-`TEST_RUNNER`/`LINTER`/`CALCULATOR` executors + `_TOOL_KEYWORDS`
-entries; (3) honest "not available in this build" degradation for every
-remaining unimplemented `ToolID`, and excluding unavailable tools from
-offered bundles. Then SDD_ADDENDUM_PHASE8.md Phase 8.4.
-
-**Blockers:** None (paused by explicit instruction, not a blocker).
-
-**Open decisions:** Live delegate_agent invocation with a real small
-local model remains undemonstrated — worth another attempt with more
-time, a stronger local model, or a deliberately tool-forcing prompt
-structure.
+**Open decisions:** Live `delegate_agent` invocation with a real small
+local model remains undemonstrated.
 
 ---
 

@@ -566,8 +566,15 @@ command in TESTING_GUIDE.md.
       still empty for the same prompt. Kept as a safe, tested, no-harm
       mitigation for genuinely sampling-dependent cases, but it is not a
       fix for the phrasing-dependent case documented above.
-- [ ] `LINTER`/`TEST_RUNNER` tool execution -- not implemented; no linter
-      or test framework is configured anywhere in this project.
+- [x] `TEST_RUNNER`/`LINTER`/`CALCULATOR` tool execution implemented in
+      `tasker/tools/executor.py` (tool-executor fill-in sprint, part 2):
+      TEST_RUNNER auto-detects pytest (preferred) and falls back to unittest
+      discover, returning structured pass/fail/skip counts plus failing test
+      names; LINTER runs ruff when available and returns an honest
+      "linter not installed" error otherwise; CALCULATOR evaluates arithmetic
+      via an AST whitelist (no eval()). All three registered in `_DISPATCH`
+      and added to `_TOOL_KEYWORDS` so narrow_bundle_to_step() can actually
+      offer them.
 - [ ] Anthropic/OpenAI/Fugu providers are not wired through
       `run_tool_loop()` -- `cli/shell.py`'s `provider_map` only registers
       `OllamaProvider`. `run_tool_loop()`'s coupling to `OllamaProvider`'s
@@ -2088,3 +2095,37 @@ explicit instruction (usage window near limit) -- Parts 2 (TEST_RUNNER/
 LINTER/CALCULATOR) and 3 (honest degradation for the remaining
 unimplemented tools) are queued for the next window, not started this
 session.
+
+## Tool-executor fill-in sprint, part 2 -- TEST_RUNNER, LINTER, CALCULATOR (2026-07-20)
+
+Continuation of the three-part tool-executor fill-in sprint. Implements
+real executors for the three most commonly needed CODE/COWORK/CHAT
+tools that still had schemas only.
+
+- [x] `tasker/tools/executor.py` gained `_exec_test_runner()`,
+      `_exec_linter()`, and `_exec_calculator()`:
+  - TEST_RUNNER auto-detects `pytest` (via `shutil.which`) and falls back
+    to `python -m unittest discover`; returns structured
+    `{framework, passed, failed, skipped, failing_tests}`.
+  - LINTER runs `ruff check <path> --output-format json` when ruff is
+    available; returns `{tool, findings[], error_count}`; otherwise
+    returns an honest "linter not installed" error.
+  - CALCULATOR parses the expression with the `ast` module and evaluates
+    a whitelist of numeric operators only -- `eval()` is never used.
+- [x] `_DISPATCH` updated to register all three tools.
+- [x] `tasker/tools/bundles.py` `_TOOL_KEYWORDS` gained a `CALCULATOR`
+      group (LINTER/TEST_RUNNER already had groups); without this,
+      `narrow_bundle_to_step()` would never offer the tool regardless of
+      how real its executor is -- the same root-cause pattern that broke
+      RESEARCH mode grounding.
+- [x] Tests: `tests/unit/test_tool_executor.py` expanded with
+      `TestCalculator`, `TestTestRunner`, and `TestLinter` classes (+19
+      tests total for the three tools); `tests/unit/test_tool_bundles.py`
+      gained `test_calculator_keyword_matches`.
+- [x] Full suite green: **935 tests, OK** (was 919).
+- [x] Commit: `feat: tool executors part 2 — TEST_RUNNER, LINTER, CALCULATOR`.
+
+**Next task:** Tool-executor fill-in sprint, part 3 -- honest
+"not available in this build" degradation for every remaining
+unimplemented `ToolID`, and excluding unavailable tools from offered
+bundles (SDD 5.7d). Then SDD_ADDENDUM_PHASE8.md Phase 8.4.

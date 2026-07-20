@@ -20,17 +20,21 @@ enforcement points live here:
     command shapes. This is a speed bump, not a sandbox -- real safety
     rests on the LOCAL_HARDWARE gate and the user's own trust in their
     local model/machine.
-LINTER and TEST_RUNNER are deliberately not implemented: no linter or
-test framework is configured anywhere in this project, so guessing
-which one to invoke would be worse than a clear error.
+TEST_RUNNER auto-detects pytest (preferred) or falls back to unittest
+discover; LINTER runs ruff when available and returns a clear
+"linter not installed" error otherwise; CALCULATOR evaluates arithmetic
+via an AST whitelist, never eval().
 """
 from __future__ import annotations
 
 import asyncio
+import ast
 import dataclasses
+import json
 import os
 import re
 import shlex
+import shutil
 import time
 import urllib.parse
 from pathlib import Path
@@ -216,6 +220,219 @@ async def _exec_code_search(tool_input: dict, cwd: Path, timeout_s: float) -> tu
     if error == "exited with code 1":
         return "(no matches)", None
     return output, error
+
+
+async def _exec_calculator(tool_input: dict, cwd: Path, timeout_s: float) -> tuple[dict | None, str | None]:
+    expression = tool_input.get("expression")
+    if expression is None or expression == "":
+        return None, "missing required 'expression'"
+    try:
+        value = _safe_eval_arithmetic(expression)
+    except Exception as exc:
+        return None, f"could not evaluate expression: {type(exc).__name__}: {exc}"
+    return {"expression": expression, "result": value}, None
+
+
+async def _exec_test_runner(tool_input: dict, cwd: Path, timeout_s: float) -> tuple[dict | None, str | None]:
+    """Detect pytest vs unittest, run, and return structured pass/fail counts."""
+    path = tool_input.get("path") or "."
+    target = _contain_path(path, cwd) if path != "." else cwd
+
+    if shutil.which("pytest"):
+        return await _run_pytest(target, cwd, timeout_s)
+    # Fall back to unittest discover when pytest is unavailable.
+    return await _run_unittest(target, cwd, timeout_s)
+
+
+async def _exec_linter(tool_input: dict, cwd: Path, timeout_s: float) -> tuple[dict | None, str | None]:
+    """Run ruff if available; otherwise return an honest 'not installed' error."""
+    path = tool_input.get("path") or "."
+    target = _contain_path(path, cwd) if path != "." else cwd
+
+    if not shutil.which("ruff"):
+        return None, "linter not installed -- ruff is not available in this environment"
+
+    argv = ["ruff", "check", str(target), "--output-format", "json"]
+    output, error = await _run_argv(argv, cwd, timeout_s)
+    try:
+        findings = json.loads(output or "[]") if output else []
+    except json.JSONDecodeError:
+        findings = []
+
+    structured = [
+        {
+            "file": f.get("filename", ""),
+            "line": f.get("start_line", 0),
+            "column": f.get("start_column", 0),
+            "code": f.get("code", ""),
+            "message": f.get("message", ""),
+        }
+        for f in findings
+    ]
+    result = {
+        "tool": "ruff",
+        "findings": structured,
+        "error_count": len(structured),
+    }
+    # ruff check exits 1 when it finds issues -- that is not a tool failure.
+    if error and "exited with code 1" not in error:
+        return result, error
+    return result, None
+
+
+# --------------------------------------------------------------------------- #
+# TEST_RUNNER helpers
+# --------------------------------------------------------------------------- #
+
+async def _run_pytest(target: Path, cwd: Path, timeout_s: float) -> tuple[dict | None, str | None]:
+    argv = ["pytest", "-q", "--tb=short", str(target)]
+    output, error = await _run_argv(argv, cwd, timeout_s)
+    summary = _parse_pytest_output(output or "")
+    if error and "exited with code" in error:
+        # pytest exits non-zero on test failures -- keep the structured result
+        # but surface the raw exit code as an informational note, not a tool error.
+        summary["exit_code_note"] = error
+        return summary, None
+    return summary, error
+
+
+def _parse_pytest_output(output: str) -> dict:
+    passed = 0
+    failed = 0
+    skipped = 0
+    failing_tests: list[str] = []
+
+    # Summary line at the end, e.g. "3 passed, 1 failed, 2 skipped in 0.12s"
+    # or "1 failed in 0.01s" or "1 skipped in 0.01s".
+    summary_line = ""
+    for line in output.splitlines():
+        if re.search(r"\b(passed|failed|skipped)\b.*\sin\s[\d.]+s", line):
+            summary_line = line
+            break
+    for count, status in re.findall(r"(\d+)\s+(passed|failed|skipped)", summary_line, re.IGNORECASE):
+        count = int(count)
+        status = status.lower()
+        if status == "passed":
+            passed = count
+        elif status == "failed":
+            failed = count
+        elif status == "skipped":
+            skipped = count
+
+    # Collect failing test names. pytest emits them either as
+    # "FAILED tests/unit/test_x.py::test_foo" (short test summary) or
+    # "tests/unit/test_x.py::test_foo FAILED" (verbose progress line).
+    for line in output.splitlines():
+        m = re.match(r"FAILED\s+(\S+)", line)
+        if m:
+            failing_tests.append(m.group(1))
+            continue
+        m = re.match(r"(\S+::\S+)\s+FAILED", line)
+        if m:
+            failing_tests.append(m.group(1))
+
+    return {
+        "framework": "pytest",
+        "passed": passed,
+        "failed": failed,
+        "skipped": skipped,
+        "failing_tests": failing_tests,
+    }
+
+
+async def _run_unittest(target: Path, cwd: Path, timeout_s: float) -> tuple[dict | None, str | None]:
+    argv = ["python", "-m", "unittest", "discover", "-s", str(target), "-v"]
+    output, error = await _run_argv(argv, cwd, timeout_s)
+    summary = _parse_unittest_output(output or "")
+    if error and "exited with code" in error:
+        summary["exit_code_note"] = error
+        return summary, None
+    return summary, error
+
+
+def _parse_unittest_output(output: str) -> dict:
+    passed = 0
+    failed = 0
+    skipped = 0
+    failing_tests: list[str] = []
+
+    # "test_foo (__main__.TestClass) ... ok"
+    # "test_bar (__main__.TestClass) ... FAIL"
+    # "test_baz (__main__.TestClass) ... skipped 'reason'"
+    for line in output.splitlines():
+        m = re.match(r"^(\S+)\s+\([^)]+\)\s+\.\.\.\s+(ok|FAIL|ERROR|skipped)", line)
+        if not m:
+            continue
+        name, status = m.group(1), m.group(2)
+        if status == "ok":
+            passed += 1
+        elif status in ("FAIL", "ERROR"):
+            failed += 1
+            failing_tests.append(name)
+        elif status == "skipped":
+            skipped += 1
+
+    # Summary line as fallback / confirmation: "Ran 5 tests in 0.003s"
+    ran_match = re.search(r"Ran\s+(\d+)\s+tests?\s+in", output)
+    if ran_match:
+        total = int(ran_match.group(1))
+        accounted = passed + failed + skipped
+        if total > accounted:
+            # Some statuses we didn't parse explicitly; count them as passed for safety.
+            passed += total - accounted
+
+    return {
+        "framework": "unittest",
+        "passed": passed,
+        "failed": failed,
+        "skipped": skipped,
+        "failing_tests": failing_tests,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# CALCULATOR helper -- safe arithmetic via AST, no eval()
+# --------------------------------------------------------------------------- #
+
+_ALLOWED_BIN_OPS = {
+    ast.Add: lambda a, b: a + b,
+    ast.Sub: lambda a, b: a - b,
+    ast.Mult: lambda a, b: a * b,
+    ast.Div: lambda a, b: a / b,
+    ast.FloorDiv: lambda a, b: a // b,
+    ast.Mod: lambda a, b: a % b,
+    ast.Pow: lambda a, b: a ** b,
+}
+
+_ALLOWED_UNARY_OPS = {
+    ast.UAdd: lambda a: +a,
+    ast.USub: lambda a: -a,
+}
+
+
+def _safe_eval_arithmetic(expression: str) -> int | float:
+    tree = ast.parse(expression, mode="eval")
+    return _eval_calc_node(tree.body)
+
+
+def _eval_calc_node(node: ast.AST) -> int | float:
+    if isinstance(node, ast.Expression):
+        return _eval_calc_node(node.body)
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
+            return node.value
+        raise ValueError("only numeric constants are allowed")
+    if isinstance(node, ast.BinOp):
+        op_type = type(node.op)
+        if op_type not in _ALLOWED_BIN_OPS:
+            raise ValueError(f"unsupported binary operator {op_type.__name__}")
+        return _ALLOWED_BIN_OPS[op_type](_eval_calc_node(node.left), _eval_calc_node(node.right))
+    if isinstance(node, ast.UnaryOp):
+        op_type = type(node.op)
+        if op_type not in _ALLOWED_UNARY_OPS:
+            raise ValueError(f"unsupported unary operator {op_type.__name__}")
+        return _ALLOWED_UNARY_OPS[op_type](_eval_calc_node(node.operand))
+    raise ValueError("unsupported expression")
 
 
 async def _exec_file_read(tool_input: dict, cwd: Path, timeout_s: float) -> tuple[str | None, str | None]:
@@ -404,4 +621,7 @@ _DISPATCH = {
     ToolID.CODE_SEARCH.value: _exec_code_search,
     ToolID.WEB_SEARCH.value: _exec_web_search,
     ToolID.RETRIEVE.value: _exec_retrieve,
+    ToolID.CALCULATOR.value: _exec_calculator,
+    ToolID.TEST_RUNNER.value: _exec_test_runner,
+    ToolID.LINTER.value: _exec_linter,
 }

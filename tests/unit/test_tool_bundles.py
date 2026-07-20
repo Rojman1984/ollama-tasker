@@ -12,7 +12,7 @@ LLM-classified).
 """
 import unittest
 
-from tasker.tools.bundles import CODE_BUNDLE, RESEARCH_BUNDLE, narrow_bundle_to_step
+from tasker.tools.bundles import CHAT_BUNDLE, CODE_BUNDLE, RESEARCH_BUNDLE, narrow_bundle_to_step
 from tasker.workers.base import ToolID
 
 
@@ -41,6 +41,10 @@ class TestNarrowBundleToStepKeywordMatches(unittest.TestCase):
     def test_test_runner_keyword_matches(self):
         result = narrow_bundle_to_step(CODE_BUNDLE, "Run the unit tests")
         self.assertEqual(result, {ToolID.TEST_RUNNER})
+
+    def test_calculator_keyword_matches(self):
+        result = narrow_bundle_to_step(CHAT_BUNDLE, "Calculate the sum of 5 and 7")
+        self.assertEqual(result, {ToolID.CALCULATOR})
 
     def test_code_search_keyword_matches(self):
         result = narrow_bundle_to_step(CODE_BUNDLE, "Search for the function definition")
