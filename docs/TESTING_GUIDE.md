@@ -703,6 +703,25 @@ the guard clears when a real `web_search`/`retrieve` call occurred. A
 future session with a real `BRAVE_API_KEY` should run one live research
 query end-to-end and confirm the synthesized answer cites real URLs.
 
+### H17.3 Search-query rewrite step (SDD 5.1a.5)
+
+```bash
+python -m unittest tests.unit.test_query_rewrite -v
+```
+
+Covers: `rewrite_search_query()` (`tasker/tools/query_rewrite.py`) rewrites
+a natural-language research step description plus the model's optional
+draft query into a concise, keyword-focused Brave Search query, strips
+a single pair of surrounding quotes if the model adds them, and falls
+back to the draft query (or the step description itself if no draft
+exists) on empty response or exception. `build_query_rewriter()` reuses
+the same worker/provider via `tasker.orchestrator.factory.make_call_model()`
+with a 30-second timeout and the correct privacy tier derived from the
+worker's `compute_location`. `run_tool_loop()` applies the rewriter only
+to `web_search` tool inputs, leaving `retrieve` and all other tools
+untouched; RESEARCH mode wiring in `tasker/runtime/dispatch.py` builds
+the rewriter only when `BRAVE_API_KEY` is configured.
+
 ## H18. DELEGATE_AGENT -- sub-task dispatch (2026-07-20)
 
 New sprint from a tool-executor audit: 15 `ToolID`s had no execution

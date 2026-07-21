@@ -112,16 +112,24 @@ async def _execute_with_deferred_retry(
     return result
 
 
-def _make_call_model(
+def make_call_model(
     provider: WorkerProviderBase,
     manifest: WorkerManifest,
     privacy_tier: PrivacyTier = PrivacyTier.LOCAL_ONLY,
+    timeout_s: float = 240.0,
 ) -> _ModelCall:
     """Wrap provider.execute() as a (system_prompt, user_prompt) -> str coroutine.
     privacy_tier must be OLLAMA_CLOUD_OK (not the narrower default
     LOCAL_ONLY) for an OLLAMA_CLOUD-routed manifest, or the call would be
     hard-blocked by the project's own privacy-tier enforcement (SDD 11.1)
     despite the provider itself supporting the cloud call.
+
+    *timeout_s* defaults to 240s because live-measured on Designlab1 against
+    lfm2.5-thinking:latest, a single plan() call took 94.5s real time
+    (17417-char thinking block, 3922 eval tokens) for a trivially simple
+    task, and a second attempt exceeded 120s outright and raised
+    TimeoutError. Callers that need a shorter bound (e.g. the research-mode
+    query rewriter) can pass their own value.
 
     A DEFERRED result (no Ollama Cloud concurrency slot) is retried a
     bounded number of times, then raises OllamaCloudConcurrencyExhaustedError
@@ -141,14 +149,7 @@ def _make_call_model(
             context={"system_prompt": system_prompt},
             routing_policy=RoutingPolicy.PRIVATE,
             privacy_tier=privacy_tier,
-            # 240s, not 120s: live-measured on Designlab1 against
-            # lfm2.5-thinking:latest, a single plan() call took 94.5s real
-            # time (17417-char thinking block, 3922 eval tokens) for a
-            # trivially simple task, and a second attempt exceeded 120s
-            # outright and raised TimeoutError. This "thinking" model
-            # family is just slow, not broken -- 120s had too little
-            # margin against its observed worst case.
-            timeout_s=240.0,
+            timeout_s=timeout_s,
         )
         result = await _execute_with_deferred_retry(provider, task, manifest)
         if result.status == WorkerStatus.DEFERRED:
@@ -187,7 +188,7 @@ def build_orchestrator(
         privacy_tier = PrivacyTier.LOCAL_ONLY
 
     manifest = _build_orchestrator_manifest(model_id, compute_location)
-    call_model = _make_call_model(ollama_provider, manifest, privacy_tier)
+    call_model = make_call_model(ollama_provider, manifest, privacy_tier)
 
     # Threaded into every LLM-calling tier so plan()/synthesize() can apply
     # RESEARCH mode's grounding requirement (SDD 5.1a) to their prompts.

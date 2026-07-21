@@ -61,6 +61,7 @@ command in TESTING_GUIDE.md.
 - [x] CODE mode (tasker/modes/code.py)
 - [x] COWORK mode (tasker/modes/cowork.py) + CoworkRunner with tick/pause/checkpoint loop
 - [x] RESEARCH mode (tasker/modes/research.py)
+- [x] RESEARCH mode search-query rewrite step (tasker/tools/query_rewrite.py) -- rewrites natural-language step descriptions into keyword-focused Brave Search queries via the same model-call pattern as the orchestrator; wired through run_tool_loop and dispatch.py only when BRAVE_API_KEY is configured
 - [x] SECURE mode (tasker/modes/secure.py) -- hard block verified via WorkerSelector
 - [x] CLI shell + slash commands (cli/shell.py)
 - [x] tests/unit/test_harness_modes.py passing (214 total, incl. COWORK pause integration test)

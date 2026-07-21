@@ -25,11 +25,12 @@ import asyncio
 import dataclasses
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from tasker.runtime.delegation import DelegationContext
 from tasker.tools.executor import execute_tool
-from tasker.workers.base import ModelUsage, ToolProtocol, WorkerManifest, WorkerStatus, WorkerTask, WorkerResult
+from tasker.workers.base import ModelUsage, ToolProtocol, WorkerManifest, WorkerResult, WorkerStatus, WorkerTask, WorkerToolResult
 from tasker.workers.providers.base import WorkerProviderBase
 from tasker.workers.providers.ollama import format_tool_result_message
 
@@ -68,6 +69,7 @@ async def run_tool_loop(
     max_turns: int = _MAX_TOOL_TURNS,
     cwd: Path | None = None,
     delegation: DelegationContext | None = None,
+    query_rewriter: Callable[[str, str | None], Awaitable[str]] | None = None,
 ) -> WorkerResult:
     """
     Drives provider.execute() through as many turns as needed to resolve
@@ -79,6 +81,11 @@ async def run_tool_loop(
     history. Baking it in would make OllamaProvider's inject_tools()
     re-append the "List of tools..." suffix onto an already-suffixed
     system message on every turn.
+
+    *query_rewriter* (RESEARCH mode, SDD 5.1a.5): optional async callable
+    ``(task_description, raw_query) -> rewritten_query`` applied to every
+    ``web_search`` tool input before it is executed. Other tool calls and
+    modes are unaffected.
     """
     cwd = cwd or Path.cwd()
     system_prompt = task.context.get("system_prompt")
@@ -142,6 +149,27 @@ async def run_tool_loop(
                 worker.model_id, max_turns, task.instruction[:80],
             )
             break
+
+        # RESEARCH mode query rewrite (SDD 5.1a.5): before any web_search
+        # call reaches Brave, rewrite vague/conversational queries into
+        # keyword-focused search-engine queries. This happens after the
+        # non-termination guard has seen the raw signature so a model that
+        # re-emits the identical raw query still gets caught; the rewritten
+        # query is what is actually executed.
+        if query_rewriter is not None:
+            rewritten: list[WorkerToolResult] = []
+            for tr in result.tool_results:
+                if tr.tool_name == "web_search":
+                    raw_query = tr.tool_input.get("query")
+                    rewritten_query = await query_rewriter(task.instruction, raw_query)
+                    rewritten.append(
+                        dataclasses.replace(
+                            tr, tool_input={**tr.tool_input, "query": rewritten_query},
+                        )
+                    )
+                else:
+                    rewritten.append(tr)
+            result = dataclasses.replace(result, tool_results=rewritten)
 
         # Parallel execution (SDD 5.1a) -- a single turn requesting multiple
         # tool calls (e.g. two web_search/retrieve calls) runs them

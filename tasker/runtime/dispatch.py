@@ -20,6 +20,7 @@ import uuid
 from pathlib import Path
 
 from tasker.session.checkpoint import CheckpointStore
+from tasker.tools.query_rewrite import build_query_rewriter
 from tasker.workers.registry import WorkerRegistry
 
 _DEFAULT_STORE_DIR = Path(".tasker") / "checkpoints"
@@ -335,8 +336,20 @@ async def _execute_steps(
         if provider is None:
             print(f"  No provider for {worker.provider.value}")
             continue
+
+        # RESEARCH mode query rewrite (SDD 5.1a.5): build a rewriter only
+        # when a search backend is actually configured, otherwise leave it
+        # None so web_search calls pass through unchanged (the honesty guard
+        # still flags the unverified output).
+        query_rewriter = None
+        if mode_name == "research" and _search_backend_configured():
+            query_rewriter = build_query_rewriter(provider, worker)
+
         try:
-            result = await run_tool_loop(wt, worker, provider, cwd=Path.cwd(), delegation=delegation)
+            result = await run_tool_loop(
+                wt, worker, provider, cwd=Path.cwd(), delegation=delegation,
+                query_rewriter=query_rewriter,
+            )
             before = result.output
             result = check_side_effect_honesty(result, task, step.description)
             if result.output != before:

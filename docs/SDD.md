@@ -308,7 +308,7 @@ also needed enforcement beyond "the tool now works if invoked" — a model
 that never calls it produces the same fabrication either way.
 
 **Rule:** RESEARCH mode is the one mode with an explicit **grounding
-requirement**, enforced across four points, not merely hoped-for via
+requirement**, enforced across five points, not merely hoped-for via
 prompt wording:
 
 1. **Tool executors are real.** `WEB_SEARCH` calls the Brave Search API
@@ -363,6 +363,24 @@ prompt wording:
    output's provenance. Wired into `_execute_steps()` (per step) and
    `_run_task()` (final synthesis, checked against the union of every
    step's tool calls).
+
+5. **Search queries are rewritten before Brave sees them.** RESEARCH
+   mode's planner (and the worker model that actually emits the
+   `web_search` call) often produces vague, conversational, or
+   question-shaped queries that hurt retrieval quality. Before any
+   `web_search` tool input is dispatched to the Brave Search API,
+   `tasker/tools/loop.py` runs it through `tasker/tools/query_rewrite.py`,
+   which rewrites the natural-language step description plus the model's
+   draft query into a concise, keyword-focused search-engine query. The
+   rewrite uses the same `(system_prompt, user_prompt) -> str`
+   model-call pattern as the orchestrator tiers
+   (`tasker.orchestrator.factory.make_call_model`), with a short timeout
+   and the same worker/provider the step is already using. If the
+   rewrite call fails or returns empty, the original draft query is
+   used so the search never blocks on the rewriter. Rewriting is
+   enabled only in RESEARCH mode and only when a search backend is
+   actually configured (`BRAVE_API_KEY` is set); it is a no-op for all
+   other modes.
 
 **No search backend configured:** rather than silently producing
 ungrounded (and now honesty-guard-flagged) output, entering RESEARCH
