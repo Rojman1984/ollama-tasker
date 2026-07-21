@@ -52,6 +52,7 @@ from tasker.modes.code import CODE_MODE
 from tasker.modes.cowork import COWORK_MODE, CoworkRunner
 from tasker.modes.research import RESEARCH_MODE
 from tasker.modes.secure import SECURE_MODE
+from tasker.orchestrator.factory import build_orchestrator
 from tasker.session.budget import OllamaSessionBudget
 from tasker.session.checkpoint import CheckpointStore
 from tasker.session.manager import SessionManager
@@ -59,10 +60,12 @@ from tasker.session.notifier import LogNotifier
 from tasker.workers.base import (
     AgentRole,
     Capability,
+    ClassifierResult,
     ExecutionPlan,
     OllamaPlan,
     PlanStep,
     StepStatus,
+    TaskType,
     WorkerStatus,
     WorkerTask,
 )
@@ -268,15 +271,6 @@ async def _handle_completions(request: web.Request) -> web.Response:
     registry: WorkerRegistry   = request.app["registry"]
     step_fn                    = request.app.get("_step_fn")   # injectable for tests
 
-    budget = OllamaSessionBudget(
-        plan=OllamaPlan.PRO,
-        window_start=datetime.now(tz=timezone.utc),
-    )
-    session_mgr = SessionManager(
-        budget=budget,
-        store=store,
-        notifier=LogNotifier("tasker.api"),
-    )
     mode = _MODES[mode_name]
 
     # Test override (create_app(_step_fn=...)) always wins. Otherwise, if
@@ -284,11 +278,37 @@ async def _handle_completions(request: web.Request) -> web.Response:
     # dispatch through the same WorkerSelector -> run_tool_loop path
     # cli/shell.py uses. With neither, fall back to the documented stub
     # response (no live workers registered).
+    provider_map    = request.app.get("provider_map")
+    concurrency_mgr = request.app.get("concurrency_mgr")
     if step_fn is None:
-        provider_map    = request.app.get("provider_map")
-        concurrency_mgr = request.app.get("concurrency_mgr")
         if provider_map is not None and concurrency_mgr is not None:
             step_fn = _make_live_step_fn(mode, registry.list_all(), provider_map, concurrency_mgr)
+
+    # Build a real per-request session stack whenever a live provider_map is
+    # wired; otherwise keep the lightweight stub/test path with a synthetic
+    # budget so CoworkRunner's tick() still has a manager to call.
+    if provider_map is not None and concurrency_mgr is not None:
+        budget = OllamaSessionBudget(
+            plan=OllamaPlan.PRO,
+            window_start=datetime.now(tz=timezone.utc),
+        )
+        session_mgr = SessionManager(
+            budget=budget,
+            store=store,
+            notifier=LogNotifier("tasker.api"),
+            auto_resume=False,
+        )
+    else:
+        budget = OllamaSessionBudget(
+            plan=OllamaPlan.PRO,
+            window_start=datetime.now(tz=timezone.utc),
+        )
+        session_mgr = SessionManager(
+            budget=budget,
+            store=store,
+            notifier=LogNotifier("tasker.api"),
+            auto_resume=False,
+        )
 
     # For COWORK mode, use CoworkRunner for proper checkpoint/session lifecycle.
     # Other modes: run through the same step loop via a minimal CoworkRunner-like
@@ -301,7 +321,34 @@ async def _handle_completions(request: web.Request) -> web.Response:
         _step_fn=step_fn,
     )
 
-    plan = _stub_plan(task)
+    # Real multi-step orchestration when provider_map/concurrency_mgr are wired.
+    # Reuse the same profile + mode resolution the CLI uses, then build an
+    # orchestrator from the resolved ExecutionConfig. If no provider map is
+    # wired, keep the existing single-step stub so tests without live workers
+    # still pass.
+    if provider_map is not None and concurrency_mgr is not None:
+        from tasker.runtime.dispatch import _build_config
+
+        config_result = _build_config(mode_name)
+        if config_result is None:
+            return _error_response(500, "Failed to load hardware/mode configuration.")
+        _profile_name, config = config_result
+        orchestrator = build_orchestrator(config, provider_map)
+        registry.apply_provider_availability(provider_map)
+        classifier_output = ClassifierResult(
+            task_type=TaskType.CONVERSATIONAL,
+            complexity_score=0.3,
+            required_capabilities={Capability.TOOL_USE},
+            suggested_workers=[],
+            estimated_duration_s=15.0,
+        )
+        try:
+            plan = await orchestrator.plan(task, classifier_output, registry.list_all())
+        except Exception as exc:
+            return _error_response(500, f"Planning failed: {type(exc).__name__}: {exc}")
+    else:
+        plan = _stub_plan(task)
+
     try:
         result = await runner.run(task, plan)
     except Exception as exc:

@@ -230,6 +230,12 @@ def _worker(worker_id: str = "local-w1") -> WorkerManifest:
 
 
 class _FakeProvider:
+    """Stand-in provider for the integration tests. When used as the single
+    wired OllamaProvider it must answer BOTH orchestrator plan/synthesize calls
+    (which expect a JSON plan array) AND worker dispatch calls (which expect a
+    plain answer). It distinguishes the two by role: THINKER -> plan JSON,
+    WORKER -> plain answer."""
+
     def __init__(self, output: str = "real worker answer", status: WorkerStatus = WorkerStatus.SUCCESS):
         self._output = output
         self._status = status
@@ -240,11 +246,18 @@ class _FakeProvider:
 
     async def execute(self, task, worker) -> WorkerResult:
         self.calls.append((task, worker))
+        if task.role.value == "thinker":
+            # Orchestrator plan/synthesize call: return a valid single-step plan
+            # so the API path actually exercises multi-step orchestration code
+            # while still dispatching exactly one worker call.
+            output = '[{"description": "do it", "role": "worker", "capabilities": ["tool_use"]}]'
+        else:
+            output = self._output if self._status == WorkerStatus.SUCCESS else None
         return WorkerResult(
             task_id=task.task_id,
             worker_id=worker.id,
             status=self._status,
-            output=self._output if self._status == WorkerStatus.SUCCESS else None,
+            output=output,
             tool_results=[],
             usage=ModelUsage(0, 0, 0.0),
             duration_ms=5,
@@ -289,11 +302,14 @@ class LiveDispatchTestCase(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(resp.status, 200)
             body = await resp.json()
         self.assertEqual(body["choices"][0]["message"]["content"], "the real answer")
-        self.assertEqual(len(provider.calls), 1)
-        # The full user message reaches the worker instruction unTruncated
-        # (regression for the fixed 80-char _stub_plan truncation bug).
-        task, worker = provider.calls[0]
-        self.assertEqual(task.instruction, "hello")
+        # With real orchestration wired, the provider now also answers the
+        # orchestrator plan() call in addition to the worker dispatch call.
+        worker_calls = [(t, w) for t, w in provider.calls if t.role.value == "worker"]
+        self.assertEqual(len(worker_calls), 1)
+        task, worker = worker_calls[0]
+        # The worker instruction comes from the orchestrator-generated step
+        # description, not the raw user prompt, in the multi-step path.
+        self.assertEqual(task.instruction, "do it")
         self.assertEqual(worker.id, "local-w1")
 
     async def test_live_dispatch_long_prompt_not_truncated(self):
@@ -308,8 +324,12 @@ class LiveDispatchTestCase(unittest.IsolatedAsyncioTestCase):
                 json={"model": "tasker/chat", "messages": [{"role": "user", "content": long_prompt}]},
             )
             self.assertEqual(resp.status, 200)
-        task, _ = provider.calls[0]
-        self.assertEqual(task.instruction, long_prompt)
+        # The orchestrator plan prompt carries the full task text;
+        # the fake provider returns a fixed step description regardless.
+        thinker_calls = [(t, w) for t, w in provider.calls if t.role.value == "thinker"]
+        self.assertEqual(len(thinker_calls), 1)
+        task, _ = thinker_calls[0]
+        self.assertIn(long_prompt, task.instruction)
 
     async def test_live_dispatch_worker_failure_returns_500(self):
         from aiohttp.test_utils import TestClient, TestServer
@@ -354,7 +374,11 @@ class LiveDispatchTestCase(unittest.IsolatedAsyncioTestCase):
             )
             body = await resp.json()
         self.assertEqual(body["choices"][0]["message"]["content"], "override output")
-        self.assertEqual(provider.calls, [])
+        # The orchestrator still calls the provider for plan()/synthesize(),
+        # but _step_fn overrides the actual step execution so no worker
+        # dispatch call (role=worker) is made.
+        worker_calls = [(t, w) for t, w in provider.calls if t.role.value == "worker"]
+        self.assertEqual(worker_calls, [])
 
 
 # ------------------------------------------------------------------ #

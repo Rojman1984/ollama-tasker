@@ -134,19 +134,16 @@ def _build_session(profile, store: CheckpointStore):
     return budget, session_mgr
 
 
-def _build_pipeline(mode_name: str, store: CheckpointStore, policy_override=None):
+def _build_config(mode_name: str, policy_override=None):
     """
-    Shared construction for fresh runs and resumes: config, budget,
-    SessionManager, concurrency manager, provider map, orchestrator.
-    Returns None (after printing the error) on config failure.
+    Shared profile + mode resolution. Returns the resolved ExecutionConfig
+    or None on config failure. Kept separate from _build_pipeline() so the
+    API server can reuse the same resolution logic while building its own
+    per-request session/budget stack around the shared provider_map.
     """
     import dataclasses
 
     from tasker.modes.base import ModeConfigurator
-    from tasker.orchestrator.factory import build_orchestrator
-    from tasker.session.concurrency import OllamaCloudConcurrencyManager
-    from tasker.workers.base import ProviderType
-    from tasker.workers.providers.ollama import OllamaProvider
 
     profile_name = os.environ.get("TASKER_PROFILE", "tier1_tasker")
     configurator = ModeConfigurator()
@@ -160,14 +157,27 @@ def _build_pipeline(mode_name: str, store: CheckpointStore, policy_override=None
     if policy_override is not None:
         mode_cfg = dataclasses.replace(mode_cfg, routing_policy=policy_override)
 
-    config = configurator.resolve(profile, mode_cfg)
+    return profile_name, configurator.resolve(profile, mode_cfg)
+
+
+def _build_pipeline(mode_name: str, store: CheckpointStore, policy_override=None):
+    """
+    Shared construction for fresh runs and resumes: config, budget,
+    SessionManager, concurrency manager, provider map, orchestrator.
+    Returns None (after printing the error) on config failure.
+    """
+    config_result = _build_config(mode_name, policy_override)
+    if config_result is None:
+        return None
+    profile_name, config = config_result
+
     # config.mode.tool_bundle is already the correct per-mode set -- SECURE's
     # bundle is pre-stripped of network tools at the YAML/TaskerMode level
     # (see tasker/tools/bundles.py secure_bundle()/SECURE_BUNDLE), so no
     # extra stripping is needed here. Per-step narrowing (see
     # narrow_bundle_to_step()) happens inside the step loop, once each
     # step's description is known.
-    budget, session_mgr = _build_session(profile, store)
+    budget, session_mgr = _build_session(config.profile, store)
 
     # One shared concurrency manager for the whole run -- covers both
     # regular worker dispatch (via WorkerSelector/run_tool_loop) and
@@ -180,8 +190,12 @@ def _build_pipeline(mode_name: str, store: CheckpointStore, policy_override=None
     # OLLAMA_BASE_URL overrides the profile YAML -- the YAML records the
     # standard port, but a machine may run Ollama elsewhere (Designlab1
     # serves on 127.0.0.1:11435 via a systemd port.conf drop-in).
-    base_url = os.environ.get("OLLAMA_BASE_URL") or profile.ollama_base_url
-    concurrency_mgr = OllamaCloudConcurrencyManager(profile.ollama_plan)
+    base_url = os.environ.get("OLLAMA_BASE_URL") or config.profile.ollama_base_url
+    from tasker.session.concurrency import OllamaCloudConcurrencyManager
+    from tasker.workers.base import ProviderType
+    from tasker.workers.providers.ollama import OllamaProvider
+
+    concurrency_mgr = OllamaCloudConcurrencyManager(config.profile.ollama_plan)
     # Cached GPU detection (same source WorkerRegistry.apply_gpu_availability()
     # uses via _load_registry()) -- lets OllamaProvider apply its local-only
     # num_ctx VRAM ceiling (SDD 5.6.1a) without a live subprocess call.
@@ -189,6 +203,8 @@ def _build_pipeline(mode_name: str, store: CheckpointStore, policy_override=None
 
     ollama_provider = OllamaProvider(base_url, concurrency_mgr, budget, gpu=load_cached_gpu_info())
     provider_map = {ProviderType.OLLAMA: ollama_provider}
+    from tasker.orchestrator.factory import build_orchestrator
+
     orchestrator = build_orchestrator(config, provider_map)
 
     return profile_name, config, budget, session_mgr, concurrency_mgr, provider_map, orchestrator
