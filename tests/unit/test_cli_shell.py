@@ -62,8 +62,9 @@ class TestFirstPositional(unittest.TestCase):
 class TestVerboseLoggingDefault(unittest.TestCase):
     """
     main() defaults the interactive shell to ERROR-level logging (quiet
-    chat flow); --verbose restores WARNING; TASKER_LOG_LEVEL always wins
-    over both when explicitly set.
+    chat flow); --verbose restores INFO-level logging so slot-acquisition
+    and other plumbing is visible; TASKER_LOG_LEVEL always wins over both
+    when explicitly set.
     """
 
     def _run_main(self, argv, env=None):
@@ -88,9 +89,9 @@ class TestVerboseLoggingDefault(unittest.TestCase):
         self._run_main([])
         self.assertEqual(logging.getLogger().getEffectiveLevel(), logging.ERROR)
 
-    def test_verbose_flag_restores_warning_level(self):
+    def test_verbose_flag_restores_info_level(self):
         self._run_main(["--verbose"])
-        self.assertEqual(logging.getLogger().getEffectiveLevel(), logging.WARNING)
+        self.assertEqual(logging.getLogger().getEffectiveLevel(), logging.INFO)
 
     def test_env_var_overrides_both_defaults(self):
         self._run_main([], env={"TASKER_LOG_LEVEL": "INFO"})

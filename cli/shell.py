@@ -757,11 +757,12 @@ def main() -> None:
 
     # Default the interactive shell to quiet: WARNING+ plumbing logs
     # (provider/registry/concurrency internals) were showing up interleaved
-    # with the chat flow by default. --verbose restores the old WARNING
-    # default; TASKER_LOG_LEVEL (when set) always wins over both, so
-    # existing debugging workflows that export it explicitly are unaffected.
+    # with the chat flow by default. --verbose restores INFO-level logging
+    # so slot-acquisition and other plumbing is visible; TASKER_LOG_LEVEL
+    # (when set) always wins over both, so existing debugging workflows that
+    # export it explicitly are unaffected.
     verbose = "--verbose" in sys.argv[1:]
-    default_level = "WARNING" if verbose else "ERROR"
+    default_level = "INFO" if verbose else "ERROR"
     logging.basicConfig(
         level=os.environ.get("TASKER_LOG_LEVEL", default_level).upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
