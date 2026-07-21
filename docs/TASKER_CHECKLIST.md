@@ -2129,3 +2129,38 @@ tools that still had schemas only.
 "not available in this build" degradation for every remaining
 unimplemented `ToolID`, and excluding unavailable tools from offered
 bundles (SDD 5.7d). Then SDD_ADDENDUM_PHASE8.md Phase 8.4.
+
+## Tool-executor fill-in sprint, part 3 -- honest degradation for unimplemented tools (2026-07-20)
+
+Final executor sprint: removes the remaining placeholder `ToolID`s from
+the bundles offered to workers, and replaces the generic "no execution
+implementation configured" message with a structured error that tells the
+model exactly which tools are actually available.
+
+- [x] `tasker/tools/executor.py` gained `implemented_tools()` -- a single
+      registry-of-truth returning `frozenset[str]` of all keys in
+      `_DISPATCH`. New `_make_unavailable_error(tool_name)` builds the
+      structured error dict `{tool, error, available_tools}`.
+- [x] `execute_tool()` now returns `tool_output=_make_unavailable_error(...)`
+      with `error=None` for any unimplemented tool, instead of a plain string
+      error -- the multi-turn loop can still feed this structured dict back to
+      the model as a tool result.
+- [x] `tasker/tools/bundles.py` `get_definitions()` now filters every bundle
+      through `_filter_implemented()` before returning `ToolDefinition`s.
+      Unimplemented tools are dropped with a WARNING, so workers are never
+      tempted to call them. `implemented_tools()` is imported from the
+      executor module -- adding a new `_DISPATCH` entry automatically lifts
+      it into offered bundles.
+- [x] Tests: `TestUnavailableTools` in `tests/unit/test_tool_executor.py`
+      (+3 tests) and `TestBundleImplementationFilter` in
+      `tests/unit/test_tool_bundles.py` (+4 tests). Both paths use
+      `implemented_tools()` as the source of truth.
+- [x] Full suite green: **941 tests, OK** (was 935).
+- [x] Commit: `feat: tool executors part 3 — honest degradation for unimplemented tools`.
+
+**Next task:** SDD_ADDENDUM_PHASE8.md Phase 8.4 -- SetupWizardScreen +
+ModelSelectorScreen. No remaining executor sprint work.
+
+**Open decisions:** Same as Part 2 -- live invocation of any of these
+tools with a real model has not been attempted; the executors are proven
+at the unit level.

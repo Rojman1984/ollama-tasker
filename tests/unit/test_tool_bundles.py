@@ -12,7 +12,16 @@ LLM-classified).
 """
 import unittest
 
-from tasker.tools.bundles import CHAT_BUNDLE, CODE_BUNDLE, RESEARCH_BUNDLE, narrow_bundle_to_step
+from tasker.tools.bundles import (
+    CHAT_BUNDLE,
+    CODE_BUNDLE,
+    COWORK_BUNDLE,
+    RESEARCH_BUNDLE,
+    SECURE_BUNDLE,
+    get_definitions,
+    narrow_bundle_to_step,
+)
+from tasker.tools.executor import implemented_tools
 from tasker.workers.base import ToolID
 
 
@@ -215,6 +224,54 @@ class TestNarrowBundleToStepOriginalTaskFallback(unittest.TestCase):
         with self.assertLogs("tasker.tools.bundles", level="WARNING"):
             result = narrow_bundle_to_step(CODE_BUNDLE, "Think about it")
         self.assertEqual(result, frozenset())
+
+
+class TestBundleImplementationFilter(unittest.TestCase):
+    """
+    `get_definitions()` must drop tools that have no real executor from the
+    offered bundle, and `narrow_bundle_to_step()` must never return one. This
+    prevents models from being tempted to call a placeholder.
+    """
+
+    def test_get_definitions_drops_unimplemented_tools(self):
+        # COWORK_BUNDLE contains several tools that are not yet implemented.
+        names_before = {t.value for t in COWORK_BUNDLE}
+        defs = get_definitions(COWORK_BUNDLE)
+        names_after = {d.name for d in defs}
+        available = implemented_tools()
+        dropped = names_before - names_after
+        self.assertTrue(dropped, "expected at least one unimplemented tool to be dropped")
+        for name in dropped:
+            self.assertNotIn(name, available)
+        # Every remaining name IS implemented.
+        self.assertTrue(all(n in available for n in names_after))
+
+    def test_get_definitions_drops_nothing_when_all_implemented(self):
+        # CODE_BUNDLE is fully implemented after Part 2.
+        defs = get_definitions(CODE_BUNDLE)
+        names_after = {d.name for d in defs}
+        self.assertEqual(names_after, {t.value for t in CODE_BUNDLE})
+
+    def test_narrow_bundle_never_returns_unimplemented(self):
+        # SECURE_BUNDLE contains local_search/local_memory placeholders.
+        # Even if keywords matched them, they must not be returned.
+        from tasker.tools.bundles import _TOOL_KEYWORDS
+        # Find a tool in SECURE_BUNDLE with a keyword group that would otherwise match.
+        for tool_id in SECURE_BUNDLE:
+            groups = _TOOL_KEYWORDS.get(tool_id)
+            if not groups:
+                continue
+            # Build a synthetic description that triggers the first group.
+            group = list(groups[0])
+            description = " ".join(group)
+            matched = narrow_bundle_to_step(SECURE_BUNDLE, description)
+            for m in matched:
+                self.assertIn(m.value, implemented_tools())
+
+    def test_implemented_tools_matches_dispatch(self):
+        available = implemented_tools()
+        from tasker.tools.executor import _DISPATCH
+        self.assertEqual(available, frozenset(_DISPATCH.keys()))
 
 
 if __name__ == "__main__":

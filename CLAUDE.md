@@ -352,46 +352,60 @@ python -m unittest tests.unit.test_orchestrator_nano -v
 
 *(Update this section at the end of every Cowork or Code session)*
 
-**Last worked on:** Tool-executor fill-in sprint, Part 2 —
-`TEST_RUNNER`, `LINTER`, and `CALCULATOR` executors. One commit, full
-suite green before push. Session stopped after the commit per explicit
-instruction — do not start Part 3 or any other work.
+**Last worked on:** Tool-executor fill-in sprint, Part 3 -- honest
+"not available in this build" degradation for every remaining
+unimplemented `ToolID`. One commit, full suite green before push.
+Session stopped after the commit per explicit instruction -- do not start
+Phase 8.4 or any other work.
 
-**Part 2 — TEST_RUNNER / LINTER / CALCULATOR:**
-`tasker/tools/executor.py` gained real execution for all three:
-`TEST_RUNNER` auto-detects pytest (via `shutil.which`) and falls back to
-`python -m unittest discover`, returning structured
-`{framework, passed, failed, skipped, failing_tests}`;
-`LINTER` runs `ruff check <path> --output-format json` when ruff is
-available and returns an honest "linter not installed" error otherwise;
-`CALCULATOR` evaluates arithmetic via the `ast` module with a strict
-operator whitelist — `eval()` is never used. All three are now registered
-in `_DISPATCH`. `tasker/tools/bundles.py` `_TOOL_KEYWORDS` gained a
-`CALCULATOR` group (`LINTER`/`TEST_RUNNER` already had groups); this is
-the same root-cause pattern that broke RESEARCH mode — no keyword group
-means `narrow_bundle_to_step()` can never offer the tool no matter how
-real its executor is.
+**Part 3 -- Honest degradation for unimplemented tools:**
+`tasker/tools/executor.py` gained `implemented_tools()` (registry-of-truth
+single source) and `_make_unavailable_error()`. `execute_tool()` now
+returns a structured dict `{tool, error, available_tools}` for any tool
+without a real executor, with `error=None` so the multi-turn loop can feed
+it back as a normal tool result. `tasker/tools/bundles.py` `get_definitions()`
+now drops every unimplemented tool from the offered bundle (logged WARNING),
+so workers are never tempted to call placeholders. Adding a new executor to
+`_DISPATCH` automatically lifts it into `implemented_tools()` and therefore
+into offered bundles and the unavailable-tool error list.
 
-**Tests:** 919 → 935 (+16 in `test_tool_executor.py` and +1 in
-`test_tool_bundles.py`). Full suite green. The previous
-`TestUnimplementedTools` assertions for `linter`/`test_runner` were
-replaced with real-executor tests; an unknown tool still correctly
-returns "no execution implementation configured".
+**Tests:** 935 → 941 (+3 in `TestUnavailableTools`, +4 in
+`TestBundleImplementationFilter`). Full suite green.
 
-**Live smoke:** Not attempted this session — unit coverage only, no real
+**Live smoke:** Not attempted this session -- unit coverage only, no real
 Ollama calls. No cloud spend.
 
-**Next task:** Part 3 of this same sprint, next window: honest
-"not available in this build" degradation for every remaining
-unimplemented `ToolID`, and excluding unavailable tools from offered
-bundles (SDD 5.7d). Then SDD_ADDENDUM_PHASE8.md Phase 8.4.
+**Next task:** SDD_ADDENDUM_PHASE8.md Phase 8.4 -- SetupWizardScreen +
+ModelSelectorScreen.
 
 **Blockers:** None.
 
-**Open decisions:** Live calculator/test_runner/linter invocation with a
-real model remains undemonstrated — worth a future attempt when time or a
-stronger local model is available, though the executors themselves are
-unit-tested directly.
+**Open decisions:** Same as Parts 1/2 -- live invocation of any of these
+tools with a real model has not been attempted; the executors and
+registry-of-truth are proven at the unit level.
+
+---
+
+## Previous Session Notes (Tool-executor fill-in sprint, Part 2 — TEST_RUNNER, LINTER, CALCULATOR, kept for reference)
+
+**Last worked on:** Tool-executor fill-in sprint, Part 2 —
+`TEST_RUNNER`, `LINTER`, and `CALCULATOR` executors. One commit, full
+suite green before push.
+
+**Part 2 — TEST_RUNNER / LINTER / CALCULATOR:**
+`tasker/tools/executor.py` gained real execution for all three:
+`TEST_RUNNER` auto-detects pytest and falls back to `unittest discover`;
+`LINTER` runs `ruff check --output-format json`; `CALCULATOR` evaluates
+arithmetic via an AST whitelist (no `eval()`). All three registered in
+`_DISPATCH`. `_TOOL_KEYWORDS` gained a `CALCULATOR` group so
+`narrow_bundle_to_step()` can offer it.
+
+**Tests:** 919 → 935. Full suite green. The previous
+`TestUnimplementedTools` `linter`/`test_runner` assertions were replaced
+with real-executor tests.
+
+**Open decisions:** Live invocation with a real model undemonstrated;
+executors proven at the unit level.
 
 ---
 

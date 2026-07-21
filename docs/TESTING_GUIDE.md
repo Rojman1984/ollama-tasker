@@ -794,3 +794,39 @@ OLLAMA_BASE_URL=http://127.0.0.1:11435 TASKER_PROFILE=tier1_tasker \
 Expected: the model is offered the `calculator` tool for this arithmetic
 step and returns a numeric answer (exact interaction depends on the
 local model's tool-use reliability; the executor itself is unit-tested).
+
+## H20. Honest degradation for unimplemented tools -- tool-executor fill-in part 3 (2026-07-20)
+
+Part 3 of the tool-executor fill-in sprint. Remaining placeholder tools
+(`CHECKPOINT_WRITE`, `CITATION_TRACKER`, `CONTRADICTION_DETECTOR`,
+`LOCAL_MEMORY`, `LOCAL_SEARCH`, `MCP_CALL_TOOL`, `MEMORY_READ`, `PDF_EXTRACT`,
+`PROGRESS_REPORT`, `SEARCH`, `TASK_STATE`) are now excluded from the
+bundles offered to workers. If a model ever still requests one,
+`execute_tool()` returns a structured error carrying the tool name,
+"not available in this build", and the list of tools that ARE available.
+
+### H20.1 Unit tests
+```bash
+python -m unittest tests.unit.test_tool_executor.TestUnavailableTools -v
+python -m unittest tests.unit.test_tool_bundles.TestBundleImplementationFilter -v
+```
+Covers: unavailable-tool request returns `{tool, error, available_tools}`
+with the correct tool name and the full implemented-tools list; unknown
+tool names get the same shape; `get_definitions()` drops every
+unimplemented tool from the offered bundle; `narrow_bundle_to_step()`
+never returns an unimplemented tool; `implemented_tools()` equals
+`_DISPATCH` keys.
+
+### H20.2 Full suite
+```bash
+python -m unittest discover -s tests
+```
+Expected: all tests pass (941 total after this commit).
+
+### H20.3 Registry-of-truth invariant
+Adding a new executor to `tasker/tools/executor.py` `_DISPATCH` will:
+1. automatically include it in `implemented_tools()`;
+2. automatically allow `get_definitions()` to offer it if the mode bundle
+   includes it;
+3. automatically include it in the structured error's `available_tools`.
+No separate allow-list needs to be maintained.

@@ -523,11 +523,31 @@ class TestLinter(ToolExecutorTestCase):
         self.assertEqual(r.tool_output["error_count"], 0)
 
 
-class TestUnknownTool(ToolExecutorTestCase):
+class TestUnavailableTools(ToolExecutorTestCase):
 
-    async def test_unknown_tool_name_not_implemented(self):
+    async def test_unimplemented_tool_returns_structured_error(self):
+        """Unimplemented tools return a structured dict: tool name, 'not
+        available in this build', and the list of tools that ARE available."""
+        r = await execute_tool(_tr("pdf_extract", {"path": "x.pdf"}), worker=_worker(), cwd=self.cwd)
+        self.assertIsNone(r.error)
+        self.assertIsInstance(r.tool_output, dict)
+        self.assertEqual(r.tool_output["tool"], "pdf_extract")
+        self.assertEqual(r.tool_output["error"], "not available in this build")
+        self.assertIn("bash", r.tool_output["available_tools"])
+        self.assertNotIn("pdf_extract", r.tool_output["available_tools"])
+
+    async def test_unimplemented_tool_error_lists_implemented_tools(self):
+        from tasker.tools.executor import implemented_tools
+        available = implemented_tools()
+        r = await execute_tool(_tr("mcp_call_tool", {}), worker=_worker(), cwd=self.cwd)
+        self.assertIsNone(r.error)
+        self.assertEqual(set(r.tool_output["available_tools"]), available)
+
+    async def test_unknown_tool_name_returns_structured_error(self):
         r = await execute_tool(_tr("totally_unknown", {}), worker=_worker(), cwd=self.cwd)
-        self.assertIn("no execution implementation", r.error)
+        self.assertIsNone(r.error)
+        self.assertEqual(r.tool_output["tool"], "totally_unknown")
+        self.assertEqual(r.tool_output["error"], "not available in this build")
 
 
 if __name__ == "__main__":

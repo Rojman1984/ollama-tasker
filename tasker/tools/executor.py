@@ -60,6 +60,29 @@ _NO_SEARCH_BACKEND_ERROR = (
 
 _LOCAL_ONLY_TOOLS = {ToolID.BASH.value, ToolID.FILE_WRITE.value, ToolID.GIT.value}
 
+
+def implemented_tools() -> frozenset[str]:
+    """
+    Registry-of-truth for which ToolIDs have real execution implementations.
+
+    This is the **single source of truth** used both to report available tools
+    in a structured "not available in this build" error and to filter tool
+    bundles so workers are never offered tools that cannot actually run.
+    Adding a new tool to `_DISPATCH` automatically lifts it everywhere.
+    """
+    return frozenset(_DISPATCH.keys())
+
+
+def _make_unavailable_error(tool_name: str) -> dict:
+    """Structured error returned when a tool is requested but not implemented."""
+    available = sorted(implemented_tools())
+    return {
+        "tool": tool_name,
+        "error": "not available in this build",
+        "available_tools": available,
+    }
+
+
 # Defense-in-depth only, not a security boundary -- see module docstring.
 _BASH_DENYLIST_PATTERNS = [
     re.compile(p, re.IGNORECASE)
@@ -139,7 +162,8 @@ async def execute_tool(
         if handler is None:
             return dataclasses.replace(
                 tool_result,
-                error=f"no execution implementation configured for tool '{tool_result.tool_name}'",
+                tool_output=_make_unavailable_error(tool_result.tool_name),
+                error=None,
                 duration_ms=int((time.monotonic() - start) * 1000),
             )
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 
+from tasker.tools.executor import implemented_tools
 from tasker.workers.base import ToolDefinition, ToolID
 
 logger = logging.getLogger(__name__)
@@ -396,13 +397,38 @@ _TOOL_META: dict[ToolID, tuple[str, dict]] = {
 }
 
 
+def _filter_implemented(bundle: frozenset[ToolID]) -> frozenset[ToolID]:
+    """
+    Drop any tool that lacks a real executor from the offered bundle.
+
+    `implemented_tools()` is the single registry-of-truth in
+    `tasker/tools/executor.py`. Filtering at bundle-construction time keeps
+    the model from being tempted to call a tool that can only return
+    "not available in this build". A WARNING is logged for each dropped tool
+    so the gap is visible in logs.
+    """
+    available = implemented_tools()
+    dropped = [tid for tid in bundle if tid.value not in available]
+    if dropped:
+        logger.warning(
+            "get_definitions: dropping tools with no executor from the offered bundle: %s",
+            sorted(t.value for t in dropped),
+        )
+    return frozenset(tid for tid in bundle if tid.value in available)
+
+
 def get_definitions(bundle: frozenset[ToolID]) -> list[ToolDefinition]:
-    """Convert a bundle of ToolIDs to ToolDefinition instances, sorted by name."""
+    """Convert a bundle of ToolIDs to ToolDefinition instances, sorted by name.
+
+    Tools without a real execution implementation are silently dropped from
+    the returned definitions so workers are never offered something that can
+    only return a "not available in this build" error. The drop is logged.
+    """
     return [
         ToolDefinition(
             name=tid.value,
             description=_TOOL_META[tid][0],
             parameters=_TOOL_META[tid][1],
         )
-        for tid in sorted(bundle, key=lambda t: t.value)
+        for tid in sorted(_filter_implemented(bundle), key=lambda t: t.value)
     ]
