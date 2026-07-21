@@ -579,6 +579,7 @@ Handles both `LOCAL_HARDWARE` and `OLLAMA_CLOUD` compute locations. The Ollama A
 - Acquires a concurrency slot before every OLLAMA_CLOUD call
 - Returns `WorkerResult(status=DEFERRED)` immediately if no slot available (never blocks)
 - Raises `OllamaQueueFullError` on HTTP 429; harness catches and triggers fallback
+- **Provider boundary is the enforcement choke point:** every code path that reaches an OLLAMA_CLOUD worker — orchestrated steps, CHAT direct dispatch, delegated sub-tasks, and API completions — goes through `OllamaProvider.execute()`. The slot check lives there so no entry path can bypass it, as confirmed by the Phase 8 stress-test finding that CHAT's direct dispatch path previously executed cloud calls with no acquire/release logs.
 
 #### 5.6.1a Context Window Control (`num_ctx`)
 

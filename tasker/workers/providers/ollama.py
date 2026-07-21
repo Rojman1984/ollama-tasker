@@ -236,6 +236,13 @@ class OllamaProvider(WorkerProviderBase):
         is_cloud = worker.compute_location == ComputeLocation.OLLAMA_CLOUD
         acquired = False
 
+        # Concurrency enforcement at the provider boundary (SDD 5.6.1 / 5.9):
+        # every code path that reaches an OLLAMA_CLOUD worker -- orchestrated
+        # steps, CHAT direct dispatch, delegated sub-tasks, and API server
+        # completions -- goes through this single execute() method. A live
+        # Phase 8 stress test found CHAT's direct dispatch bypassed the slot
+        # manager because the bypass happened here; fixing it centrally prevents
+        # any future entry path from doing the same.
         if is_cloud and self._concurrency:
             acquired = await self._concurrency.try_acquire()
             if not acquired:

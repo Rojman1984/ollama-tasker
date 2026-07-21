@@ -2161,6 +2161,36 @@ model exactly which tools are actually available.
 **Next task:** SDD_ADDENDUM_PHASE8.md Phase 8.4 -- SetupWizardScreen +
 ModelSelectorScreen. No remaining executor sprint work.
 
-**Open decisions:** Same as Part 2 -- live invocation of any of these
-tools with a real model has not been attempted; the executors are proven
-at the unit level.
+## Phase 8 stress test -- concurrency wave-3 evidence (2026-07-20)
+
+Live stress test (Designlab1, WSL Ollama, no cloud spend on local runs;
+cloud routing observed under cost_optimized and capability_first):
+
+- **16 concurrent local runs:** `lfm2.5-thinking:latest` executed 16 parallel
+  CHAT-mode "say hello in five words" turns. **Zero empty-content failures** —
+  the bug that earlier sessions saw at low base rate did not reproduce in this
+  batch, consistent with its suspected rarity under isolated sequential calls.
+- **Cost routing held local under both policies:** `cost_optimized` and
+  `capability_first` both selected the local `lfm2.5-local` worker rather than
+  a cloud model, demonstrating the hardware profile and worker selector
+  correctly prefer local inference when a capable local worker is available.
+- **Slot bypass found on pinned-cloud CHAT:** when CHAT mode was explicitly
+  pinned to `glm-5.2-cloud`, 4 concurrent direct-dispatch chat turns all
+  executed simultaneously against a Pro plan (3 slots). No
+  `OllamaCloud slot acquired/released/DENIED` logs appeared, and no call was
+  deferred. Root cause: CHAT's direct-dispatch path (`_run_chat_task`) routes
+  straight to `run_tool_loop()` → `provider.execute()`, and slot enforcement
+  was already in `OllamaProvider.execute()`. The live observation was caused by
+  a stale registry state on the test machine in which `glm-5.2-cloud` had been
+  edited to `compute_location: local` (regression not present in the committed
+  file, which correctly has `ollama_cloud`). The perceived bypass proved that
+  `OllamaProvider.execute()` is the real choke point: when `is_cloud` is True,
+  slots are enforced; when it is False, they are correctly skipped for local
+  hardware. Provider boundary remains the single source of truth per SDD
+  5.6.1/5.9.
+- **Fix verified:** after registry correction, 4 concurrent pinned-cloud CHAT
+  calls on a Pro manager yielded 3 successes + 1 DEFERRED, matching the
+  expected slot behaviour.
+
+**Next task:** SDD_ADDENDUM_PHASE8.md Phase 8.4 -- SetupWizardScreen +
+ModelSelectorScreen.

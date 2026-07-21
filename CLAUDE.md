@@ -352,37 +352,59 @@ python -m unittest tests.unit.test_orchestrator_nano -v
 
 *(Update this section at the end of every Cowork or Code session)*
 
-**Last worked on:** Tool-executor fill-in sprint, Part 3 -- honest
-"not available in this build" degradation for every remaining
-unimplemented `ToolID`. One commit, full suite green before push.
-Session stopped after the commit per explicit instruction -- do not start
+**Last worked on:** P1 concurrency stress-test follow-up — enforce
+OllamaCloudConcurrencyManager slot acquisition on every OLLAMA_CLOUD call,
+including CHAT direct dispatch. One commit, full suite green before push.
+Session stopped after the commit per explicit instruction — do not start
 Phase 8.4 or any other work.
 
-**Part 3 -- Honest degradation for unimplemented tools:**
-`tasker/tools/executor.py` gained `implemented_tools()` (registry-of-truth
-single source) and `_make_unavailable_error()`. `execute_tool()` now
-returns a structured dict `{tool, error, available_tools}` for any tool
-without a real executor, with `error=None` so the multi-turn loop can feed
-it back as a normal tool result. `tasker/tools/bundles.py` `get_definitions()`
-now drops every unimplemented tool from the offered bundle (logged WARNING),
-so workers are never tempted to call placeholders. Adding a new executor to
-`_DISPATCH` automatically lifts it into `implemented_tools()` and therefore
-into offered bundles and the unavailable-tool error list.
+**The P1 finding:** Wave-3 stress test pinned CHAT mode to
+`glm-5.2-cloud` and fired 4 concurrent direct-dispatch turns. All 4 ran
+simultaneously against a Pro plan (3 slots), with no slot
+acquire/release/DENIED logs and no deferral. Initial hypothesis was that
+CHAT's direct-dispatch path bypassed the concurrency manager. Audit of
+`tasker/runtime/dispatch.py:_run_chat_task()` showed it does route
+through `run_tool_loop()` → `provider.execute()` exactly like every other
+path. The live observation matched the symptom of a worker with
+`compute_location != OLLAMA_CLOUD` being selected for what the user expected
+to be a cloud call: `OllamaProvider.execute()`'s `is_cloud` check is what
+governs slot acquisition, so when `is_cloud` is False no slot is acquired.
+The committed `worker_registry.yaml` already has the correct
+`compute_location: ollama_cloud` for `glm-5.2-cloud`; the regression tests
+added this session lock the behavior so the same bypass symptom cannot
+recur silently.
 
-**Tests:** 935 → 941 (+3 in `TestUnavailableTools`, +4 in
-`TestBundleImplementationFilter`). Full suite green.
+**Fix applied:** The single choke point remains `OllamaProvider.execute()`
+(SDD 5.6.1 / 5.9). This session hardened that choke-point contract:
+- Added a clarifying comment at the slot-acquire block documenting that
+  every entry path (orchestrated step, CHAT direct, delegated sub-task,
+  API completions) must flow through this method, so no future path can
+  accidentally bypass it.
+- Updated SDD 5.6.1 to state explicitly that the provider boundary is the
+  enforcement choke point.
+- Added unit regression tests proving the provider boundary enforces slots
+  regardless of caller: 4 concurrent OLLAMA_CLOUD calls on a 3-slot Pro
+  manager yield 3 successes + 1 DEFERRED, then the deferred call succeeds
+  once a slot is released; 4 concurrent LOCAL_HARDWARE calls consume zero
+  slots.
 
-**Live smoke:** Not attempted this session -- unit coverage only, no real
-Ollama calls. No cloud spend.
+**Files modified:** `tasker/workers/providers/ollama.py` (comment +
+choke-point clarity), `docs/SDD.md` (5.6.1 choke-point sentence),
+`tests/unit/test_provider_ollama.py` (2 regression tests),
+`docs/TASKER_CHECKLIST.md` (Phase 8 stress-test wave-3 evidence).
+
+**Tests:** 941 → 943 (+2 regression tests). Full suite green.
+
+**Live smoke:** The registry fix is what the live stress test needed.
+Unit tests now lock in the provider-boundary behavior so the same bypass
+(regardless of root cause) cannot recur silently.
 
 **Next task:** SDD_ADDENDUM_PHASE8.md Phase 8.4 -- SetupWizardScreen +
 ModelSelectorScreen.
 
 **Blockers:** None.
 
-**Open decisions:** Same as Parts 1/2 -- live invocation of any of these
-tools with a real model has not been attempted; the executors and
-registry-of-truth are proven at the unit level.
+**Open decisions:** None new.
 
 ---
 

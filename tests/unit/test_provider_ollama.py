@@ -3,6 +3,7 @@ Unit tests -- OllamaProvider (tasker/workers/providers/ollama.py)
 Phase 4 -- SDD Section 5.6.1
 All HTTP is mocked via _post_fn / _get_fn injection.
 """
+import asyncio
 import json
 import unittest
 
@@ -456,6 +457,62 @@ class TestOllamaProviderCloud(unittest.IsolatedAsyncioTestCase):
         p = _provider(post_response=_ok_response("cloud response"))
         result = await p.execute(_task(), _manifest(ComputeLocation.OLLAMA_CLOUD))
         self.assertEqual(result.status, WorkerStatus.SUCCESS)
+
+    async def test_concurrent_cloud_calls_respect_slot_limit(self):
+        """Regression: 4 simultaneous OLLAMA_CLOUD calls on a 3-slot manager
+        must have exactly one DEFERRED; that deferred call eventually runs
+        after a slot is released."""
+        mgr = OllamaCloudConcurrencyManager(OllamaPlan.PRO)
+        responses = {"n": 0}
+
+        async def slow_post(url: str, payload: dict) -> tuple[int, dict]:
+            payload.pop("_timeout", None)
+            responses["n"] += 1
+            # Slow enough that all 4 gathers are issued before the first completes.
+            await asyncio.sleep(0.1)
+            return 200, _ok_response(f"cloud-{responses['n']}")
+
+        p = OllamaProvider(
+            base_url="http://localhost:11434",
+            concurrency_mgr=mgr,
+            _post_fn=slow_post,
+            _get_fn=_make_get(200, {"models": []}),
+        )
+        worker = _manifest(ComputeLocation.OLLAMA_CLOUD)
+
+        async def one_call(i: int):
+            t = _task(instruction=f"call-{i}")
+            return await p.execute(t, worker)
+
+        results = await asyncio.gather(*(
+            one_call(i) for i in range(4)
+        ))
+
+        statuses = [r.status for r in results]
+        self.assertEqual(statuses.count(WorkerStatus.DEFERRED), 1)
+        self.assertEqual(statuses.count(WorkerStatus.SUCCESS), 3)
+
+        # Release one successful slot by letting its work complete -- already
+        # done above because execute() releases in finally. The deferred call
+        # should now succeed after the retry loop in run_tool_loop; exercise
+        # the same OllamaProvider directly with the same manager.
+        self.assertEqual(mgr.slots_available, 3)
+        retry = await p.execute(_task(instruction="retry"), worker)
+        self.assertEqual(retry.status, WorkerStatus.SUCCESS)
+
+    async def test_concurrent_local_calls_acquire_no_slots(self):
+        """LOCAL_HARDWARE calls never touch the Ollama Cloud slot manager."""
+        mgr = OllamaCloudConcurrencyManager(OllamaPlan.PRO)
+        p = _provider(concurrency_mgr=mgr, post_response=_ok_response("local"))
+        worker = _manifest(ComputeLocation.LOCAL_HARDWARE)
+
+        async def one_call(i: int):
+            t = _task(instruction=f"local-{i}")
+            return await p.execute(t, worker)
+
+        results = await asyncio.gather(*(one_call(i) for i in range(4)))
+        self.assertTrue(all(r.status == WorkerStatus.SUCCESS for r in results))
+        self.assertEqual(mgr.slots_available, 3)
 
 
 class TestOllamaProviderBudgetRecording(unittest.IsolatedAsyncioTestCase):
