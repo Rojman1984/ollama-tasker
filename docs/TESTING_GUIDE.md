@@ -135,6 +135,25 @@ tasker-setup --check-model kimi-k2.7-code:cloud --ollama-url http://127.0.0.1:11
 # probes nothing; an un-pulled :cloud model IS probed (pull not required).
 ```
 
+## H8. Textual TUI (SDD_ADDENDUM_PHASE8 8.3-8.4)
+
+### H8.1 TUI skeleton + navigation (Phase 8.3)
+```bash
+python -m unittest tests.unit.test_tui_app tests.unit.test_tui_status_bar \
+    tests.unit.test_tui_welcome_screen -v
+# Manual: launch `tasker` and use arrow keys / Enter / q to navigate.
+```
+
+### H8.2 SetupWizardScreen + ModelSelectorScreen (Phase 8.4)
+```bash
+python -m unittest tests.unit.test_tui_history_input \
+    tests.unit.test_tui_setup_wizard \
+    tests.unit.test_tui_model_selector -v
+# Manual: `tasker` → Setup Wizard (runs live environment checks).
+# Manual: `tasker` → Model Selector → select a model → Test Model →
+#   Add to Registry (writes a confirmed entry to worker_registry.yaml).
+```
+
 ## H7. OpenAI-Compat API Server (`tasker-api`)
 
 > Numbering note: the launch task that produced this section originally

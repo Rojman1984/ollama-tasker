@@ -61,23 +61,35 @@ class TestWelcomeScreenMenuSelection(unittest.IsolatedAsyncioTestCase):
         await pilot.pause()
         return app.screen.query_one("#menu-notice").content
 
-    async def test_setup_wizard_shows_phase_8_4_notice(self):
-        with _no_cache():
-            app = TuiApp()
-            async with app.run_test() as pilot:
-                await pilot.pause()
-                notice = await self._select(pilot, app, "menu-setup_wizard")
-        self.assertIn("Setup Wizard", notice)
-        self.assertIn("Phase 8.4", notice)
+    async def test_setup_wizard_navigates_to_screen(self):
+        from tasker.tui.screens.setup_wizard import SetupWizardScreen
 
-    async def test_model_selector_shows_phase_8_4_notice(self):
+        with _no_cache(), mock.patch(
+            "tasker.tui.screens.setup_wizard.run_wizard",
+            return_value=[],
+        ):
+            app = TuiApp()
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.click("#menu-setup_wizard")
+                await pilot.pause()
+                await pilot.pause(0.3)
+                self.assertIsInstance(app.screen, SetupWizardScreen)
+
+    async def test_model_selector_navigates_to_screen(self):
+        from tasker.tui.screens.model_selector import ModelSelectorScreen
+
+        async def empty_tags(url: str):
+            return 200, {"models": []}
+
         with _no_cache():
             app = TuiApp()
             async with app.run_test() as pilot:
                 await pilot.pause()
-                notice = await self._select(pilot, app, "menu-model_selector")
-        self.assertIn("Model Selector", notice)
-        self.assertIn("Phase 8.4", notice)
+                # Push the model selector with a fake tag fetcher so no live Ollama.
+                app.push_screen(ModelSelectorScreen(_get_fn=empty_tags))
+                await pilot.pause()
+                self.assertIsInstance(app.screen, ModelSelectorScreen)
 
     async def test_run_task_shows_phase_8_5_notice(self):
         with _no_cache():

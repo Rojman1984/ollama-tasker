@@ -19,6 +19,8 @@ from textual.containers import Vertical
 from textual.screen import Screen
 from textual.widgets import Footer, Label, ListItem, ListView, Static
 
+from tasker.tui.screens.model_selector import ModelSelectorScreen
+from tasker.tui.screens.setup_wizard import SetupWizardScreen
 from tasker.tui.widgets.status_bar import HardwareStatusBar
 
 # (key, label, notice-shown-on-select)
@@ -73,7 +75,13 @@ class WelcomeScreen(Screen):
         if event.item.id == "menu-quit":
             self.action_quit_app()
             return
-        _, label, notice = MENU_ITEMS[event.index]
+        key, label, notice = MENU_ITEMS[event.index]
+        if key == "setup_wizard":
+            self.app.push_screen(SetupWizardScreen())
+            return
+        if key == "model_selector":
+            self.app.push_screen(ModelSelectorScreen())
+            return
         self.query_one("#menu-notice", Static).update(f"{label}: {notice}")
 
     def action_quit_app(self) -> None:

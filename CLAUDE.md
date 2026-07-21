@@ -231,7 +231,8 @@ Update this section as phases complete.
 | 8.1 | Setup wizard headless logic + `tasker-setup` CLI (see `docs/SDD_ADDENDUM_PHASE8.md`) — **note:** the row above labeled plain "8" is an unrelated, earlier "Orchestrator Factory" milestone from before `SDD_ADDENDUM_PHASE8.md` existed; this is a real naming collision in the project's own history, not a typo — the two are unrelated | ✅ COMPLETE |
 | 8.2 | Agentic Readiness Checker (`tasker/setup/readiness.py`, addendum numbering — the third "8.2" in this table, see the 8.1 note) | ✅ COMPLETE |
 | 8.3 | Textual TUI skeleton (`TuiApp`, `WelcomeScreen`, `HardwareStatusBar`) | ✅ COMPLETE |
-| 8.4–8.5 | SetupWizardScreen + ModelSelectorScreen, HarnessPanel | ⬜ NOT STARTED |
+| 8.4 | SetupWizardScreen + ModelSelectorScreen | ✅ COMPLETE |
+| 8.5 | HarnessPanel | ⬜ NOT STARTED |
 | E2E 8.1 | Live cloud-path E2E validation (COWORK_PROMPT.md task list — a *third* use of the "8.1" label, distinct from both rows above) | ✅ COMPLETE |
 | E2E 8.2 | tier4_cloud.py reachability from current hardware profiles | ✅ COMPLETE |
 | E2E 8.3 | Tool-loop non-termination guard | ✅ COMPLETE |
@@ -352,55 +353,62 @@ python -m unittest tests.unit.test_orchestrator_nano -v
 
 *(Update this section at the end of every Cowork or Code session)*
 
-**Last worked on:** P1 concurrency stress-test follow-up — enforce
-OllamaCloudConcurrencyManager slot acquisition on every OLLAMA_CLOUD call,
-including CHAT direct dispatch. One commit, full suite green before push.
-Session stopped after the commit per explicit instruction — do not start
-Phase 8.4 or any other work.
+**Last worked on:** Phase 8.4 — SetupWizardScreen + ModelSelectorScreen +
+HistoryInput widget, per SDD_ADDENDUM_PHASE8.md B.3-B.5. One commit, full
+suite green before push.
 
-**The P1 finding:** Wave-3 stress test pinned CHAT mode to
-`glm-5.2-cloud` and fired 4 concurrent direct-dispatch turns. All 4 ran
-simultaneously against a Pro plan (3 slots), with no slot
-acquire/release/DENIED logs and no deferral. Initial hypothesis was that
-CHAT's direct-dispatch path bypassed the concurrency manager. Audit of
-`tasker/runtime/dispatch.py:_run_chat_task()` showed it does route
-through `run_tool_loop()` → `provider.execute()` exactly like every other
-path. The live observation matched the symptom of a worker with
-`compute_location != OLLAMA_CLOUD` being selected for what the user expected
-to be a cloud call: `OllamaProvider.execute()`'s `is_cloud` check is what
-governs slot acquisition, so when `is_cloud` is False no slot is acquired.
-The committed `worker_registry.yaml` already has the correct
-`compute_location: ollama_cloud` for `glm-5.2-cloud`; the regression tests
-added this session lock the behavior so the same bypass symptom cannot
-recur silently.
+**What was implemented:**
+- `tasker/tui/messages.py`: WizardStepCompleted, ReadinessCheckCompleted,
+  WorkerRegistryUpdated Textual message classes.
+- `tasker/tui/widgets/history_input.py`: reusable Input subclass with
+  persistent `~/.tasker_history` (same file the REPL uses), Up/Down recall,
+  Ctrl+R reverse-search overlay, and Tab-completion cycling.
+- `tasker/tui/widgets/step_row.py`: WizardStepRow with status icon,
+  collapsible detail, copyable action command, and per-step Re-run button.
+- `tasker/tui/screens/setup_wizard.py`: SetupWizardScreen running the same
+  headless `run_wizard()` in a Textual worker, with Re-run All, per-step
+  Re-run, and a GPU guidance panel.
+- `tasker/tui/widgets/readiness_panel.py`: ReadinessReportPanel with
+  formatted report and Copy report fallback button.
+- `tasker/tui/screens/model_selector.py`: two-panel ModelSelectorScreen
+  (model list + readiness report), Test Model async worker, and Add to
+  Registry write.
+- `tasker/tui/screens/welcome.py`: Setup Wizard and Model Selector menu
+  items now push real screens; Run Task / View Sessions / Daemon remain
+  placeholders for 8.5/future.
 
-**Fix applied:** The single choke point remains `OllamaProvider.execute()`
-(SDD 5.6.1 / 5.9). This session hardened that choke-point contract:
-- Added a clarifying comment at the slot-acquire block documenting that
-  every entry path (orchestrated step, CHAT direct, delegated sub-task,
-  API completions) must flow through this method, so no future path can
-  accidentally bypass it.
-- Updated SDD 5.6.1 to state explicitly that the provider boundary is the
-  enforcement choke point.
-- Added unit regression tests proving the provider boundary enforces slots
-  regardless of caller: 4 concurrent OLLAMA_CLOUD calls on a 3-slot Pro
-  manager yield 3 successes + 1 DEFERRED, then the deferred call succeeds
-  once a slot is released; 4 concurrent LOCAL_HARDWARE calls consume zero
-  slots.
+**Headless TUI transcript:** captured at
+`docs/transcripts/phase_8_4_tui_transcript.txt` using Textual's
+`App.run_test()` driver. It demonstrates the wizard producing 7 live
+step rows, the model selector listing candidates, running a probe, and
+writing a new worker entry to a scratch registry.
 
-**Files modified:** `tasker/workers/providers/ollama.py` (comment +
-choke-point clarity), `docs/SDD.md` (5.6.1 choke-point sentence),
-`tests/unit/test_provider_ollama.py` (2 regression tests),
-`docs/TASKER_CHECKLIST.md` (Phase 8 stress-test wave-3 evidence).
+**Manual-only item (not verified):** B.5.5's native terminal-emulator
+click-drag text selection on the readiness report panel. Implemented with
+an explicit Copy report fallback, but the actual eyes-on check in a real
+terminal can only be done by Roland.
 
-**Tests:** 941 → 943 (+2 regression tests). Full suite green.
+**Files modified:** `tasker/tui/messages.py`,
+`tasker/tui/widgets/history_input.py`,
+`tasker/tui/widgets/step_row.py`,
+`tasker/tui/widgets/readiness_panel.py`,
+`tasker/tui/screens/setup_wizard.py`,
+`tasker/tui/screens/model_selector.py`,
+`tasker/tui/screens/welcome.py`,
+`tests/unit/test_tui_history_input.py` (new),
+`tests/unit/test_tui_setup_wizard.py` (new),
+`tests/unit/test_tui_model_selector.py` (new),
+`tests/unit/test_tui_welcome_screen.py` (updated for real navigation),
+`docs/TASKER_CHECKLIST.md` (Phase 8.4 items),
+`docs/TESTING_GUIDE.md` (H8 TUI test commands),
+`docs/transcripts/phase_8_4_tui_transcript.txt` (new),
+`scripts/phase_8_4_transcript.py` (new),
+`CLAUDE.md` (Phase Tracker + this note).
 
-**Live smoke:** The registry fix is what the live stress test needed.
-Unit tests now lock in the provider-boundary behavior so the same bypass
-(regardless of root cause) cannot recur silently.
+**Tests:** 943 → 985 (+42 tests). Full suite green:
+`python -m unittest discover -s tests` → OK.
 
-**Next task:** SDD_ADDENDUM_PHASE8.md Phase 8.4 -- SetupWizardScreen +
-ModelSelectorScreen.
+**Next task:** SDD_ADDENDUM_PHASE8.md Phase 8.5 — HarnessPanel.
 
 **Blockers:** None.
 

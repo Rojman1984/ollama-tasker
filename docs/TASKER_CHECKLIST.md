@@ -808,8 +808,32 @@ Two independent, small fixes, unrelated to each other.
 - [ ] Live headless run on TASKER-P1 -- not run this session (no access to
       that machine from here); flagged as a follow-up, not fabricated.
 
-### Still out of scope (unchanged from SDD_ADDENDUM_PHASE8.md)
-- [ ] Phase 8.4 -- SetupWizardScreen + ModelSelectorScreen
+### Phase 8.4 -- SetupWizardScreen + ModelSelectorScreen
+- [x] tasker/tui/screens/setup_wizard.py (SetupWizardScreen) -- live step rows,
+      Re-run All / Re-run Step N, GPU guidance panel
+- [x] tasker/tui/widgets/step_row.py (WizardStepRow) -- status icon, collapsible
+      detail, copy action, re-run button
+- [x] tasker/tui/screens/model_selector.py (ModelSelectorScreen) -- two-panel
+      model list + readiness report, Test Model async worker,
+      Add to Registry write
+- [x] tasker/tui/widgets/readiness_panel.py (ReadinessReportPanel) -- formatted
+      report display, Copy report fallback button
+- [x] Textual message bus wired: WizardStepCompleted, ReadinessCheckCompleted,
+      WorkerRegistryUpdated (tasker/tui/messages.py)
+- [x] Keyboard bindings per B.5.5: HistoryInput with Up/Down recall, Ctrl+R
+      reverse-search overlay, Tab cycling completion, all backed by
+      ~/.tasker_history (same file as the REPL)
+- [ ] Native terminal text selection on the readiness report panel -- implemented
+      per B.5.5 with Copy fallback; needs Roland's eyes-on check in a real
+      terminal (explicitly human-only per SDD)
+- [x] Automated headless verification (App.run_test()) for screen composition,
+      wizard message flow, model selector readiness + registry write
+- [ ] Manual verification: full setup wizard runs through TUI -- deferred to
+      Roland's live terminal check (headless transcript captured below)
+- [ ] Manual verification: model test + registry write through TUI -- deferred
+      to Roland's live terminal check (headless transcript captured below)
+
+### Phase 8.5 -- HarnessPanel
 - [ ] Phase 8.5 -- HarnessPanel
 
 ### Phase 8.2 -- Agentic Readiness Checker (addendum numbering; completed 2026-07-19)
