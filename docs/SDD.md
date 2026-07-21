@@ -2071,3 +2071,40 @@ the REPL/TUI. Consequences, binding on all interface work:
    operator.
 
 The REPL/TUI is the human skin over the same contract — never a privileged path.
+
+### Reference Agentic Deployment Topology (Roland, 2026-07-20 — normative companion to the Agent-Native Requirement)
+
+Tasker deployments must natively support the three-tier operating pattern this
+project is itself developed under:
+
+  TIER A — PLANNING WORKSPACE (human + frontier model)
+    Architecture, specs, priorities, review of escalations. Produces contract
+    artifacts: spec sections (SDD-first), scoped task briefs, status blocks.
+    Expensive model, used deliberately and sparingly.
+
+  TIER B — SUPERVISOR AGENT (mid-tier model, e.g. Sonnet-class)
+    Consumes Tier A briefs. Dispatches scoped tasks to Tier C via the
+    agent-native interface (headless CLI / API / JSON event stream). VERIFIES
+    independently (re-runs test suites, inspects diffs — never trusts executor
+    claims). Handles routine judgment; escalates design forks to Tier A
+    rather than guessing. Maintains status/handoff documents.
+
+  TIER C — EXECUTOR (tool-capable inference: Ollama Cloud frontier models,
+    e.g. kimi/glm, or local models under harness discipline)
+    Performs the work inside guardrails: TEST_RUNNER verification, honesty
+    guards, loop caps, slot/budget enforcement, GIT tool on branches.
+
+Design consequences:
+1. Tasker must be operable AS Tier C (executor driven by an external
+   supervisor via the agent-native interface) and AS Tier B (its orchestrator
+   supervising its own workers/DELEGATE_AGENT sub-tasks).
+2. Contract artifacts are first-class: handoff/status documents and scoped
+   briefs are the interchange format between tiers; the /handoff pattern and
+   COWORK_PROMPT status-block discipline are the reference implementations.
+3. Verification is a tier boundary: no tier accepts a lower tier's success
+   claim without independent evidence (test runs, diffs, tool-call records —
+   the honesty-guard principle applied recursively).
+4. Escalation is explicit: executors stop at design forks (as Claude Code did
+   at the streaming fork) instead of guessing; supervisors escalate to the
+   planning tier; the system never silently resolves architectural ambiguity
+   at the wrong tier.
