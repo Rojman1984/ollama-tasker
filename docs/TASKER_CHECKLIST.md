@@ -42,6 +42,7 @@ command in TESTING_GUIDE.md.
 - [x] WorkerProviderBase ABC
 - [x] ToolCallNormalizer (NATIVE, JSON_EXTRACT, XML_EXTRACT, FEW_SHOT)
 - [x] OllamaProvider (local + cloud unified, concurrency slot management)
+- [x] OllamaProvider.execute_stream() — streaming synthesis variant with stream:true, slot acquisition/budget/release, injectable _stream_fn for tests
 - [x] AnthropicProvider
 - [x] OpenAIProvider
 - [x] FuguProvider (MULTI_AGENT, opaque worker)
@@ -60,6 +61,7 @@ command in TESTING_GUIDE.md.
 - [x] CHAT mode (tasker/modes/chat.py)
 - [x] CODE mode (tasker/modes/code.py)
 - [x] COWORK mode (tasker/modes/cowork.py) + CoworkRunner with tick/pause/checkpoint loop
+- [x] CoworkRunner astream() event contract (SDD 7.5a): StepStarted/StepCompleted/SynthesisDelta/Paused/Done; run() as thin collector
 - [x] RESEARCH mode (tasker/modes/research.py)
 - [x] RESEARCH mode search-query rewrite step (tasker/tools/query_rewrite.py) -- rewrites natural-language step descriptions into keyword-focused Brave Search queries via the same model-call pattern as the orchestrator; wired through run_tool_loop and dispatch.py only when BRAVE_API_KEY is configured
 - [x] SECURE mode (tasker/modes/secure.py) -- hard block verified via WorkerSelector
@@ -73,6 +75,7 @@ command in TESTING_GUIDE.md.
 - [x] DualLLMOrchestrator (Tier 2) — separate call_planner + call_synthesizer callables
 - [x] ReasoningOrchestrator (Tier 3) — single call_model, GPU-resident, distinct from Tier 1
 - [x] CloudOrchestrator (Tier 4) — routes through WorkerProviderBase.execute(), LOCAL_ONLY guard
+- [x] OrchestratorBase.synthesize_stream() default (sentence-chunking fallback) + real token-level overrides in Single/Dual/Reasoning/Cloud tiers wired through factory.py
 - [x] tests/unit/test_orchestrator_tier2.py passing (10 tests)
 - [x] tests/unit/test_orchestrator_tier3.py passing (10 tests)
 - [x] tests/unit/test_orchestrator_tier4.py passing (13 tests)
@@ -82,7 +85,8 @@ command in TESTING_GUIDE.md.
 - [x] DesktopNotifier + WebhookNotifier verified (plyer fallback + exception swallow confirmed)
 - [x] tests/unit/test_notifier.py passing (23 tests — all 5 notifiers + SessionEvent factories)
 - [x] tasker/api/server.py — POST /v1/chat/completions, GET /v1/models, GET /v1/workers (aiohttp.web)
-- [x] tests/integration/test_api_server.py passing (15 tests — request routing, error responses, shape)
+- [x] tasker/api/server.py — SSE streaming for /v1/chat/completions with real token deltas during synthesis, custom tasker.step.* / tasker.paused events, and documented pause sequence (SDD 7.5a)
+- [x] tests/integration/test_api_server.py passing (25 tests — routing, shape, live dispatch, streaming SSE + pause)
 - [x] tasker/config/detect.py — hardware auto-detection (psutil + nvidia-smi), suggest_profile()
 - [x] psutil>=5.9 added to pyproject.toml dependencies
 - [x] tests/unit/test_hardware_detect.py passing (16 tests — mocked detection, threshold coverage)

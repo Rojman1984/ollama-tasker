@@ -231,13 +231,19 @@ def _worker(worker_id: str = "local-w1") -> WorkerManifest:
 
 class _FakeProvider:
     """Stand-in provider for the integration tests. When used as the single
-    wired OllamaProvider it must answer BOTH orchestrator plan/synthesize calls
-    (which expect a JSON plan array) AND worker dispatch calls (which expect a
-    plain answer). It distinguishes the two by role: THINKER -> plan JSON,
-    WORKER -> plain answer."""
+    wired OllamaProvider it must answer orchestrator plan calls (JSON plan
+    array), orchestrator synthesize calls (plain text), and worker dispatch
+    calls (plain answer). It distinguishes plan vs synthesize by the system
+    prompt content; worker calls are identified by role."""
 
-    def __init__(self, output: str = "real worker answer", status: WorkerStatus = WorkerStatus.SUCCESS):
+    def __init__(
+        self,
+        output: str = "real worker answer",
+        synthesize_output: str = "synthesized answer",
+        status: WorkerStatus = WorkerStatus.SUCCESS,
+    ):
         self._output = output
+        self._synthesize_output = synthesize_output
         self._status = status
         self.calls: list = []
 
@@ -247,10 +253,14 @@ class _FakeProvider:
     async def execute(self, task, worker) -> WorkerResult:
         self.calls.append((task, worker))
         if task.role.value == "thinker":
-            # Orchestrator plan/synthesize call: return a valid single-step plan
-            # so the API path actually exercises multi-step orchestration code
-            # while still dispatching exactly one worker call.
-            output = '[{"description": "do it", "role": "worker", "capabilities": ["tool_use"]}]'
+            system_prompt = (task.context or {}).get("system_prompt", "")
+            if "synthesizer" in system_prompt:
+                output = self._synthesize_output
+            else:
+                # Orchestrator plan call: return a valid single-step plan so
+                # the API path exercises multi-step orchestration code while
+                # still dispatching exactly one worker call.
+                output = '[{"description": "do it", "role": "worker", "capabilities": ["tool_use"]}]'
         else:
             output = self._output if self._status == WorkerStatus.SUCCESS else None
         return WorkerResult(
@@ -263,6 +273,17 @@ class _FakeProvider:
             duration_ms=5,
             reason=None if self._status == WorkerStatus.SUCCESS else "simulated failure",
         )
+
+    async def execute_stream(self, task, worker):
+        """Streaming variant used by the orchestrator's synthesize_stream."""
+        self.calls.append((task, worker))
+        system_prompt = (task.context or {}).get("system_prompt", "")
+        if task.role.value == "thinker" and "synthesizer" in system_prompt:
+            words = self._synthesize_output.split()
+            for i, word in enumerate(words):
+                yield word
+                if i < len(words) - 1:
+                    yield " "
 
 
 class LiveDispatchTestCase(unittest.IsolatedAsyncioTestCase):
@@ -301,9 +322,9 @@ class LiveDispatchTestCase(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(resp.status, 200)
             body = await resp.json()
-        self.assertEqual(body["choices"][0]["message"]["content"], "the real answer")
-        # With real orchestration wired, the provider now also answers the
-        # orchestrator plan() call in addition to the worker dispatch call.
+        # With real orchestration wired, the response is the orchestrator's
+        # synthesized answer, not the raw worker output.
+        self.assertEqual(body["choices"][0]["message"]["content"], "synthesized answer")
         worker_calls = [(t, w) for t, w in provider.calls if t.role.value == "worker"]
         self.assertEqual(len(worker_calls), 1)
         task, worker = worker_calls[0]
@@ -324,11 +345,16 @@ class LiveDispatchTestCase(unittest.IsolatedAsyncioTestCase):
                 json={"model": "tasker/chat", "messages": [{"role": "user", "content": long_prompt}]},
             )
             self.assertEqual(resp.status, 200)
-        # The orchestrator plan prompt carries the full task text;
-        # the fake provider returns a fixed step description regardless.
+        # The orchestrator plan prompt carries the full task text. There are
+        # now two thinker calls: one for plan() and one for synthesize().
         thinker_calls = [(t, w) for t, w in provider.calls if t.role.value == "thinker"]
-        self.assertEqual(len(thinker_calls), 1)
-        task, _ = thinker_calls[0]
+        self.assertEqual(len(thinker_calls), 2)
+        plan_calls = [
+            (t, w) for t, w in thinker_calls
+            if "synthesizer" not in (t.context or {}).get("system_prompt", "")
+        ]
+        self.assertEqual(len(plan_calls), 1)
+        task, _ = plan_calls[0]
         self.assertIn(long_prompt, task.instruction)
 
     async def test_live_dispatch_worker_failure_returns_500(self):
@@ -373,12 +399,169 @@ class LiveDispatchTestCase(unittest.IsolatedAsyncioTestCase):
                 json={"model": "tasker/chat", "messages": [{"role": "user", "content": "hi"}]},
             )
             body = await resp.json()
-        self.assertEqual(body["choices"][0]["message"]["content"], "override output")
         # The orchestrator still calls the provider for plan()/synthesize(),
         # but _step_fn overrides the actual step execution so no worker
-        # dispatch call (role=worker) is made.
+        # dispatch call (role=worker) is made. The final content is the
+        # orchestrator's synthesized answer.
+        self.assertEqual(body["choices"][0]["message"]["content"], "synthesized answer")
         worker_calls = [(t, w) for t, w in provider.calls if t.role.value == "worker"]
         self.assertEqual(worker_calls, [])
+
+
+# ------------------------------------------------------------------ #
+# Streaming SSE responses
+# ------------------------------------------------------------------ #
+
+def _parse_sse_lines(raw: bytes) -> list[dict]:
+    """Parse raw SSE bytes into a list of frame dicts {event, data}."""
+    frames: list[dict] = []
+    current: dict = {}
+    for line in raw.decode().splitlines():
+        if line.startswith("event: "):
+            current["event"] = line[len("event: "):]
+        elif line.startswith("data: "):
+            current["data"] = line[len("data: "):]
+        elif line == "" and current:
+            frames.append(current)
+            current = {}
+    if current:
+        frames.append(current)
+    return frames
+
+
+class TestPostCompletionsStreaming(unittest.IsolatedAsyncioTestCase):
+    """SSE binding for /v1/chat/completions (SDD 7.5a)."""
+
+    async def asyncSetUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.registry = WorkerRegistry()
+        self.registry.register(_worker())
+        self.concurrency_mgr = OllamaCloudConcurrencyManager(OllamaPlan.PRO)
+
+    async def asyncTearDown(self):
+        self._tmp.cleanup()
+
+    def _app(self, provider, **_kwargs):
+        store = CheckpointStore(store_dir=Path(self._tmp.name))
+        return create_app(
+            registry=self.registry,
+            store=store,
+            provider_map={ProviderType.OLLAMA: provider},
+            concurrency_mgr=self.concurrency_mgr,
+            **_kwargs,
+        )
+
+    async def test_sse_stream_emits_step_events_and_content_deltas(self):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        provider = _FakeProvider(synthesize_output="synthesized answer")
+        app = self._app(provider)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "tasker/chat",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": True,
+                },
+            )
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(resp.content_type, "text/event-stream")
+            raw = await resp.read()
+
+        frames = _parse_sse_lines(raw)
+
+        # Find custom step events.
+        step_started = [f for f in frames if f.get("event") == "tasker.step.started"]
+        step_completed = [f for f in frames if f.get("event") == "tasker.step.completed"]
+        self.assertEqual(len(step_started), 1)
+        self.assertEqual(len(step_completed), 1)
+        self.assertEqual(json.loads(step_started[0]["data"])["step_index"], 0)
+        self.assertEqual(json.loads(step_completed[0]["data"])["step_index"], 0)
+
+        # Content deltas should carry the streamed synthesis words.
+        content_frames = [
+            f for f in frames
+            if f.get("event") is None and f.get("data", "") not in ("[DONE]", "")
+        ]
+        contents = []
+        for f in content_frames:
+            try:
+                payload = json.loads(f["data"])
+            except json.JSONDecodeError:
+                continue
+            if payload.get("object") == "chat.completion.chunk":
+                delta = payload["choices"][0].get("delta", {})
+                if "content" in delta:
+                    contents.append(delta["content"])
+
+        joined = "".join(contents)
+        # Trailing space from execute_stream yields a final " " delta.
+        self.assertIn("synthesized", joined)
+        self.assertIn("answer", joined)
+
+        # Final protocol-closure frame.
+        final = [f for f in content_frames if json.loads(f["data"]).get("choices")[0].get("finish_reason") == "stop"]
+        self.assertEqual(len(final), 1)
+        self.assertTrue(any(f.get("data") == "[DONE]" for f in frames))
+
+    async def test_sse_stream_returns_pause_on_exhausted_budget(self):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        provider = _FakeProvider(synthesize_output="should not run")
+        app = self._app(provider)
+        # Pre-load the PRO budget to 100% so the very first tick() returns PAUSE.
+        import os
+        old_preload = os.environ.get("TASKER_BUDGET_PRELOAD")
+        os.environ["TASKER_BUDGET_PRELOAD"] = "3000.0"
+        try:
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "tasker/chat",
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "stream": True,
+                    },
+                )
+                self.assertEqual(resp.status, 200)
+                raw = await resp.read()
+        finally:
+            if old_preload is None:
+                os.environ.pop("TASKER_BUDGET_PRELOAD", None)
+            else:
+                os.environ["TASKER_BUDGET_PRELOAD"] = old_preload
+
+        frames = _parse_sse_lines(raw)
+
+        # No step events: the session paused before any step ran.
+        step_events = [f for f in frames if f.get("event", "").startswith("tasker.step.")]
+        self.assertEqual(step_events, [])
+
+        # (1) Human-readable content delta.
+        content_frames = [
+            f for f in frames
+            if f.get("event") is None and f.get("data", "") not in ("[DONE]", "")
+        ]
+        pause_contents = [
+            json.loads(f["data"])["choices"][0]["delta"].get("content", "")
+            for f in content_frames
+            if "delta" in json.loads(f["data"]).get("choices", [{}])[0]
+        ]
+        self.assertTrue(any("paused" in c and "checkpoint" in c for c in pause_contents))
+
+        # (2) Custom tasker.paused event.
+        paused_frames = [f for f in frames if f.get("event") == "tasker.paused"]
+        self.assertEqual(len(paused_frames), 1)
+        paused_data = json.loads(paused_frames[0]["data"])
+        self.assertIn("checkpoint_id", paused_data)
+        self.assertIn("resume_hint", paused_data)
+        self.assertTrue(paused_data["resume_hint"].startswith("tasker resume "))
+
+        # (3) Stream closure with finish_reason=stop and [DONE].
+        final = [f for f in content_frames if json.loads(f["data"]).get("choices")[0].get("finish_reason") == "stop"]
+        self.assertEqual(len(final), 1)
+        self.assertTrue(any(f.get("data") == "[DONE]" for f in frames))
 
 
 # ------------------------------------------------------------------ #

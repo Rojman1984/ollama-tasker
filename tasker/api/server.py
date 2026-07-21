@@ -8,7 +8,7 @@ Endpoints:
   POST /v1/chat/completions
       model field: "tasker/<mode>"  e.g. "tasker/cowork", "tasker/chat"
       tools: standard OpenAI tool definitions
-      stream: bool (non-streaming response returned; streaming flagged as TODO)
+      stream: bool (streaming SSE responses now supported)
 
   GET  /v1/models
       Returns the 5 registered TaskerMode instances as OpenAI model entries.
@@ -39,8 +39,10 @@ See SDD Section 7.5.
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
+from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -49,7 +51,15 @@ from aiohttp import web
 from tasker.modes.base import TaskerMode
 from tasker.modes.chat import CHAT_MODE
 from tasker.modes.code import CODE_MODE
-from tasker.modes.cowork import COWORK_MODE, CoworkRunner
+from tasker.modes.cowork import (
+    COWORK_MODE,
+    CoworkRunner,
+    Done,
+    Paused,
+    StepCompleted,
+    StepStarted,
+    SynthesisDelta,
+)
 from tasker.modes.research import RESEARCH_MODE
 from tasker.modes.secure import SECURE_MODE
 from tasker.orchestrator.factory import build_orchestrator
@@ -61,11 +71,16 @@ from tasker.workers.base import (
     AgentRole,
     Capability,
     ClassifierResult,
+    ComputeLocation,
     ExecutionPlan,
+    ModelUsage,
     OllamaPlan,
     PlanStep,
+    ProviderType,
     StepStatus,
     TaskType,
+    WorkerManifest,
+    WorkerResult,
     WorkerStatus,
     WorkerTask,
 )
@@ -113,6 +128,32 @@ def _openai_completion(model: str, content: str, finish_reason: str = "stop") ->
             }
         ],
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    }
+
+
+def _openai_stream_chunk(
+    model: str,
+    content: str | None = None,
+    finish_reason: str | None = None,
+    chunk_id: str | None = None,
+) -> dict:
+    """Build a single OpenAI-compatible chat.completion.chunk object."""
+    delta: dict = {}
+    if content is not None:
+        delta["role"] = "assistant"
+        delta["content"] = content
+    return {
+        "id": chunk_id or f"chatcmpl-{uuid.uuid4().hex[:12]}",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "delta": delta,
+                "finish_reason": finish_reason,
+            }
+        ],
     }
 
 
@@ -208,6 +249,37 @@ def _make_live_step_fn(mode: TaskerMode, workers: list, provider_map: dict, conc
     return step_fn
 
 
+def _records_to_results(task: str, completed_records: list[dict]) -> list[WorkerResult]:
+    """
+    Convert CoworkRunner's completed step records into WorkerResult objects
+    suitable for orchestrator.synthesize() / synthesize_stream().
+    """
+    return [
+        WorkerResult(
+            task_id=str(uuid.uuid4()),
+            worker_id="api-worker",
+            status=WorkerStatus.SUCCESS,
+            output=record.get("output") or "",
+            tool_results=[],
+            usage=ModelUsage(0, 0, 0.0),
+            duration_ms=0,
+        )
+        for record in completed_records
+    ]
+
+
+def _apply_budget_preload(budget: OllamaSessionBudget) -> None:
+    """Honor TASKER_BUDGET_PRELOAD for test/debug of throttle/pause paths."""
+    preload = os.environ.get("TASKER_BUDGET_PRELOAD")
+    if preload:
+        try:
+            budget.usage_consumed = float(preload)
+            budget.weekly_usage_consumed = float(preload)
+        except ValueError:
+            # Non-numeric value is ignored rather than failing the request.
+            pass
+
+
 # --------------------------------------------------------------------------- #
 # Route handlers
 # --------------------------------------------------------------------------- #
@@ -270,6 +342,7 @@ async def _handle_completions(request: web.Request) -> web.Response:
     store: CheckpointStore     = request.app["store"]
     registry: WorkerRegistry   = request.app["registry"]
     step_fn                    = request.app.get("_step_fn")   # injectable for tests
+    stream_requested           = body.get("stream", False)
 
     mode = _MODES[mode_name]
 
@@ -287,38 +360,16 @@ async def _handle_completions(request: web.Request) -> web.Response:
     # Build a real per-request session stack whenever a live provider_map is
     # wired; otherwise keep the lightweight stub/test path with a synthetic
     # budget so CoworkRunner's tick() still has a manager to call.
-    if provider_map is not None and concurrency_mgr is not None:
-        budget = OllamaSessionBudget(
-            plan=OllamaPlan.PRO,
-            window_start=datetime.now(tz=timezone.utc),
-        )
-        session_mgr = SessionManager(
-            budget=budget,
-            store=store,
-            notifier=LogNotifier("tasker.api"),
-            auto_resume=False,
-        )
-    else:
-        budget = OllamaSessionBudget(
-            plan=OllamaPlan.PRO,
-            window_start=datetime.now(tz=timezone.utc),
-        )
-        session_mgr = SessionManager(
-            budget=budget,
-            store=store,
-            notifier=LogNotifier("tasker.api"),
-            auto_resume=False,
-        )
-
-    # For COWORK mode, use CoworkRunner for proper checkpoint/session lifecycle.
-    # Other modes: run through the same step loop via a minimal CoworkRunner-like
-    # wrapper — this keeps the API layer thin and avoids reimplementing dispatch.
-    runner = CoworkRunner(
-        mode=mode,
-        session_mgr=session_mgr,
+    budget = OllamaSessionBudget(
+        plan=OllamaPlan.PRO,
+        window_start=datetime.now(tz=timezone.utc),
+    )
+    _apply_budget_preload(budget)
+    session_mgr = SessionManager(
+        budget=budget,
         store=store,
-        hardware_profile="api",
-        _step_fn=step_fn,
+        notifier=LogNotifier("tasker.api"),
+        auto_resume=False,
     )
 
     # Real multi-step orchestration when provider_map/concurrency_mgr are wired.
@@ -326,6 +377,7 @@ async def _handle_completions(request: web.Request) -> web.Response:
     # orchestrator from the resolved ExecutionConfig. If no provider map is
     # wired, keep the existing single-step stub so tests without live workers
     # still pass.
+    orchestrator = None
     if provider_map is not None and concurrency_mgr is not None:
         from tasker.runtime.dispatch import _build_config
 
@@ -335,6 +387,34 @@ async def _handle_completions(request: web.Request) -> web.Response:
         _profile_name, config = config_result
         orchestrator = build_orchestrator(config, provider_map)
         registry.apply_provider_availability(provider_map)
+
+    if orchestrator is not None:
+        async def synthesize_fn(task_text: str, records: list[dict]) -> str:
+            return await orchestrator.synthesize(task_text, _records_to_results(task_text, records))
+
+        async def synthesize_stream_fn(task_text: str, records: list[dict]) -> AsyncIterator[str]:
+            async for chunk in orchestrator.synthesize_stream(
+                task_text, _records_to_results(task_text, records)
+            ):
+                yield chunk
+    else:
+        synthesize_fn = None
+        synthesize_stream_fn = None
+
+    # For COWORK mode, use CoworkRunner for proper checkpoint/session lifecycle.
+    # Other modes: run through the same step loop via a minimal CoworkRunner-like
+    # wrapper -- this keeps the API layer thin and avoids reimplementing dispatch.
+    runner = CoworkRunner(
+        mode=mode,
+        session_mgr=session_mgr,
+        store=store,
+        hardware_profile="api",
+        _step_fn=step_fn,
+        _synthesize_fn=synthesize_fn,
+        _synthesize_stream_fn=synthesize_stream_fn,
+    )
+
+    if orchestrator is not None:
         classifier_output = ClassifierResult(
             task_type=TaskType.CONVERSATIONAL,
             complexity_score=0.3,
@@ -349,6 +429,9 @@ async def _handle_completions(request: web.Request) -> web.Response:
     else:
         plan = _stub_plan(task)
 
+    if stream_requested:
+        return await _handle_completions_stream(request, model_field, runner, task, plan)
+
     try:
         result = await runner.run(task, plan)
     except Exception as exc:
@@ -360,6 +443,82 @@ async def _handle_completions(request: web.Request) -> web.Response:
         content = result
 
     return web.json_response(_openai_completion(model_field, content))
+
+
+async def _handle_completions_stream(
+    request: web.Request,
+    model_field: str,
+    runner: CoworkRunner,
+    task: str,
+    plan: ExecutionPlan,
+) -> web.Response:
+    """
+    Drive CoworkRunner.astream() and emit OpenAI-compatible SSE frames plus
+    custom tasker.* events. Implements the pause contract from SDD 7.5a.
+    """
+    chunk_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+
+    async def _event_bytes() -> AsyncIterator[bytes]:
+        paused_checkpoint_id: str | None = None
+        async for event in runner.astream(task, plan):
+            if isinstance(event, StepStarted):
+                frame = {
+                    "event": "tasker.step.started",
+                    "data": {
+                        "step_index": event.step_index,
+                        "description": event.description,
+                    },
+                }
+                yield f"event: {frame['event']}\ndata: {json.dumps(frame['data'])}\n\n".encode()
+
+            elif isinstance(event, StepCompleted):
+                frame = {
+                    "event": "tasker.step.completed",
+                    "data": {
+                        "step_index": event.step_index,
+                        "output": event.output,
+                    },
+                }
+                yield f"event: {frame['event']}\ndata: {json.dumps(frame['data'])}\n\n".encode()
+
+            elif isinstance(event, SynthesisDelta):
+                data = _openai_stream_chunk(model_field, content=event.content, chunk_id=chunk_id)
+                yield f"data: {json.dumps(data)}\n\n".encode()
+
+            elif isinstance(event, Paused):
+                paused_checkpoint_id = event.checkpoint_id
+                # (1) Human-readable content delta.
+                data = _openai_stream_chunk(
+                    model_field,
+                    content=f"[paused -- resume with checkpoint {event.checkpoint_id}]",
+                    chunk_id=chunk_id,
+                )
+                yield f"data: {json.dumps(data)}\n\n".encode()
+                # (2) Custom tasker.paused event with resume hint.
+                paused_frame = {
+                    "event": "tasker.paused",
+                    "data": {
+                        "checkpoint_id": event.checkpoint_id,
+                        "resume_hint": f"tasker resume {event.checkpoint_id}",
+                    },
+                }
+                yield (
+                    f"event: {paused_frame['event']}\n"
+                    f"data: {json.dumps(paused_frame['data'])}\n\n"
+                ).encode()
+
+        # (3) Protocol closure. If we paused, finish_reason is still stop because
+        #     OpenAI's SSE shape has no pause value; the tasker.paused event
+        #     carries the real semantics (SDD 7.5a).
+        final = _openai_stream_chunk(model_field, finish_reason="stop", chunk_id=chunk_id)
+        yield f"data: {json.dumps(final)}\n\n".encode()
+        yield b"data: [DONE]\n\n"
+
+    return web.Response(
+        status=200,
+        content_type="text/event-stream",
+        body=_event_bytes(),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -423,14 +582,13 @@ def main() -> None:
     (TASKER_PROFILE env, default tier1_tasker), OLLAMA_BASE_URL env
     override of the profile's ollama_base_url, a provider_map keyed by
     ProviderType with a shared OllamaSessionBudget + concurrency manager on
-    the OllamaProvider, and a hardware-cache GPU availability cross-check
-    on the worker registry (SDD_ADDENDUM_7.5.md A.3.4) -- skipped if
+    the OllamaProvider, and hardware-cache GPU availability cross-check on
+    the worker registry (SDD_ADDENDUM_7.5.md A.3.4) -- skipped if
     `tasker-hardware detect` has never been run on this machine, same as
     cli/shell.py.
     """
     import argparse
     import logging
-    import os
 
     from tasker.modes.base import ModeConfigurator
     from tasker.session.concurrency import OllamaCloudConcurrencyManager
@@ -463,9 +621,9 @@ def main() -> None:
         print(f"Config error: {exc}")
         raise SystemExit(1)
 
-    # OLLAMA_BASE_URL overrides the profile YAML -- same rule as
-    # cli/shell.py's _build_pipeline (a machine may run Ollama elsewhere,
-    # e.g. Designlab1's WSL server on 127.0.0.1:11435).
+    # OLLAMA_BASE_URL overrides the profile YAML -- the YAML records the
+    # standard port, but a machine may run Ollama elsewhere (Designlab1
+    # serves on 127.0.0.1:11435 via a systemd port.conf drop-in).
     base_url = os.environ.get("OLLAMA_BASE_URL") or profile.ollama_base_url
     budget = OllamaSessionBudget(plan=profile.ollama_plan, window_start=datetime.now(tz=timezone.utc))
     concurrency_mgr = OllamaCloudConcurrencyManager(profile.ollama_plan)

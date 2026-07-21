@@ -155,14 +155,19 @@ Binds `127.0.0.1:8555` by default.
 ### H7.1 Unit + integration tests
 ```bash
 python -m unittest tests.integration.test_api_server -v
+python -m unittest tests.unit.test_cowork_runner_stream -v
+python -m unittest tests.unit.test_provider_ollama.TestOllamaProviderExecuteStream -v
 ```
 Covers: OpenAI-shaped `/v1/models` and `/v1/chat/completions` responses,
 the documented no-worker stub fallback, `allowed_modes` (`--mode`)
 restricting both endpoints, a mocked-provider live-dispatch path (worker
 selection -> `run_tool_loop` -> response, full untruncated prompt reaches
 the worker instruction -- regression test for a truncation bug fixed
-while wiring this), and a worker failure surfacing as HTTP 500 instead of
-crashing the server.
+while wiring this), worker failure surfacing as HTTP 500 instead of
+crashing the server, **and SSE streaming responses with step-level
+`tasker.step.*` events, real token-level synthesis deltas, and the
+`tasker.paused` + `[paused -- resume with checkpoint <id>]` sequence on
+budget exhaustion.**
 
 ### H7.2 Live: start the server, exercise it as a WebUI client would
 ```bash
@@ -189,6 +194,22 @@ assistant answer dispatched through `WorkerSelector` ->
 model, see CLAUDE.md's latency notes). Stop the server with the normal
 signal (`Ctrl-C` interactively, or `kill <pid>` if backgrounded) --
 `web.run_app` shuts down cleanly.
+
+### H7.3 Live: SSE streaming endpoint
+```bash
+# After starting tasker-api as in H7.2:
+curl -N --no-buffer -X POST http://127.0.0.1:8555/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"model": "tasker/cowork", "stream": true, "messages": [{"role": "user", "content": "Plan a small Python project for me."}]}'
+```
+Expect: `event: tasker.step.started` / `event: tasker.step.completed` frames,
+standard OpenAI `chat.completion.chunk` deltas during synthesis, and a final
+`finish_reason: stop` + `data: [DONE]`. If the Ollama Cloud session budget is
+exhausted mid-request, the stream emits a content delta
+`[paused -- resume with checkpoint <id>]`, then `event: tasker.paused`
+with the checkpoint id and resume hint, then closes with `finish_reason: stop`
+(SDD 7.5a).
 
 ## H8. [SUPERSEDED] Rudimentary TUI REPL
 

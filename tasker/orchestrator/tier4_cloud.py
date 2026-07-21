@@ -18,6 +18,7 @@ See SDD Section 5.3.
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
 
 from tasker.orchestrator._parse import (
     PLAN_SYSTEM,
@@ -129,6 +130,28 @@ class CloudOrchestrator(OrchestratorBase):
         prompt = build_synthesize_prompt(original_task, results, self._mode_name)
         raw = await self._call(SYNTHESIZE_SYSTEM, prompt)
         return raw or "(synthesis unavailable)"
+
+    async def synthesize_stream(
+        self,
+        original_task: str,
+        results: list[WorkerResult],
+    ) -> AsyncIterator[str]:
+        """
+        Stream synthesis through the underlying provider if it supports
+        execute_stream. Otherwise fall back to the base sentence-chunking
+        implementation.
+        """
+        if not hasattr(self._provider, "execute_stream"):
+            async for chunk in super().synthesize_stream(original_task, results):
+                yield chunk
+            return
+
+        prompt = build_synthesize_prompt(original_task, results, self._mode_name)
+        full_instruction = f"{SYNTHESIZE_SYSTEM}\n\n{prompt}"
+        task = self._make_task(full_instruction)
+        stream = self._provider.execute_stream(task, self._worker)
+        async for chunk in stream:
+            yield chunk
 
     async def should_retry(
         self,

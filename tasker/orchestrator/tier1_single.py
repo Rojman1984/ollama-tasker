@@ -9,7 +9,7 @@ See SDD Section 5.3.
 """
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 
 from tasker.orchestrator._parse import (
     PLAN_SYSTEM as _PLAN_SYSTEM,
@@ -32,6 +32,7 @@ from tasker.workers.base import (
 )
 
 _ModelCall = Callable[[str, str], Awaitable[str]]   # (system_prompt, user_prompt) -> response
+_ModelCallStream = Callable[[str, str], AsyncIterator[str]]
 
 
 class SingleLLMOrchestrator(OrchestratorBase):
@@ -48,9 +49,11 @@ class SingleLLMOrchestrator(OrchestratorBase):
         model_id: str,
         call_model: _ModelCall,
         mode_name: str | None = None,
+        _call_model_stream: _ModelCallStream | None = None,
     ) -> None:
         self._model_id = model_id
         self._call_model = call_model
+        self._call_model_stream = _call_model_stream
         self._mode_name = mode_name
         self._fallback = NanoOrchestrator()
 
@@ -79,6 +82,20 @@ class SingleLLMOrchestrator(OrchestratorBase):
     ) -> str:
         prompt = build_synthesize_prompt(original_task, results, self._mode_name)
         return await self._call_model(_SYNTHESIZE_SYSTEM, prompt)
+
+    async def synthesize_stream(
+        self,
+        original_task: str,
+        results: list[WorkerResult],
+    ) -> AsyncIterator[str]:
+        """Stream synthesis token deltas when a streaming callable is wired."""
+        if self._call_model_stream is None:
+            async for chunk in super().synthesize_stream(original_task, results):
+                yield chunk
+            return
+        prompt = build_synthesize_prompt(original_task, results, self._mode_name)
+        async for chunk in self._call_model_stream(_SYNTHESIZE_SYSTEM, prompt):
+            yield chunk
 
     async def should_retry(
         self,

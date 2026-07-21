@@ -141,13 +141,14 @@ def _make_post_sequence(responses: list[tuple[int, dict]], captured: list | None
 
 def _provider(post_status=200, post_response=None, get_status=200, get_response=None,
               concurrency_mgr=None, captured_payloads: list | None = None,
-              gpu=None) -> OllamaProvider:
+              gpu=None, _stream_fn=None) -> OllamaProvider:
     return OllamaProvider(
         base_url="http://localhost:11434",
         concurrency_mgr=concurrency_mgr,
         gpu=gpu,
         _post_fn=_make_post(post_status, post_response or _ok_response(), captured_payloads),
         _get_fn=_make_get(get_status, get_response or {"models": []}),
+        _stream_fn=_stream_fn,
     )
 
 
@@ -703,6 +704,116 @@ class TestOllamaProviderNumCtxPayload(unittest.IsolatedAsyncioTestCase):
         m.vram_mb = 2000
         await p.execute(_task(), m)
         self.assertLess(captured[0]["options"]["num_ctx"], 200_000)
+
+
+class TestOllamaProviderExecuteStream(unittest.IsolatedAsyncioTestCase):
+    """
+    Streaming synthesis contract (SDD 7.5a).
+    execute_stream yields message.content deltas and acquires/releases cloud
+    slots like execute().
+    """
+
+    def test_stream_fn_default_is_present(self):
+        p = _provider()
+        self.assertIsNotNone(p._stream_fn)
+
+    async def test_execute_stream_yields_content_deltas(self):
+        async def stream(url: str, payload: dict):
+            yield {"message": {"content": "Hello"}}
+            yield {"message": {"content": " world"}}
+            yield {"message": {"content": "!"}, "done": True}
+
+        p = _provider(_stream_fn=stream)
+        deltas = [chunk async for chunk in p.execute_stream(_task(), _manifest())]
+        self.assertEqual("".join(deltas), "Hello world!")
+
+    async def test_execute_stream_skips_empty_content(self):
+        async def stream(url: str, payload: dict):
+            yield {"message": {}}
+            yield {"message": {"content": "x"}}
+            yield {"done": True}
+
+        p = _provider(_stream_fn=stream)
+        deltas = [chunk async for chunk in p.execute_stream(_task(), _manifest())]
+        self.assertEqual(deltas, ["x"])
+
+    async def test_execute_stream_cloud_acquires_and_releases_slot(self):
+        mgr = OllamaCloudConcurrencyManager(OllamaPlan.PRO)
+
+        async def stream(url: str, payload: dict):
+            yield {"message": {"content": "ok"}, "done": True}
+
+        p = _provider(
+            concurrency_mgr=mgr,
+            _stream_fn=stream,
+        )
+        self.assertEqual(mgr.slots_available, 3)
+        deltas = [chunk async for chunk in p.execute_stream(_task(), _manifest(ComputeLocation.OLLAMA_CLOUD))]
+        self.assertEqual(deltas, ["ok"])
+        self.assertEqual(mgr.slots_available, 3)
+
+    async def test_execute_stream_cloud_deferred_yields_nothing(self):
+        mgr = OllamaCloudConcurrencyManager(OllamaPlan.FREE)  # 1 slot
+
+        async def stream(url: str, payload: dict):
+            yield {"message": {"content": "ok"}, "done": True}
+
+        p = _provider(concurrency_mgr=mgr, _stream_fn=stream)
+        worker = _manifest(ComputeLocation.OLLAMA_CLOUD)
+        # Acquire the single slot first.
+        self.assertTrue(await mgr.try_acquire())
+        deltas = [chunk async for chunk in p.execute_stream(_task(), worker)]
+        self.assertEqual(deltas, [])
+        # Slot still held by the manual acquire; release it for cleanup.
+        await mgr.release()
+
+    async def test_execute_stream_payload_sets_stream_true(self):
+        captured: list = []
+
+        async def stream(url: str, payload: dict):
+            captured.append(payload)
+            yield {"done": True}
+
+        p = _provider(_stream_fn=stream)
+        _ = [chunk async for chunk in p.execute_stream(_task(), _manifest())]
+        self.assertTrue(captured[0]["stream"])
+
+    async def test_execute_stream_local_records_no_budget(self):
+        from datetime import datetime
+        from tasker.session.budget import OllamaSessionBudget
+
+        budget = OllamaSessionBudget(plan=OllamaPlan.PRO, window_start=datetime.now().astimezone())
+
+        async def stream(url: str, payload: dict):
+            yield {"message": {"content": "x"}, "done": True}
+
+        p = OllamaProvider(
+            base_url="http://localhost:11434",
+            budget=budget,
+            _stream_fn=stream,
+            _get_fn=_make_get(200, {"models": []}),
+        )
+        _ = [chunk async for chunk in p.execute_stream(_task(), _manifest(ComputeLocation.LOCAL_HARDWARE))]
+        self.assertEqual(budget.usage_consumed, 0.0)
+
+    async def test_execute_stream_cloud_records_budget(self):
+        from datetime import datetime
+        from tasker.session.budget import OllamaSessionBudget
+
+        budget = OllamaSessionBudget(plan=OllamaPlan.PRO, window_start=datetime.now().astimezone())
+
+        async def stream(url: str, payload: dict):
+            yield {"message": {"content": "x"}, "done": True}
+
+        p = OllamaProvider(
+            base_url="http://localhost:11434",
+            concurrency_mgr=OllamaCloudConcurrencyManager(OllamaPlan.PRO),
+            budget=budget,
+            _stream_fn=stream,
+            _get_fn=_make_get(200, {"models": []}),
+        )
+        _ = [chunk async for chunk in p.execute_stream(_task(), _manifest(ComputeLocation.OLLAMA_CLOUD))]
+        self.assertGreater(budget.usage_consumed, 0.0)
 
 
 if __name__ == "__main__":

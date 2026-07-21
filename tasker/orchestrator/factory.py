@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 
 from tasker.modes.base import ExecutionConfig
 from tasker.orchestrator.base import OrchestratorBase
@@ -57,6 +57,7 @@ from tasker.workers.providers.base import WorkerProviderBase
 logger = logging.getLogger(__name__)
 
 _ModelCall = Callable[[str, str], Awaitable[str]]
+_ModelCallStream = Callable[[str, str], AsyncIterator[str]]
 
 # DEFERRED (no Ollama Cloud concurrency slot) is transient -- worth a
 # short bounded wait before failing the orchestrator step outright,
@@ -161,6 +162,40 @@ def make_call_model(
     return call_model
 
 
+def make_call_model_stream(
+    provider: WorkerProviderBase,
+    manifest: WorkerManifest,
+    privacy_tier: PrivacyTier = PrivacyTier.LOCAL_ONLY,
+    timeout_s: float = 240.0,
+) -> _ModelCallStream | None:
+    """
+    Wrap provider.execute_stream() as a (system_prompt, user_prompt) ->
+    AsyncIterator[str] generator. Returns None if the provider does not
+    implement execute_stream, letting tiers fall back to the base
+    sentence-chunking synthesize_stream() (SDD 7.5a).
+    """
+    if not hasattr(provider, "execute_stream"):
+        return None
+
+    async def call_model_stream(system_prompt: str, user_prompt: str) -> AsyncIterator[str]:
+        task = WorkerTask(
+            task_id=str(uuid.uuid4()),
+            step_index=0,
+            role=AgentRole.THINKER,
+            instruction=user_prompt,
+            tools=[],
+            context={"system_prompt": system_prompt},
+            routing_policy=RoutingPolicy.PRIVATE,
+            privacy_tier=privacy_tier,
+            timeout_s=timeout_s,
+        )
+        # execute_stream returns early (yields nothing) when deferred; we let
+        # the caller fall back to non-streaming execute() if that happens.
+        async for chunk in provider.execute_stream(task, manifest):  # type: ignore[attr-defined]
+            yield chunk
+    return call_model_stream
+
+
 def build_orchestrator(
     config: ExecutionConfig,
     provider_registry: dict[ProviderType, WorkerProviderBase],
@@ -189,17 +224,22 @@ def build_orchestrator(
 
     manifest = _build_orchestrator_manifest(model_id, compute_location)
     call_model = make_call_model(ollama_provider, manifest, privacy_tier)
+    call_model_stream = make_call_model_stream(ollama_provider, manifest, privacy_tier)
 
     # Threaded into every LLM-calling tier so plan()/synthesize() can apply
     # RESEARCH mode's grounding requirement (SDD 5.1a) to their prompts.
     mode_name = config.mode.name
 
     if tier == 1:
-        return SingleLLMOrchestrator(model_id, call_model, mode_name=mode_name)
+        return SingleLLMOrchestrator(
+            model_id, call_model, mode_name=mode_name,
+            _call_model_stream=call_model_stream,
+        )
 
     if tier == 2:
         return DualLLMOrchestrator(
             model_id, model_id, call_model, call_model, mode_name=mode_name,
+            _call_synthesizer_stream=call_model_stream,
         )
 
     if tier >= 4:
@@ -215,10 +255,13 @@ def build_orchestrator(
             )
         logger.warning(
             "build_orchestrator: tier %d requested but the profile's "
-            "orchestrator compute_location is %r -- Tier 4 requires a "
+            "orchestrator_compute_location is %r -- Tier 4 requires a "
             "cloud-routed orchestrator model; degrading to Tier 3 (SDD 10.3).",
             tier, config.profile.orchestrator_compute_location,
         )
 
     # tier == 3, or tier >= 4 degraded above
-    return ReasoningOrchestrator(model_id, call_model, mode_name=mode_name)
+    return ReasoningOrchestrator(
+        model_id, call_model, mode_name=mode_name,
+        _call_model_stream=call_model_stream,
+    )

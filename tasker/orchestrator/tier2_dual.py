@@ -14,7 +14,7 @@ See SDD Section 5.3.
 """
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 
 from tasker.orchestrator._parse import (
     PLAN_SYSTEM,
@@ -37,6 +37,7 @@ from tasker.workers.base import (
 )
 
 _ModelCall = Callable[[str, str], Awaitable[str]]
+_ModelCallStream = Callable[[str, str], AsyncIterator[str]]
 
 
 class DualLLMOrchestrator(OrchestratorBase):
@@ -60,11 +61,13 @@ class DualLLMOrchestrator(OrchestratorBase):
         call_planner: _ModelCall,
         call_synthesizer: _ModelCall,
         mode_name: str | None = None,
+        _call_synthesizer_stream: _ModelCallStream | None = None,
     ) -> None:
         self._planner_id      = planner_model_id
         self._synthesizer_id  = synthesizer_model_id
         self._call_planner    = call_planner
         self._call_synthesizer = call_synthesizer
+        self._call_synthesizer_stream = _call_synthesizer_stream
         self._mode_name        = mode_name
         self._fallback         = NanoOrchestrator()
 
@@ -89,6 +92,20 @@ class DualLLMOrchestrator(OrchestratorBase):
     ) -> str:
         prompt = build_synthesize_prompt(original_task, results, self._mode_name)
         return await self._call_synthesizer(SYNTHESIZE_SYSTEM, prompt)
+
+    async def synthesize_stream(
+        self,
+        original_task: str,
+        results: list[WorkerResult],
+    ) -> AsyncIterator[str]:
+        """Stream synthesis token deltas when a streaming synthesizer is wired."""
+        if self._call_synthesizer_stream is None:
+            async for chunk in super().synthesize_stream(original_task, results):
+                yield chunk
+            return
+        prompt = build_synthesize_prompt(original_task, results, self._mode_name)
+        async for chunk in self._call_synthesizer_stream(SYNTHESIZE_SYSTEM, prompt):
+            yield chunk
 
     async def should_retry(
         self,

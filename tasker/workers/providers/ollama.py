@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 
 from tasker.config.gpu_backends import GPUInfo
 from tasker.session.budget import OllamaSessionBudget
@@ -86,6 +86,7 @@ logger = logging.getLogger(__name__)
 # Callable types for HTTP injection (allows mocking without libraries)
 _PostFn = Callable[[str, dict], Awaitable[tuple[int, dict]]]
 _GetFn = Callable[[str], Awaitable[tuple[int, dict]]]
+_StreamFn = Callable[[str, dict], AsyncIterator[dict]]
 
 
 def _build_messages(task: WorkerTask) -> list[dict]:
@@ -202,6 +203,7 @@ class OllamaProvider(WorkerProviderBase):
         gpu: GPUInfo | None = None,
         _post_fn: _PostFn | None = None,
         _get_fn: _GetFn | None = None,
+        _stream_fn: _StreamFn | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._concurrency = concurrency_mgr
@@ -214,6 +216,7 @@ class OllamaProvider(WorkerProviderBase):
         self._gpu = gpu
         self._post_fn = _post_fn or self._default_post
         self._get_fn = _get_fn or self._default_get
+        self._stream_fn = _stream_fn or self._default_stream
 
     # ------------------------------------------------------------------ #
     # WorkerProviderBase contract
@@ -436,6 +439,105 @@ class OllamaProvider(WorkerProviderBase):
                 await self._concurrency.release()
 
     # ------------------------------------------------------------------ #
+    # Streaming synthesis contract (SDD 7.5a)
+    # ------------------------------------------------------------------ #
+
+    async def execute_stream(
+        self,
+        task: WorkerTask,
+        worker: WorkerManifest,
+    ) -> AsyncIterator[str]:
+        """
+        Streaming variant of execute() used only for synthesis.
+
+        Sends stream: true to Ollama's /api/chat and yields message.content
+        deltas as they arrive. Acquires/releases Ollama Cloud concurrency slots
+        and records session budget usage exactly like execute(). Tools are not
+        handled here; synthesis calls carry tools=[] and are expected to
+        produce plain text.
+        """
+        is_cloud = worker.compute_location == ComputeLocation.OLLAMA_CLOUD
+        acquired = False
+
+        if is_cloud and self._concurrency:
+            acquired = await self._concurrency.try_acquire()
+            if not acquired:
+                # DEFERRED in a generator is hard to signal gracefully; callers
+                # should fall back to non-streaming execute(), which has bounded
+                # retry on DEFERRED.
+                return
+
+        start = time.monotonic()
+        try:
+            messages = _build_messages(task)
+
+            # Synthesis never uses tools; still respect protocol-aware message
+            # construction for future-proofing (tools=[] means no injection).
+            if worker.tool_protocol != ToolProtocol.NATIVE and task.tools:
+                messages = ToolCallNormalizer.inject_tools(
+                    messages, task.tools, worker.tool_protocol
+                )
+
+            payload: dict = {
+                "model": worker.model_id,
+                "messages": messages,
+                "stream": True,
+            }
+
+            override = task.context.get("num_ctx_override")
+            if override:
+                num_ctx, capped = int(override), False
+            else:
+                num_ctx, capped = resolve_num_ctx(worker, self._gpu)
+            if capped:
+                logger.warning(
+                    "OllamaProvider.execute_stream: %s context capped to %d tokens "
+                    "(VRAM estimate) from manifest's %d.",
+                    worker.model_id, num_ctx, worker.context_window,
+                )
+            payload["options"] = {"num_ctx": num_ctx}
+
+            timeout = task.timeout_s or 240.0
+
+            total_input_tok = 0
+            total_output_tok = 0
+            async for data in self._stream_fn(
+                f"{self._base_url}/api/chat",
+                {**payload, "_timeout": timeout},
+            ):
+                msg = data.get("message", {})
+                content: str = msg.get("content") or ""
+                if content:
+                    yield content
+                # Final summary object may arrive with usage stats.
+                if data.get("done"):
+                    total_input_tok = data.get("prompt_eval_count", 0)
+                    total_output_tok = data.get("eval_count", 0)
+
+            if is_cloud and self._budget is not None:
+                elapsed_s = time.monotonic() - start
+                units = compute_usage_units(elapsed_s, worker.ollama_usage_level)
+                self._budget.record_usage(units)
+                logger.info(
+                    "OllamaCloud budget (stream): +%.1f units (%s, %.1fs x level %s) -> "
+                    "%.1f/%.0f session (%.1f%%)",
+                    units, worker.model_id, elapsed_s,
+                    worker.ollama_usage_level or 1,
+                    self._budget.usage_consumed, self._budget.session_limit,
+                    self._budget.usage_pct * 100,
+                )
+
+            # Synthesis streaming does not return a WorkerResult; token counts are
+            # not propagated back up the generator. They could be attached to a
+            # future accounting event if needed.
+            _ = total_input_tok
+            _ = total_output_tok
+
+        finally:
+            if acquired and self._concurrency:
+                await self._concurrency.release()
+
+    # ------------------------------------------------------------------ #
     # Default HTTP (uses aiohttp)
     # ------------------------------------------------------------------ #
 
@@ -457,3 +559,21 @@ class OllamaProvider(WorkerProviderBase):
                 url, timeout=aiohttp.ClientTimeout(total=10)
             ) as resp:
                 return resp.status, await resp.json()
+
+    async def _default_stream(self, url: str, payload: dict) -> AsyncIterator[dict]:
+        import aiohttp
+        timeout_s = payload.pop("_timeout", 240.0)
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                url,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=timeout_s),
+            ) as resp:
+                async for line in resp.content:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        yield json.loads(line)
+                    except json.JSONDecodeError:
+                        logger.warning("OllamaProvider stream: skipped unparsable line: %r", line)
