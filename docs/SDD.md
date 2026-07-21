@@ -1304,6 +1304,84 @@ GET  /v1/workers
   - harness extension: returns worker registry status
 ```
 
+### 7.5a Runner Event Contract
+
+`CoworkRunner` exposes `astream(task, plan)` as its **primary** execution path.
+`run(task, plan)` is reimplemented as a thin collector over `astream()` that
+simply returns the `Done.result` string (or `None` on pause). Existing callers
+that depend on `run()`'s `str | None` return type are unaffected.
+
+`astream()` yields the following typed events:
+
+```python
+@dataclass(frozen=True)
+class StepStarted:
+    step_index: int
+    description: str
+
+@dataclass(frozen=True)
+class StepCompleted:
+    step_index: int
+    output: str
+
+@dataclass(frozen=True)
+class SynthesisDelta:
+    content: str
+
+@dataclass(frozen=True)
+class Paused:
+    checkpoint_id: str
+
+@dataclass(frozen=True)
+class Done:
+    result: str | None
+```
+
+This contract is load-bearing beyond the HTTP API. It is the **single event
+stream** consumed by three surfaces:
+
+1. The SSE binding on `POST /v1/chat/completions` (this section).
+2. The Textual TUI 8.5 `HarnessPanel`.
+3. Any future WebSocket surface.
+
+One contract, three consumers. All consumers observe the same step lifecycle,
+synthesis chunks, and pause events.
+
+**Streaming granularity decision.** The multi-turn tool loop remains
+non-streaming; its real granularity is the step level. Genuine token-level
+streaming is used **only** for the synthesis call, via a streaming variant of
+`OllamaProvider` that sends `stream: true` to Ollama's `/api/chat` and yields
+`message.content` deltas. We never slice a blocking final response into fake
+token-level chunks. If synthesis streaming proves heavier than expected, the
+documented fallback is **sentence-chunking synthesis**: the blocking
+`orchestrator.synthesize()` result is split on sentence boundaries and emitted
+as multiple `SynthesisDelta` events. This fallback is explicitly flagged as an
+approximation in output and documentation — it is never silently presented as
+true token-level streaming.
+
+**Pause contract.** Whenever `SessionManager.tick()` returns `PAUSE` or `HOLD`,
+`astream()` writes a `Checkpoint` and yields `Paused(checkpoint_id)`.
+The SSE binding translates this into a fixed three-part sequence, in order:
+
+1. A human-readable content delta:
+   `"[paused -- resume with checkpoint <id>]"`
+   This keeps naive OpenAI clients from receiving an empty or abruptly closed
+   stream; they see an honest explanation.
+2. A custom SSE event:
+   ```
+   event: tasker.paused
+   data: {"checkpoint_id": "<id>", "resume_hint": "tasker resume <id>"}
+   ```
+   This is the seam for aware clients that want to resume programmatically.
+3. A standard stream-closure chunk with `finish_reason: stop` and then the
+   conventional `data: [DONE]` terminator.
+
+The `finish_reason: stop` in the pause case is **protocol closure**, not a
+literal successful stop. Neither `stop` nor `length` accurately describes a
+session pause. The `tasker.*` event namespace is the recognized extension seam
+on the OpenAI-compatible surface; future harness lifecycle events will use the
+same prefix.
+
 ### 7.6 CLI Shell Interface
 
 ```
