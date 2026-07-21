@@ -2046,3 +2046,28 @@ Core contracts that all other components depend on:
 ---
 
 *This document is a living specification. Update version and date on every revision. All architectural decisions made after this draft must be reflected here before implementation begins.*
+
+---
+
+## Agent-Native Deployment Requirement (Roland, 2026-07-20 — normative)
+
+Ollama Tasker must be fully compatible with agentic deployments: an autonomous
+agent pilot (LLM-driven operator such as a Cowork/Claude Code supervisor, or
+another harness instance) is a PRIMARY operator persona, equal to the human at
+the REPL/TUI. Consequences, binding on all interface work:
+
+1. Full capability parity headless: every operation reachable interactively
+   (mode switch, model pin, policy, context override, budget query, checkpoint,
+   resume, delegate) must be reachable non-interactively via flags, stdin, or
+   the API — no TTY assumptions anywhere.
+2. Machine-parseable output as a first-class mode: a --json / JSON-events flag
+   emitting the same typed event stream as CoworkRunner.astream()
+   (StepStarted/StepCompleted/SynthesisDelta/Paused/Done) over stdout or SSE.
+   Human-formatted text is a rendering of this stream, never the only form.
+3. Deterministic exit codes and structured errors (machine-actionable: error
+   class, retryable flag, checkpoint id when applicable).
+4. Sessions addressable by id: create, resume, inspect from a cold process.
+5. Documentation includes an "agent pilot" quickstart treating an LLM as the
+   operator.
+
+The REPL/TUI is the human skin over the same contract — never a privileged path.
